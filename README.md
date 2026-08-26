@@ -1,6 +1,6 @@
 # @tintinweb/pi-subagents
 
-A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
+A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents, structured tasks, and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Track mutable work with persistent dependency-aware tasks, or hand deterministic orchestration to a JavaScript workflow using `agent()`, `parallel()`, and `pipeline()`.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -13,6 +13,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Features
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
+- **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, and optional subagent cascade. **[Task guide](docs/tasks.md)**
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
@@ -51,6 +52,14 @@ pi -e ./src/index.ts
 
 Requires pi **0.84.0 or newer**: the [`SubagentWorkflow`](#subagentworkflow) tool builds on `constrainedSampling` (pi 0.82.0) and pi-tui's `stripTerminalSequences` (0.84.0). The `peerDependencies` range declares it, so npm flags an older pi at install time.
 
+Task tracking is bundled. If `@tintinweb/pi-tasks` is already installed separately, remove it before loading this package to avoid duplicate task tools, `/tasks` commands, widgets, and lifecycle listeners:
+
+```bash
+pi remove npm:@tintinweb/pi-tasks
+```
+
+Existing `.pi/tasks/`, `.pi/tasks-config.json`, global task config, and `PI_TASKS` overrides remain compatible.
+
 ### Other hosts
 
 This extension is developed and tested against [pi](https://pi.dev).
@@ -71,6 +80,23 @@ Agent({
   run_in_background: true,
 })
 ```
+
+To define a reusable specialist, copy [`examples/agents/code-reviewer.md`](examples/agents/code-reviewer.md) to `.pi/agents/code-reviewer.md`. The project agent is then available as a normal `Agent` type:
+
+```bash
+cp examples/agents/code-reviewer.md .pi/agents/code-reviewer.md
+```
+
+```
+Agent({
+  subagent_type: "code-reviewer",
+  prompt: "Review the changes in src/auth.ts and test/auth.test.ts",
+  description: "Review auth changes",
+  run_in_background: false,
+})
+```
+
+The example is read-only (`read`, `grep`, and `find`) and returns severity-ordered findings with file and line references. See [Custom Agents](#custom-agents) for all frontmatter fields.
 
 Agents run in the background by default: the call returns an ID immediately and notifies you on completion, carrying a preview of the result (use `get_subagent_result` for the full text). Pass `run_in_background: false` to block until the agent finishes and get its full output inline.
 
@@ -397,6 +423,57 @@ A few rules the examples don't make obvious:
 
 The last two rows are separate because zero built-ins is not zero tools: `tools: none` alongside `extensions:` still surfaces every extension tool, so calling it `none` would understate what the agent can do. Note `*` doesn't enumerate extension tools either — an agent with `tools: "*, ext:mcp/search"` advertises `*`.
 
+## Task Management
+
+The extension includes the task system from [`@tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks). It is registered only in the top-level session: child subagent sessions do not get a second task store, task widget, or task orchestration layer.
+
+Use tasks for a mutable work list whose status and dependencies evolve during a conversation. Use [`SubagentWorkflow`](#subagentworkflow) when the orchestration itself should be a deterministic script that loops, pipelines, gates, or replays many agents.
+
+### Task tools
+
+| Tool | Purpose | Principal parameters |
+|------|---------|----------------------|
+| `TaskCreate` | Create a pending task | `subject`, `description`, optional `activeForm`, `agentType`, `metadata` |
+| `TaskList` | List status, owner, and open blockers | none |
+| `TaskGet` | Read full task details and metadata | `taskId` |
+| `TaskUpdate` | Change fields/status and add dependency edges | `taskId`, optional `status`, fields, `addBlocks`, `addBlockedBy` |
+| `TaskExecute` | Launch pending agent-backed tasks | `task_ids`, optional `additional_context`, `model`, `max_turns` |
+| `TaskOutput` | Explicitly inspect or join an agent-backed task | `task_id`, `block` (default `true`), `timeout` (default `30000`, max `600000`) |
+| `TaskStop` | Stop a running agent-backed task | `task_id` |
+
+`TaskUpdate.status` accepts `pending`, `in_progress`, `completed`, or `deleted`; `deleted` permanently removes the task and cleans its dependency edges. `addBlocks` and `addBlockedBy` maintain both sides of an edge. Self-edges, cycles, and missing targets are retained with warnings, matching Claude Code's permissive behavior.
+
+`TaskExecute` requires each task to be pending, have `agentType`, and have every blocker completed. It launches through this extension's existing subagent RPC path, so model scoping, concurrency, lifecycle events, result consumption, and stopping use the same contracts as other top-level agents. With `autoCascade` on, a completion starts newly unblocked dependents and injects completed prerequisite results into their prompts. `TaskOutput` is an explicit join/status action; do not poll a running task.
+
+### Task storage
+
+| `taskScope` | Location | Behavior |
+|-------------|----------|----------|
+| `memory` | none | Lost when the session ends |
+| `session` | `<workspace>/.pi/tasks/tasks-<sessionId>.json` | **Default**; isolated per persisted session |
+| `session-global` | `<agent-dir>/tasks/sessions/<project-key>/tasks-<sessionId>.json` | Per-session state outside the repository |
+| `project` | `<workspace>/.pi/tasks/tasks.json` | Shared by sessions in the project |
+
+`PI_TASKS` overrides the configured scope: `off` selects memory, a short name selects `~/.pi/tasks/<name>.json`, an absolute path selects that file, and a `./`-prefixed path resolves from the workspace. File-backed lists use tokenized lock files, stale-lock recovery, and atomic replacement. The lock is for sessions on one host/PID namespace; do not share the same list file across containers or NFS hosts that cannot observe each other's process IDs. Session files are not written for `pi --no-session`.
+
+Task settings merge global `<agent-dir>/tasks-config.json` defaults with project `<workspace>/.pi/tasks-config.json` overrides. `/tasks → Settings` writes project overrides.
+
+| Setting | Values | Default |
+|---------|--------|---------|
+| `taskScope` | `memory` / `session` / `session-global` / `project` | `session` |
+| `autoCascade` | boolean | `false` |
+| `autoClearCompleted` | `never` / `on_list_complete` / `on_task_complete` | `on_list_complete` |
+| `sortOrder` | `id` / `status` / `active` / `recent` / `oldest` or a sort spec | `id` |
+| `collapseCompleted` | boolean | `false` |
+| `maxVisible` | `5`–`100` | `10` |
+| `showAll` | boolean | `false` |
+| `hiddenAt` | `top` / `bottom` | `bottom` |
+| `glyphs` | validated glyph map | built-in task glyphs |
+
+The task widget renders above the editor separately from the agent widget. Agent-backed task rows show task state and elapsed time; real subagent token/cost activity remains on the Agent widget, FleetView, results, and notifications, avoiding duplicate attribution.
+
+See [Task widget customization](docs/tasks.md) for sort specs, glyph validation, config precedence, examples, and troubleshooting.
+
 ## Tools
 
 ### `Agent`
@@ -483,6 +560,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 | Command | Description |
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
+| `/tasks` | View, create, update, clear, and configure structured tasks |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
@@ -929,6 +1007,7 @@ This is useful for creating agents that inherit extension tools but should not h
 
 ```
 docs/                 # Long-form guides (shipped to npm; README links out to them)
+  tasks.md            # Task widget config, sort specs, glyphs, recipes and troubleshooting
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
@@ -978,6 +1057,19 @@ src/
   context.ts          # Parent conversation context for inherit_context
   settings.ts         # Persistent settings (~/.pi/agent/subagents.json + .pi/subagents.json)
   env.ts              # Environment detection (git, platform)
+
+  tasks/
+    index.ts          # Task tools, /tasks command, lifecycle, reminders and subagent cascade
+    task-store.ts     # CRUD, dependency graph, persistence and file locking
+    tasks-config.ts   # Global defaults + project task settings
+    task-paths.ts     # Workspace and global session storage paths
+    auto-clear.ts     # Turn/run-boundary completed-task cleanup
+    reminder-cadence.ts # Transient task reminder cadence
+    task-sort.ts      # Widget sort presets and data-only sort specs
+    task-glyphs.ts    # Validated configurable task glyphs
+    process-tracker.ts # Reserved process tracking for a future background-process producer
+    ui/task-widget.ts # Persistent task widget
+    ui/settings-menu.ts # /tasks settings panel
 
   workflow/
     meta.ts           # Extract and validate a script's pure-literal `meta` block

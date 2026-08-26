@@ -36,6 +36,8 @@ coverage/
 test/perf/.results/
 .gitnexus
 .pi/subagents.json
+.pi/tasks/tasks-*.json
+.pi/tasks/*.lock
 
 # Pi internal files
 progress.md

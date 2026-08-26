@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Claude Code-style structured task tracking is now bundled with the subagent extension.** The seven `Task*` tools, `/tasks` UI, persistent task widget, dependency graph, storage scopes, reminders, auto-clear, configurable sorting/glyphs, and agent-backed execution/cascade are integrated from `@tintinweb/pi-tasks` v0.9.0. Existing task files and configuration remain compatible; remove a separately installed `@tintinweb/pi-tasks` package before upgrading so the same tools and lifecycle handlers are not loaded twice.
+
 ## [0.19.0] - 2026-08-25
 
 > **⚠️ Breaking — this release requires pi 0.84.0 or newer** (`peerDependencies` moves from `>=0.81.0`). `SubagentWorkflow` needs two host APIs that do not exist below it, and both fail the typecheck rather than degrading quietly — see the `Changed` entry below for which, and why neither was worth reimplementing to hold the old floor. npm flags an older pi at install time.
