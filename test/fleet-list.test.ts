@@ -7,10 +7,10 @@ import { type AgentActivity, getDisplayName } from "../src/ui/agent-widget.js";
 import {
   FleetList,
   type FleetUICtx,
-  type FleetWorkflow,
   formatFleetElapsed,
   formatFleetTokens,
 } from "../src/ui/fleet-list.js";
+import type { FleetWorkflow, FleetWorkflowPhase } from "../src/workflow/fleet.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -68,7 +68,8 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
 function fakeManager(agents: AgentRecord[]): AgentManager {
   return {
     listAgents: () => agents,
-    abort: () => true,
+    getRecord: (id: string) => agents.find(agent => agent.id === id),
+    abort: vi.fn(() => true),
     steer: vi.fn(() => true),
   } as unknown as AgentManager;
 }
@@ -414,6 +415,59 @@ describe("FleetList vs other focused components (#123)", () => {
 });
 
 describe("FleetList rendering", () => {
+  it("shows workflow phases and children as a tree without promoting them to top-level agents", () => {
+    const child = makeRecord({
+      id: "workflow-child",
+      type: "Explore",
+      description: "inspect workflow state",
+      workflowId: "wf_abc123",
+    });
+    const phases: FleetWorkflowPhase[] = [{
+      id: "phase:inspect",
+      title: "Inspect",
+      doneCount: 0,
+      totalCount: 1,
+      agents: [{
+        index: 0,
+        label: "inspect workflow state",
+        state: "running",
+        agentType: "Explore",
+        model: "haiku",
+        recordId: child.id,
+        tokens: 2048,
+        startedAt: child.startedAt,
+      }],
+    }];
+    const h = harness([child, makeRecord({ id: "ordinary", description: "unrelated top-level" })]);
+    h.setWorkflows([makeWorkflow({ doneCount: 0, totalCount: 1, phases })]);
+
+    const collapsed = h.render().map(plain).join("\n");
+    expect(collapsed).toContain("audit-src");
+    expect(collapsed).not.toContain("Inspect");
+    expect(collapsed).not.toContain("inspect workflow state");
+    expect(collapsed).toContain("unrelated top-level");
+    // The workflow child remains hidden from the ordinary top-level roster.
+    expect(collapsed).not.toContain("workflow-child");
+
+    h.press(LEFT); // activate on main
+    h.press(DOWN); // select workflow
+    expect(h.press(RIGHT)?.consume).toBe(true);
+    const expanded = h.render(200).map(plain).join("\n");
+    expect(expanded).toContain("phase  Inspect");
+    expect(expanded).toContain("inspect workflow state");
+    expect(expanded).toContain("Explore");
+    expect(expanded).toContain("haiku");
+    expect(expanded).toContain("unrelated top-level");
+
+    h.press(DOWN); // phase row
+    h.press(DOWN); // workflow child row
+    h.press(ENTER);
+    expect(h.overlayOpened()).toBe(true);
+    h.overlayComponent()!.handleInput("x");
+    h.overlayComponent()!.handleInput("x");
+    expect((h.manager.abort as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
     const h = harness([makeRecord({ description: "Sleep then report 1" })]);
     const lines = h.render(120);

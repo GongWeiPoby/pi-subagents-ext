@@ -6,6 +6,7 @@ import {
   type RunWorkflowOptions,
   runWorkflow,
   WORKFLOW_AGENT_CAP,
+  WORKFLOW_DEFAULT_CONCURRENCY,
   WORKFLOW_ITEM_CAP,
   type WorkflowControl,
   type WorkflowHost,
@@ -70,18 +71,9 @@ describe("the worker source itself", () => {
 });
 
 describe("workflowConcurrency", () => {
-  it("never returns zero on a small machine", () => {
-    // min(16, cpus - 2) alone is 0 here, and a zero-permit semaphore deadlocks
-    // before the first agent instead of failing.
-    expect(workflowConcurrency(1)).toBe(1);
-    expect(workflowConcurrency(2)).toBe(1);
-    expect(workflowConcurrency(3)).toBe(1);
-  });
-
-  it("leaves two cores free and caps at 16", () => {
-    expect(workflowConcurrency(8)).toBe(6);
-    expect(workflowConcurrency(18)).toBe(16);
-    expect(workflowConcurrency(64)).toBe(16);
+  it("uses an explicit default of two", () => {
+    expect(WORKFLOW_DEFAULT_CONCURRENCY).toBe(2);
+    expect(workflowConcurrency()).toBe(2);
   });
 });
 
@@ -307,6 +299,26 @@ describe("pipeline", () => {
 });
 
 describe("semaphore", () => {
+  it("defaults to two concurrent agents while preserving test injection", async () => {
+    let active = 0;
+    let peak = 0;
+    const { host } = stubHost(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await sleep(5);
+      active--;
+      return { ok: true, text: "done" };
+    });
+
+    const result = await run(
+      'return await parallel(new Array(8).fill(0).map((_, i) => () => agent("a" + i)));',
+      { host },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(peak).toBe(2);
+  });
+
   it("never exceeds the configured concurrency under a large fan-out", async () => {
     let active = 0;
     let peak = 0;

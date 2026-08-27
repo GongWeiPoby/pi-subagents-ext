@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import { escapeXml } from "../xml.js";
+import { type FleetWorkflowPhase, workflowFleetPhases } from "./fleet.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
 import { collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
@@ -76,6 +77,8 @@ export interface WorkflowTask {
   totalTokens: number;
   totalToolCalls: number;
   logs: string[];
+  /** Cached execution tree for FleetView; rebuilt only when progress changes. */
+  fleetPhases: FleetWorkflowPhase[];
 
   abortController: AbortController;
   startTime: number;
@@ -83,6 +86,10 @@ export interface WorkflowTask {
   /** Excluded from the elapsed clock the header shows. */
   totalPausedMs: number;
 
+  /** Session that owns this run; detached completion must never cross it. */
+  sessionId?: string;
+  /** Monotonic activation generation, invalidated before every switch. */
+  sessionGeneration: number;
   /** The script's return value, once the run produced one. */
   value?: unknown;
   error?: string;
@@ -99,6 +106,8 @@ export function createWorkflowTask(init: {
   journalPath?: string;
   replay?: readonly WorkflowJournalEntry[];
   resumedFrom?: string;
+  sessionId?: string;
+  sessionGeneration?: number;
 }): WorkflowTask {
   return {
     type: "local_workflow",
@@ -113,6 +122,8 @@ export function createWorkflowTask(init: {
     journalPath: init.journalPath,
     replay: init.replay,
     resumedFrom: init.resumedFrom,
+    sessionId: init.sessionId,
+    sessionGeneration: init.sessionGeneration ?? 0,
     replayedCount: 0,
     workflowProgress: [],
     progressVersion: 0,
@@ -121,6 +132,7 @@ export function createWorkflowTask(init: {
     totalTokens: 0,
     totalToolCalls: 0,
     logs: [],
+    fleetPhases: workflowFleetPhases([], init.meta, true),
     abortController: new AbortController(),
     startTime: init.startTime ?? Date.now(),
     totalPausedMs: 0,
@@ -161,6 +173,11 @@ export function updateWorkflowProgressBatch(
   task.totalTokens = totalTokens;
   task.totalToolCalls = totalToolCalls;
   task.doneCount = done;
+  task.fleetPhases = workflowFleetPhases(
+    task.workflowProgress,
+    task.meta,
+    task.status === "running" || task.status === "paused",
+  );
 }
 
 /**
@@ -206,6 +223,7 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.value = result.value;
   task.error = result.error;
   task.endTime = Date.now();
+  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false);
 }
 
 /**
@@ -218,6 +236,7 @@ export function failWorkflowTask(task: WorkflowTask, error: string): void {
   task.status = "failed";
   task.error = error;
   task.endTime = Date.now();
+  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false);
 }
 
 /** The run's outcome as text, for the notification and the LLM-facing result. */

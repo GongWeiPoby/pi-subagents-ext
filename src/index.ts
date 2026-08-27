@@ -10,6 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -57,17 +58,22 @@ import {
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
-import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
+import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./ui/conversation-viewer.js";
+import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
+import { formatDirectWorkflowApproval, hasNestedWorkflowCall } from "./workflow/approval.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
+import type { FleetWorkflow } from "./workflow/fleet.js";
 import { createWorkflowHost } from "./workflow/host.js";
 import { appendJournal, readJournal, type WorkflowJournalEntry } from "./workflow/journal.js";
 import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/meta.js";
+import { registerWorkflowPlaybookSaveTool } from "./workflow/playbook-save-tool.js";
+import { registerWorkflowPlaybookTools } from "./workflow/playbook-tools.js";
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
@@ -81,6 +87,11 @@ import { escapeXml } from "./xml.js";
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+function workflowAuthorizationDigest(script: string, args: unknown): string {
+  const canonicalArgs = args === undefined ? "undefined" : JSON.stringify(args);
+  return createHash("sha256").update(script).update("\0").update(canonicalArgs).digest("hex");
 }
 
 export function renderRunningAgentStatus(
@@ -753,6 +764,9 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  /** Invalidates detached workflow completions when the active session changes. */
+  let workflowSessionGeneration = 0;
+  let activeWorkflowSessionId: string | undefined;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -790,6 +804,7 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    activeWorkflowSessionId = ctx.sessionManager.getSessionId();
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -848,6 +863,9 @@ export default function (pi: ExtensionAPI) {
     // Last, and only here: CLI flag values are applied by the host AFTER every
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
+    // A ready WorkflowPlan authorizes its exact one-use planRef only. Session
+    // changes must not carry that capability into a different conversation.
+    plannedWorkflowScripts.clear();
     resolveWorkflowCollisions(ctx);
     runWorkflowFlag(ctx);
   });
@@ -1090,7 +1108,16 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
+    workflowSessionGeneration++;
+    activeWorkflowSessionId = undefined;
+    currentCtx = undefined;
+    for (const timer of pendingNudges.values()) clearTimeout(timer);
+    pendingNudges.clear();
     manager.clearCompleted(true);
+    for (const task of workflowTasks.values()) task.abortController.abort();
+    workflowTasks.clear();
+    workflowTaskSessionIds.clear();
+    plannedWorkflowScripts.clear();
     scheduler.stop();
   });
 
@@ -1112,7 +1139,6 @@ export default function (pi: ExtensionAPI) {
     // Before abortAll, and not folded into it: a workflow owns a worker thread
     // as well as its children, and only its own signal terminates that.
     for (const task of workflowTasks.values()) task.abortController.abort();
-    workflowTasks.clear();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -2312,6 +2338,15 @@ Terse command-style prompts produce shallow, generic work.
    * background run.
    */
   const workflowTasks = new Map<string, WorkflowTask>();
+  const workflowTaskSessionIds = new Map<string, string | undefined>();
+  const workflowTaskGenerations = new WeakMap<WorkflowTask, number>();
+
+  function isCurrentWorkflowTask(task: WorkflowTask): boolean {
+    return workflowTasks.get(task.id) === task
+      && workflowTaskSessionIds.get(task.id) === task.sessionId
+      && workflowTaskGenerations.get(task) === workflowSessionGeneration
+      && (activeWorkflowSessionId === undefined || task.sessionId === activeWorkflowSessionId);
+  }
 
   /**
    * Workflow runs as the fleet list wants them.
@@ -2334,6 +2369,7 @@ Terse command-style prompts produce shallow, generic work.
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,
+      phases: task.fleetPhases,
     }));
   }
 
@@ -2380,10 +2416,12 @@ Terse command-style prompts produce shallow, generic work.
    * triggers a turn, rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
+    if (!isCurrentWorkflowTask(task)) return;
     widget.update();
     fleet.update();
     const result = workflowResultText(task);
     scheduleNudge(task.id, () => {
+      if (!isCurrentWorkflowTask(task)) return;
       pi.sendMessage<NotificationDetails>({
         customType: "subagent-notification",
         content: formatWorkflowNotification(task),
@@ -2404,6 +2442,19 @@ Terse command-style prompts produce shallow, generic work.
     });
   }
 
+  const plannedWorkflowScripts = new Map<string, { digest: string; script: string }>();
+  const authorizePlannedWorkflowScript = (script: string): string => {
+    const digest = workflowAuthorizationDigest(script, undefined);
+    const reference = `wfp_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    plannedWorkflowScripts.set(reference, { digest, script });
+    while (plannedWorkflowScripts.size > 128) {
+      const oldest = plannedWorkflowScripts.keys().next().value;
+      if (oldest === undefined) break;
+      plannedWorkflowScripts.delete(oldest);
+    }
+    return reference;
+  };
+
   // Defined unconditionally, registered only when the feature is on — the same
   // shape the Agent tool uses. Keeping the definition out of the `if` means the
   // switch changes exactly one thing: whether pi is ever told about the tool.
@@ -2418,6 +2469,13 @@ Terse command-style prompts produce shallow, generic work.
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
     parameters: Type.Object({
+      planRef: Type.Optional(
+        Type.String({
+          pattern: "^wfp_[a-f0-9]{24}$",
+          description:
+            "Opaque one-use execution reference returned by an approved WorkflowPlan. Use it exactly as returned and do not combine it with script, scriptPath, name, args, or resumeFromRunId.",
+        }),
+      ),
       script: Type.Optional(
         Type.String({
           maxLength: 524288,
@@ -2427,13 +2485,13 @@ Terse command-style prompts produce shallow, generic work.
       scriptPath: Type.Optional(
         Type.String({
           description:
-            "Path to a workflow script file, absolute or relative to the project. Takes precedence over `script` — this is how you re-run an edited workflow.",
+            "Path to a workflow script file, absolute or relative to the project. Mutually exclusive with `script` and `name`; use this to re-run an edited workflow.",
         }),
       ),
       name: Type.Optional(
         Type.String({
           description:
-            "Name of a saved workflow — `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Lowest precedence: `scriptPath` and `script` both win over it.",
+            "Name of a saved workflow — `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Mutually exclusive with `script` and `scriptPath`.",
         }),
       ),
       args: Type.Optional(
@@ -2494,17 +2552,41 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      const suppliedSources = [params.script, params.scriptPath, params.name].filter((value) => value !== undefined);
+      if (suppliedSources.length > 1) {
+        return textResult("Provide only one workflow source: `script`, `scriptPath`, or `name`.");
+      }
+      if (params.planRef !== undefined && (suppliedSources.length > 0 || params.args !== undefined || params.resumeFromRunId !== undefined)) {
+        return textResult("`planRef` cannot be combined with script, scriptPath, name, args, or resumeFromRunId.");
+      }
+      const plannedEntry = params.planRef !== undefined
+        ? plannedWorkflowScripts.get(params.planRef)
+        : undefined;
+      const plannedScript = plannedEntry?.script;
+      if (params.planRef !== undefined) {
+        plannedWorkflowScripts.delete(params.planRef);
+        if (plannedEntry === undefined) {
+          return textResult("Workflow plan reference is unknown, expired, or already consumed.");
+        }
+      }
+
       const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
       if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
+      if (resumeFrom?.ok === true
+        && workflowTaskSessionIds.get(resumeFrom.runId) !== ctx.sessionManager.getSessionId()) {
+        return textResult(`Workflow "${resumeFrom.runId}" belongs to a different session and cannot be resumed here.`);
+      }
 
       // A resume with no source of its own re-runs what that run ran. The
       // common case is an edited script, but "run that again, cheaply" should
       // not require repeating a path the run already knows.
       const resolved = resolveWorkflowScript(
-        params.script === undefined && params.scriptPath === undefined && params.name === undefined
-          && resumeFrom !== undefined
-          ? { scriptPath: resumeFrom.scriptPath }
-          : params,
+        plannedScript !== undefined
+          ? { script: plannedScript }
+          : params.script === undefined && params.scriptPath === undefined && params.name === undefined
+            && resumeFrom !== undefined
+            ? { scriptPath: resumeFrom.scriptPath }
+            : params,
         ctx.cwd,
       );
       if (!resolved.ok) return textResult(resolved.message);
@@ -2517,6 +2599,39 @@ Terse command-style prompts produce shallow, generic work.
         meta = extractMeta(resolved.script).meta;
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err));
+      }
+
+      const planned = params.planRef !== undefined && plannedEntry !== undefined;
+      if (planned && workflowAuthorizationDigest(resolved.script, undefined) !== plannedEntry.digest) {
+        return textResult("Workflow plan reference does not match its retained execution script.");
+      }
+      const selectedDirectSource = params.name !== undefined
+        ? { kind: "name" as const, label: `saved workflow: ${params.name}` }
+        : params.scriptPath !== undefined
+          ? { kind: "path" as const, label: `script path: ${resolved.scriptPath ?? params.scriptPath}` }
+          : params.script !== undefined
+            ? { kind: "inline" as const, label: "inline script" }
+            : { kind: "path" as const, label: `resumed script path: ${resolved.scriptPath ?? resumeFrom?.scriptPath ?? "unknown"}` };
+      const nestedWorkflowCall = hasNestedWorkflowCall(resolved.script);
+      if (!planned && selectedDirectSource.kind !== "name" && nestedWorkflowCall) {
+        return textResult(
+          "Direct inline/path scripts with nested workflow behavior cannot be approved from a top-level preview. Use a saved named workflow for trusted composition, or validate the orchestration through WorkflowPlan.",
+        );
+      }
+      if (!planned && ctx.hasUI) {
+        const approvalText = formatDirectWorkflowApproval({
+          args: params.args,
+          meta,
+          script: resolved.script,
+          source: selectedDirectSource.label,
+        });
+        if (approvalText.length > 48_000) {
+          return textResult(
+            "Workflow behavior summary exceeds 48000 characters. Validate it through WorkflowPlan or split the workflow before running it.",
+          );
+        }
+        const approved = await ctx.ui.confirm("Run workflow?", approvalText);
+        if (!approved) return textResult("Workflow was not approved. No run was started.");
       }
 
       const runId = workflowRunId();
@@ -2546,10 +2661,14 @@ Terse command-style prompts produce shallow, generic work.
         args: params.args,
         meta,
         toolCallId,
+        sessionId: ctx.sessionManager.getSessionId(),
+        sessionGeneration: workflowSessionGeneration,
         ...(journalPath !== undefined ? { journalPath } : {}),
         ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
       });
       workflowTasks.set(runId, task);
+      workflowTaskSessionIds.set(runId, ctx.sessionManager.getSessionId());
+      workflowTaskGenerations.set(task, workflowSessionGeneration);
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
       // surfaces — nothing else would register the widget for a run whose
@@ -2581,7 +2700,14 @@ Terse command-style prompts produce shallow, generic work.
     },
   });
 
-  if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
+  if (isWorkflowsEnabled()) {
+    pi.registerTool(workflowTool);
+    registerWorkflowPlaybookTools(pi, {
+      authorizeScript: authorizePlannedWorkflowScript,
+      worktreeAllowed: isWorktreeIsolationEnabled(),
+    });
+    registerWorkflowPlaybookSaveTool(pi);
+  }
 
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.
@@ -2629,6 +2755,17 @@ Terse command-style prompts produce shallow, generic work.
       if (verdict.kind === "none") return;
       if (verdict.kind === "report") {
         warn(verdict.message);
+        if (verdict.withdrawCompanions) {
+          const companionNames = new Set<string>([
+            SUBAGENT_TOOL_NAMES.PLAYBOOK,
+            SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
+            SUBAGENT_TOOL_NAMES.PLAN,
+          ]);
+          const active = pi.getActiveTools();
+          if (active.some(name => companionNames.has(name))) {
+            pi.setActiveTools(active.filter(name => !companionNames.has(name)));
+          }
+        }
         return;
       }
 
@@ -2637,10 +2774,15 @@ Terse command-style prompts produce shallow, generic work.
       fleet.update();
       warn(verdict.message);
 
-      if (!verdict.withdraw) return;
       const active = pi.getActiveTools();
-      if (active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
-        pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
+      const workflowToolNames = new Set<string>([
+        SUBAGENT_TOOL_NAMES.PLAYBOOK,
+        SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
+        SUBAGENT_TOOL_NAMES.PLAN,
+      ]);
+      if (verdict.withdraw) workflowToolNames.add(SUBAGENT_TOOL_NAMES.WORKFLOW);
+      if (active.some(name => workflowToolNames.has(name))) {
+        pi.setActiveTools(active.filter(name => !workflowToolNames.has(name)));
       }
     } catch {
       // getAllTools/setActiveTools are unavailable in some hosts (print mode,
@@ -2706,8 +2848,17 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    const task = createWorkflowTask({ id: workflowRunId(), script, scriptPath: path, meta });
+    const task = createWorkflowTask({
+      id: workflowRunId(),
+      script,
+      scriptPath: path,
+      meta,
+      sessionId: ctx.sessionManager.getSessionId(),
+      sessionGeneration: workflowSessionGeneration,
+    });
     workflowTasks.set(task.id, task);
+    workflowTaskSessionIds.set(task.id, task.sessionId);
+    workflowTaskGenerations.set(task, workflowSessionGeneration);
     widget.update();
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");
@@ -2715,6 +2866,7 @@ Terse command-style prompts produce shallow, generic work.
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
     void runWorkflowTask(ctx, task).then(() => {
+      if (!isCurrentWorkflowTask(task)) return;
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout), and the outcome is handed to the model as context
       // for its next turn rather than forcing one.
@@ -3058,23 +3210,35 @@ Terse command-style prompts produce shallow, generic work.
     await showRunningAgents(ctx);
   }
 
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
+  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord, controlled = true) {
     if (!record.session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
 
-    const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
     const session = record.session;
     const activity = agentActivity.get(record.id);
 
     await ctx.ui.custom<undefined>(
       (tui, theme, keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
-          if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
-          }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx));
+        return new ConversationViewer(
+          tui,
+          session,
+          record,
+          activity,
+          theme,
+          done,
+          controlled ? () => {
+            if (manager.abort(record.id)) {
+              ctx.ui.notify(`Stopped "${record.description}".`, "info");
+            }
+          } : undefined,
+          keybindings,
+          controlled ? (message: string) => manager.steer(record.id, message) : undefined,
+          showCost,
+          getViewerMarkdown,
+          (mode) => chooseViewerMarkdown(mode, ctx),
+        );
       },
       {
         overlay: true,
@@ -3980,7 +4144,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const workflowMenuDeps: WorkflowMenuDeps = {
     tasks: workflowTasks,
     getRecord: id => manager.getRecord(id),
-    viewAgentConversation,
+    viewAgentConversation: (ctx, record) => viewAgentConversation(ctx, record, false),
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,

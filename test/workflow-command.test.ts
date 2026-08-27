@@ -144,7 +144,17 @@ describe("/agents → Workflows", () => {
     /** Boot, then start `count` workflows so the session has tasks to inspect. */
     async function withRuns(count: number) {
       const booted = bootCommand();
-      const runCtx = ctx({ cwd: hermetic.dir });
+      const baseCtx = ctx({ cwd: hermetic.dir });
+      const runCtx = {
+        ...baseCtx,
+        sessionManager: {
+          ...baseCtx.sessionManager,
+          getBranch: vi.fn(() => [{
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "run this workflow" }] },
+          }]),
+        },
+      };
       for (let i = 0; i < count; i++) {
         await booted.tools.get("SubagentWorkflow").execute(`tc-${i}`, { script: script(`wf-${i}`) }, undefined, undefined, runCtx);
       }

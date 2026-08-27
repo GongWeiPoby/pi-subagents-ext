@@ -1,6 +1,6 @@
 # @tintinweb/pi-subagents
 
-A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents, structured tasks, and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Track mutable work with persistent dependency-aware tasks, or hand deterministic orchestration to a JavaScript workflow using `agent()`, `parallel()`, and `pipeline()`.
+A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents, structured tasks, adaptive Markdown Playbooks, and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions, track mutable work with persistent dependency-aware tasks, and let the main model adapt reusable `WORKFLOW.md` guidance into a validated per-run plan. Plans compile to temporary JavaScript for the existing deterministic `SubagentWorkflow` runtime; JavaScript is not the reusable Playbook source.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -14,9 +14,11 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, and optional subagent cascade. **[Task guide](docs/tasks.md)**
+- **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator prompts with YAML metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` discovers guidance; `WorkflowPlan` validates an AI-selected DAG, presents a human-readable behavior summary for approval, returns a one-use opaque `planRef`, and keeps generated execution JavaScript internal; `WorkflowPlaybookSave` promotes a generalized result to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
+- **Workflow execution trees** — each workflow is a controller node in FleetView with expandable phase and child-agent rows. Child agents use the same conversation viewer as ordinary agents, while pause/skip/retry/stop remain workflow-owned.
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
-- **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
+- **FleetView** — Claude Code-style navigable list of `main`, workflow controllers, workflow phases/children, and ordinary subagents rendered below the editor. Workflows start collapsed; `→` expands a workflow into its phase and child-agent tree, `←` collapses it, `Enter` opens the workflow controller or the selected child conversation. Workflow children reuse the ordinary conversation viewer but remain owned by the workflow for stop/skip/retry, notifications, mentions, and concurrency. Finished entries linger briefly. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too. Assistant text renders as Markdown; `m` cycles that between off, assistant-only and everything (see [Viewer markdown](#persistent-settings))
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
@@ -100,6 +102,26 @@ The example is read-only (`read`, `grep`, and `find`) and returns severity-order
 
 Agents run in the background by default: the call returns an ID immediately and notifies you on completion, carrying a preview of the result (use `get_subagent_result` for the full text). Pass `run_in_background: false` to block until the agent finishes and get its full output inline.
 
+### Adaptive Playbooks
+
+Copy the shipped adaptive code-review Playbook into a project:
+
+```bash
+mkdir -p .pi/workflows/code-review
+cp -R examples/playbooks/code-review/. .pi/workflows/code-review/
+```
+
+For a substantive review request, the Planner can:
+
+1. Call `WorkflowPlaybook` to discover and read `code-review` guidance.
+2. Select only the reviewers and verification nodes warranted by the actual change.
+3. Call `WorkflowPlan` to validate dependencies, confidence, omissions, and approval state.
+4. Pass the one-use `planRef` returned by `WorkflowPlan` to `SubagentWorkflow`; the generated JavaScript stays internal to the session.
+
+`WORKFLOW.md` remains the maintained source. The generated JavaScript belongs only to the run and is never saved into the reusable Playbook directory. When a successful shape is worth reusing, ask the model to promote it: `WorkflowPlaybookSave` first generalizes task-specific literals into documented inputs, shows the project/global destination, invocation example, and complete proposed files, then writes only after direct confirmation. Updating an existing Playbook requires the revision returned by `WorkflowPlaybook read`.
+
+`WorkflowPlaybook`, `WorkflowPlaybookSave`, and `WorkflowPlan` are registered with `SubagentWorkflow` whenever workflows are enabled. Set `workflowsEnabled: false` to remove all four tool contracts from the model context; regression tests bound the planning/promotion tool schemas and guidelines.
+
 ### Scheduling
 
 Add a `schedule` field to register the agent to fire later instead of running now:
@@ -165,7 +187,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-Running [workflows](#subagentworkflow) appear as a single `workflow` row above the agents, carrying their agent counts in place of a description. `Enter` on one opens the same two-pane inspector `/agents → Workflows` does, rather than a conversation overlay. A run's own agents are *not* listed separately — they belong to the run, which reports for them, so they are filtered out of the fleet list, the above-editor widget, the `/agents` menus and `@handle` resolution exactly as nested children are. They are also outside the `maxConcurrent` pool: the run has its own concurrency cap, and routing a fan-out through the session pool as well would let one workflow starve everything else. The agents are ordered earliest-launched first, and only agents you can actually open are shown (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. The selected row renders in the theme's primary text color rather than the muted/dim treatment of the others; an agent with a configured `color` shows its badge there too, bolded. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+Running [workflows](#subagentworkflow) appear as controller rows above ordinary agents. A workflow starts collapsed; press `→` to expand it into phase rows and child-agent rows, or `←` to collapse it. `Enter` on the workflow opens the two-pane inspector `/agents → Workflows`; `Enter` on a child opens the same live conversation viewer as an ordinary subagent. The children remain owned by the workflow, so workflow pause/skip/retry/stop controls are not bypassed by opening a child. They remain filtered from the standalone widget, `/agents` menus, completion notifications and `@handle` resolution, and stay outside the session concurrency pools. Queued or replayed children without a live record remain visible in the tree but cannot open a conversation. Large fan-outs are windowed so they do not displace the rest of the fleet. At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Esc` (or `↑` above `main`) returns to the prompt. Typing anything at a non-empty prompt behaves normally. Disable it entirely via `/agents → Settings → Fleet view`.
 
 ### Agent mentions
 
@@ -205,7 +227,7 @@ The cost is a visible turn — the model's reasoning and its tool block, narrati
             ▸ Cyan Agent   favorite color        ← widget, fleet row, handle
 ```
 
-It is a literal clone — the session's own entries and the same system prompt, not [`inherit_context`](#agent-frontmatter)'s text rendering of them — taken from memory and compaction-aware, so what the copy reads is what the main model is working from. The clone gets one tool and one job; it cannot read, write or run anything, because an invisible turn with the full toolset could do invisible work. The agent it starts is attributed to the *real* session, so its transcript and `rootSessionId` land where they would have anyway, and it carries no `tool-use-id` — the main conversation never issued one.
+It is a literal clone — the session's own entries and the same system prompt, not [`inherit_context`](#frontmatter-fields)'s text rendering of them — taken from memory and compaction-aware, so what the copy reads is what the main model is working from. The clone gets one tool and one job; it cannot read, write or run anything, because an invisible turn with the full toolset could do invisible work. The agent it starts is attributed to the *real* session, so its transcript and `rootSessionId` land where they would have anyway, and it carries no `tool-use-id` — the main conversation never issued one.
 
 | Mode | `@plan sketch the migration`, with no Plan agent running |
 |------|----------------------------------------------------------|
@@ -324,7 +346,7 @@ All fields are optional — sensible defaults for everything.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `description` | filename | Agent description shown in tool listings |
+| `description` | `name` (the type) | Agent description shown in tool listings |
 | `name` | filename | **The agent's type** — what `subagent_type` and `@handle` address. Claude Code's rule: the filename doesn't have to match, so `blubb.md` with `name: code-review` dispatches as `code-review`. Omit it and the filename is used. Any value works except one containing `:`, which Claude Code reserves for plugin-scoped identifiers — such a file is skipped with a warning. Two files may declare the same name; the later load wins, as a filename clash always did |
 | `display_name` | the type | Label shown in the UI (widget, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
 | `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
@@ -470,7 +492,7 @@ Task settings merge global `<agent-dir>/tasks-config.json` defaults with project
 | `hiddenAt` | `top` / `bottom` | `bottom` |
 | `glyphs` | validated glyph map | built-in task glyphs |
 
-The task widget renders above the editor separately from the agent widget. Agent-backed task rows show task state and elapsed time; real subagent token/cost activity remains on the Agent widget, FleetView, results, and notifications, avoiding duplicate attribution.
+The task widget and agent widget render as one stacked execution area above the editor: tasks show mutable task state and dependencies, while the Agents section shows live model activity, workflow controllers, phases and child agents. Agent-backed task rows do not duplicate subagent token/cost accounting; those figures remain on the Agents widget, FleetView, results and notifications.
 
 See [Task widget customization](docs/tasks.md) for sort specs, glyph validation, config precedence, examples, and troubleshooting.
 
@@ -494,6 +516,57 @@ Launch a sub-agent.
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
+| `schedule` | string | no | Fire later instead of now: 6-field cron (`"0 0 9 * * 1"`), interval (`"5m"`, `"1h"`), or one-shot (`"+10m"` or ISO timestamp). Forces `run_in_background`; incompatible with `inherit_context` and `resume`. Omitted from the schema entirely when scheduling is disabled |
+
+### `WorkflowPlaybook`
+
+Discover and read reusable adaptive Markdown Playbooks. Reading a Playbook returns coordinator guidance and prompt resources; it never launches agents.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | `list` / `read` | yes | Discover the catalogue or read one Playbook |
+| `name` | string | for `read` | Playbook name |
+| `query` | string | no | Case-insensitive catalogue filter |
+| `source` | `project` / `workspace` / `global` | no | Exact source for `read`; omit for normal precedence |
+
+Discovery precedence is project `.pi/workflows/<name>/WORKFLOW.md`, workspace `.agents/workflows/<name>/WORKFLOW.md`, then global `<agentDir>/workflows/<name>/WORKFLOW.md`. Legacy `<name>.js` workflows remain a separate catalogue.
+
+### `WorkflowPlaybookSave`
+
+Promote a generalized adaptive workflow to a reusable Markdown Playbook. The tool previews the exact destination and every proposed file, then calls the user confirmation UI directly. It never saves generated JavaScript and fails closed without an approval UI.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Path-safe Playbook name |
+| `scope` | `project` / `global` | yes | `.pi/workflows/<name>/` or `<agentDir>/workflows/<name>/` |
+| `description` | string | yes | Discovery summary |
+| `body` | Markdown string | yes | Generalized coordinator guidance |
+| `example` | string | yes | Reusable natural-language invocation example |
+| `domains` | string[] | no | Searchable domains |
+| `approval` | `adaptive` / `required` / `none` | no | Advisory planning metadata; it never changes mandatory `WorkflowPlan` confirmation |
+| `sideEffects` | string | no | Human-readable impact classification |
+| `inputs` | object | no | Generalized input documentation |
+| `prompts` | object | no | Name-to-Markdown map written as `prompts/<name>.md` |
+| `overwrite` | boolean | no | Replace an existing Playbook atomically |
+| `expectedRevision` | SHA-256 string | with overwrite | Revision from the latest `WorkflowPlaybook read` |
+
+Project saves require a trusted project. Existing names and stale revisions are rejected before confirmation. Read with `source: "project"` or `source: "global"` before overwriting a shadowed name. An owner-only per-target lock under the agent directory, temporary-directory read-back, whole-directory replacement, reader fallback to the last validated backup, and interrupted-write recovery prevent concurrent or partial updates.
+
+### `WorkflowPlan`
+
+Validate an adaptive structured DAG and compile temporary JavaScript for `SubagentWorkflow`. The plan records objective, inferred personas, confidence/evidence, selected nodes, dependencies, material omissions, side effects, and approvals.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objective` | string | yes | Outcome this run must achieve |
+| `playbook` | string | no | Playbook that informed the plan |
+| `personas` | object[] | no | Inferred user contexts/roles |
+| `confidence` | number `0..1` | no | Planner interpretation confidence |
+| `evidence` | string[] | no | Facts supporting the interpretation |
+| `nodes` | object[] | yes | Work nodes with prompts, agents, options, and dependencies |
+| `omitted` | object[] | no | Material capabilities omitted with reasons |
+
+The tool rejects duplicate/unsafe IDs, unknown/self dependencies, cycles, invalid confidence, excessive prompt volume, unsupported options, and worktree nodes when project isolation is disabled. Every adaptive Plan is shown for direct confirmation before compilation because selected agents may have broad tools; model-supplied approval/effect metadata is descriptive, not the authorization boundary. The approval view is a behavior summary rather than generated JavaScript, and still includes each node's task prompt, model, effort, dependencies, isolation, gate, side effects, and structured-output requirement. Without a UI or approval, no script is produced. A ready result contains an inspectable YAML summary and a one-use opaque `planRef`; pass that reference to `SubagentWorkflow` rather than copying generated source.
 
 ### `SubagentWorkflow`
 
@@ -501,14 +574,19 @@ Run a deterministic script that orchestrates many subagents. Returns a task id i
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `planRef` | string | no | One-use opaque reference from an approved `WorkflowPlan`; cannot be combined with `script`, `scriptPath`, `name`, `args`, or `resumeFromRunId` |
 | `script` | string | no | The workflow source. Must begin with `export const meta = { name, description }` |
-| `scriptPath` | string | no | Path to a script file. Takes precedence over `script` and `name` |
-| `name` | string | no | A saved workflow — `<name>.js` in `.pi/workflows/`, `.agents/workflows/` or `<agent dir>/workflows/`, carrying an `export const meta` declaration |
+| `scriptPath` | string | no | Path to a script file; mutually exclusive with `script` and `name` |
+| `name` | string | no | A saved workflow — `<name>.js` in `.pi/workflows/`, `.agents/workflows/` or `<agent dir>/workflows/`, carrying an `export const meta` declaration; mutually exclusive with `script` and `scriptPath` |
 | `args` | any | no | Passed through to the script as the `args` global, verbatim |
 | `resumeFromRunId` | string | no | Replay an earlier run in this session — its unchanged leading `agent()` calls return their recorded results instead of spawning |
 | `title` / `description` | string | no | Accepted and ignored, as in Claude Code — a workflow is named by its `meta` block |
 
-At least one of `script` / `scriptPath` / `name` is required; `scriptPath` wins over `script`, which wins over `name`. Each invocation's script is persisted to the session directory and its path returned, so iterating means editing that file and re-running rather than resending the source. A saved workflow reports its own file instead, so the same loop works on it — project `.pi/workflows/` shadows a same-named global one. Those directories are ordinary folders that may hold other scripts, so only files carrying the `export const meta = { name, description }` declaration are listed or resolved; naming anything else reports that it is not a workflow rather than running it. The check is a regex over the source — nothing in the file is executed to make it, and even a real parse evaluates only the `meta` object literal, in an empty `node:vm` context with a 100ms bound.
+Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. `planRef` is the one-use exact Plan handoff and cannot be combined with a direct source, `args`, or `resumeFromRunId`. A valid `planRef` executes directly because it is one-use and bound to the internally retained script-and-arguments digest.
+
+Every non-`planRef` invocation uses the direct policy. When `ctx.hasUI` is true, the tool always previews the selected source's behavior summary and arguments for confirmation, including exact resumes; it never infers authorization from user prose, workflow names, or risk keywords. When `ctx.hasUI` is false, direct invocations and resumes proceed without a UI prompt because the automation caller is the trust boundary. Direct inline/path scripts that reference the injected `workflow` binding are refused because nested behavior cannot be approved from the parent summary; detection uses the Babel AST, covers optional/indirect/aliased references, and fails closed on parse errors. Saved named workflows may compose nested workflows but remain UI-confirmed or headless-allowed.
+
+The explicit `--subagents-workflow-file=` CLI startup path remains available for automation. Each invocation's script is persisted to the session directory and its path returned, so iterating means editing that file and re-running rather than resending the source. A saved workflow reports its own file instead, so the same loop works on it — project `.pi/workflows/` shadows a same-named global one. Those directories are ordinary folders that may hold other scripts, so only files carrying the `export const meta = { name, description }` declaration are listed or resolved; naming anything else reports that it is not a workflow rather than running it. The check is a regex over the source — nothing in the file is executed to make it, and even a real parse evaluates only the `meta` object literal, in an empty `node:vm` context with a 100ms bound.
 
 ```js
 export const meta = {
@@ -530,7 +608,7 @@ return await pipeline(
 )
 ```
 
-Concurrency is capped at `max(1, min(16, cpus - 2))` — the run's own limit, independent of the session's `maxConcurrent` pool, which its agents do not enter. There are 1000 agents per run and 4096 items per `parallel`/`pipeline` call.
+Concurrency is capped at 2 agents per workflow by default; excess calls queue and run as slots free up. The limit is per workflow, independent of the session's `maxConcurrent` pool, which workflow children do not enter. There are 1000 agents per run and 4096 items per `parallel`/`pipeline` call. Use `agent({ model: "provider/model-id" })` per node when a workflow should assign cheaper or stronger models to different stages.
 
 **Full guide:** [`docs/workflows.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md) — how the model writes the script for you, how to edit and re-run it, how to save one as a reusable named workflow, plus the complete `agent()` option reference, recipes and troubleshooting.
 
@@ -597,7 +675,7 @@ Skipping is immediate for a running agent and for one held at a pause; an agent 
 |------|-------------|
 | `--subagents-workflow-file=<path>` | Run a workflow script at session start |
 
-Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. Composes with headless mode: `pi -p --subagents-workflow-file=review.js`. With no tool call to attach to, the run renders as a session entry and its result is handed to the model as context for its next turn.
+Use the `=` form. The bare `--flag value` spelling consumes the immediately following argument as the flag's value, so `pi --subagents-workflow-file review.js "do the thing"` still works — the flag takes `review.js` and the prompt survives — while `pi --subagents-workflow-file "do the thing"` swallows the intended prompt as the script path. Composes with headless mode: `pi -p --subagents-workflow-file=review.js`. With no tool call to attach to, the run renders as a session entry and its result is handed to the model as context for its next turn.
 
 The `/agents` command opens an interactive menu:
 
@@ -608,12 +686,13 @@ Create new agent                            ← manual wizard or AI-generated
 Settings                                    ← max concurrency (background + foreground), max turns, grace turns, join mode
 ```
 
-- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
+- **Running agents** — select one to open its live conversation viewer. While it's running or queued, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
 - **Agent types** — unified list with source indicators: `•` (project), `◦` (global), `✕` (disabled). Each row shows the agent's model, and the highlighted agent's full description appears below the list. The model column flags `(unavailable, fallback: inherit)` when a configured model can't be resolved (it would silently inherit the parent model), and shows `(→ provider/id)` when it resolves to a different provider or version than configured. Select an agent to manage it:
   - **Default agents** (no override): Eject (export as `.md`), Disable
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
   - **Custom agents**: Edit, Disable, Delete
-  - **Disabled agents**: Enable, Edit, Delete
+  - **Disabled default agents** (ejected/overridden): Enable, Edit, Reset to default, Delete
+  - **Disabled custom agents**: Enable, Edit, Delete
 - **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
@@ -646,7 +725,7 @@ The two are deliberately **not** one limit. A foreground agent blocks the parent
 
 The foreground pool does not cover `resume`: a foreground resume reopens an existing session and never reaches the spawn path, so several blocking resumes in one message can still run at once. A *background* resume does take a background slot and queues behind them like any other background agent.
 
-Nested children and a [workflow](#subagentworkflow)'s agents are outside the pool entirely. A nested child would deadlock behind a parent waiting on it; a workflow already bounds its own fan-out at `max(1, min(16, cpus - 2))`, and counting its agents twice would let one run fill the session's pool and starve everything else.
+Nested children and a [workflow](#subagentworkflow)'s agents are outside the session pools entirely. A nested child would deadlock behind a parent waiting on it; a workflow has its own default cap of 2 agents, and counting its children twice would let one run fill the session's pool and starve everything else.
 
 ## Join Strategies
 
@@ -693,7 +772,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (background agent concurrency `10`, workflow concurrency `2` per run, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -1008,10 +1087,12 @@ This is useful for creating agents that inherit extension tools but should not h
 ```
 docs/                 # Long-form guides (shipped to npm; README links out to them)
   tasks.md            # Task widget config, sort specs, glyphs, recipes and troubleshooting
+  playbooks.md        # Adaptive WORKFLOW.md discovery, prompts, planning and approval
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
-  workflows/          # Runnable examples, executed by test/workflow-examples.test.ts
+  playbooks/          # Adaptive WORKFLOW.md examples and prompt resources
+  workflows/          # Runnable JavaScript examples, executed by workflow example tests
   agent-tool-description.md
 test/                 # vitest suite; e2e/ and perf/ subdirectories
 src/
@@ -1072,6 +1153,13 @@ src/
     ui/settings-menu.ts # /tasks settings panel
 
   workflow/
+    approval.ts       # Human-readable approval summaries for direct scripts
+    fleet.ts           # Workflow-to-FleetView execution-tree adapter
+    playbook.ts       # Safe WORKFLOW.md discovery, parsing, precedence and prompts
+    playbook-store.ts # Validated project/global Playbook previews, locks and atomic persistence
+    playbook-tools.ts # WorkflowPlaybook and WorkflowPlan registration/rendering
+    playbook-save-tool.ts # Confirmed generalized Playbook promotion
+    plan.ts           # Structured DAG validation and temporary JS compilation
     meta.ts           # Extract and validate a script's pure-literal `meta` block
     worker-source.ts  # The sandbox: vm context, determinism prelude, script globals
     runtime.ts        # Worker lifecycle, RPC bridge, semaphore, caps, gate/resume

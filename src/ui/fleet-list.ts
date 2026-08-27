@@ -16,6 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import type { FleetWorkflow, FleetWorkflowAgent, FleetWorkflowPhase } from "../workflow/fleet.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
@@ -44,30 +45,17 @@ export type FleetUICtx = {
   ): Promise<T>;
 };
 
-/**
- * A workflow run, as the fleet list needs to see it.
- *
- * Narrow on purpose: the list knows nothing about `WorkflowTask`, the runtime
- * or the dialog, so it stays as testable as it was when it only held agents.
- * The extension maps its tasks into this shape and injects an opener.
- */
-export interface FleetWorkflow {
-  id: string;
-  /** The `meta.name` of the run, or its id when the script named nothing. */
-  name: string;
-  status: "running" | "completed" | "failed" | "killed" | "paused";
-  doneCount: number;
-  totalCount: number;
-  startedAt: number;
-  /** Set once the run settles, which is what freezes its clock. */
-  completedAt?: number;
-  tokens: number;
-}
-
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
-type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
+type WorkflowPhaseEntry = { kind: "workflow-phase"; workflowId: string; phase: FleetWorkflowPhase };
+type WorkflowAgentEntry = {
+  kind: "workflow-agent";
+  workflowId: string;
+  phaseId: string;
+  agent: FleetWorkflowAgent;
+};
+type FleetEntry = MainEntry | WorkflowEntry | WorkflowPhaseEntry | WorkflowAgentEntry | AgentEntry;
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
@@ -122,6 +110,8 @@ export class FleetList {
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
+  /** Workflow roots start collapsed; expansion is presentation state only. */
+  private readonly expandedWorkflows = new Set<string>();
 
   constructor(
     private manager: AgentManager,
@@ -187,6 +177,7 @@ export class FleetList {
     // No handle to close the workflow inspector with, but the list is going
     // away — leaving the id set would keep it swallowing input forever.
     this.viewingWorkflowId = undefined;
+    this.expandedWorkflows.clear();
     if (this.ui && this.widgetRegistered) this.ui.setWidget(FLEET_KEY, undefined);
     this.widgetRegistered = false;
     this.tui = undefined;
@@ -274,13 +265,18 @@ export class FleetList {
   private workflows(): FleetWorkflow[] {
     if (!this.workflowSource) return [];
     const now = Date.now();
-    return [...this.workflowSource()]
+    const workflows = [...this.workflowSource()]
       .filter(run =>
         run.status === "running"
         || run.status === "paused"
         || (run.completedAt != null && now - run.completedAt < FINISHED_LINGER_MS)
       )
       .sort((a, b) => a.startedAt - b.startedAt);
+    const visibleIds = new Set(workflows.map((workflow) => workflow.id));
+    for (const id of this.expandedWorkflows) {
+      if (!visibleIds.has(id)) this.expandedWorkflows.delete(id);
+    }
+    return workflows;
   }
 
   /**
@@ -289,9 +285,25 @@ export class FleetList {
    * the list read as a hierarchy rather than a shuffle.
    */
   private roster(): FleetEntry[] {
+    const workflows: FleetEntry[] = [];
+    for (const workflow of this.workflows()) {
+      workflows.push({ kind: "workflow", workflow });
+      if (!this.expandedWorkflows.has(workflow.id)) continue;
+      for (const phase of workflow.phases) {
+        workflows.push({ kind: "workflow-phase", workflowId: workflow.id, phase });
+        for (const agent of phase.agents) {
+          workflows.push({
+            kind: "workflow-agent",
+            workflowId: workflow.id,
+            phaseId: phase.id,
+            agent,
+          });
+        }
+      }
+    }
     return [
       { kind: "main" },
-      ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
+      ...workflows,
       ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
     ];
   }
@@ -353,6 +365,32 @@ export class FleetList {
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
+    if (matchesKey(data, "right")) {
+      const entry = this.roster()[this.selectedIndex];
+      if (entry?.kind !== "workflow") {
+        this.deactivate();
+        return undefined;
+      }
+      this.expandedWorkflows.add(entry.workflow.id);
+      this.update();
+      return { consume: true };
+    }
+    if (matchesKey(data, "left")) {
+      const roster = this.roster();
+      const entry = roster[this.selectedIndex];
+      const workflowId = entry?.kind === "workflow" ? entry.workflow.id
+        : entry?.kind === "workflow-phase" || entry?.kind === "workflow-agent" ? entry.workflowId
+        : undefined;
+      if (workflowId !== undefined && this.expandedWorkflows.delete(workflowId)) {
+        const root = this.roster().findIndex(candidate =>
+          candidate.kind === "workflow" && candidate.workflow.id === workflowId);
+        if (root >= 0) this.selectedIndex = root;
+        this.update();
+        return { consume: true };
+      }
+      this.deactivate();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
 
     // Any other key cancels navigation and flows to the editor.
@@ -397,7 +435,23 @@ export class FleetList {
       );
       return;
     }
-    const record = entry.record;
+    if (entry.kind === "workflow-phase") return;
+    if (entry.kind === "workflow-agent") {
+      const record = entry.agent.recordId !== undefined
+        ? this.manager.getRecord(entry.agent.recordId)
+        : undefined;
+      if (!record) {
+        this.ui?.notify("Workflow agent has not started yet, or its conversation has expired.", "info");
+        return;
+      }
+      this.openAgent(record, false);
+      return;
+    }
+    this.openAgent(entry.record, true);
+  }
+
+  /** Open the shared ConversationViewer, with controls only for top-level agents. */
+  private openAgent(record: AgentRecord, controlled: boolean): void {
     if (!this.ui) return;
     if (!record.session) {
       this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
@@ -417,11 +471,11 @@ export class FleetList {
           activity,
           theme,
           done,
-          () => {
+          controlled ? () => {
             if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
-          },
+          } : undefined,
           keybindings,
-          (message: string) => this.manager.steer(record.id, message),
+          controlled ? (message: string) => this.manager.steer(record.id, message) : undefined,
           this.showCost(),
           this.viewerMarkdown,
           this.onViewerMarkdown,
@@ -444,6 +498,7 @@ export class FleetList {
     if (viewed !== undefined) {
       const idx = this.roster().findIndex(e =>
         e.kind === "agent" ? e.record.id === viewed
+        : e.kind === "workflow-agent" ? e.agent.recordId === viewed
         : e.kind === "workflow" ? e.workflow.id === viewed
         : false,
       );
@@ -458,14 +513,14 @@ export class FleetList {
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
+    const rows = this.roster().slice(1) as Exclude<FleetEntry, MainEntry>[];
     if (rows.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
+      ? "↑↓ select · → expand · ← collapse · enter view · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
@@ -484,6 +539,10 @@ export class FleetList {
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
+        : row.kind === "workflow-phase" ?
+          this.renderWorkflowPhaseRow(a + 1, sel, row.phase, width, theme)
+        : row.kind === "workflow-agent" ?
+          this.renderWorkflowAgentRow(a + 1, sel, row.agent, width, theme)
         : this.renderAgentRow(a + 1, sel, row.record, width, theme),
       );
     }
@@ -511,12 +570,52 @@ export class FleetList {
     const selected = rosterIndex === sel;
     const kind = theme.fg(selected ? "text" : "muted", "workflow");
     const name = selected ? theme.fg("text", workflow.name) : workflow.name;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${kind}  ${name}`;
+    const disclosure = this.expandedWorkflows.has(workflow.id) ? "▾" : "▸";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${disclosure} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
     const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
+  }
+
+  private renderWorkflowPhaseRow(
+    rosterIndex: number,
+    sel: number,
+    phase: FleetWorkflowPhase,
+    width: number,
+    theme: Theme,
+  ): string {
+    const selected = rosterIndex === sel;
+    const title = selected ? theme.fg("text", phase.title) : theme.fg("muted", phase.title);
+    const left = `  ${this.bullet(rosterIndex, sel, theme)}   ├─ phase  ${title}`;
+    const stats = `${phase.doneCount}/${phase.totalCount}`;
+    return rightAlign(left, theme.fg(selected ? "text" : "dim", stats), width);
+  }
+
+  private renderWorkflowAgentRow(
+    rosterIndex: number,
+    sel: number,
+    agent: FleetWorkflowAgent,
+    width: number,
+    theme: Theme,
+  ): string {
+    const selected = rosterIndex === sel;
+    const glyph = agent.state === "done" ? theme.fg("success", "✓")
+      : agent.state === "failed" || agent.state === "blocked" ? theme.fg("error", "✗")
+      : agent.state === "skipped" || agent.state === "interrupted" ? theme.fg("dim", "■")
+      : theme.fg("accent", "○");
+    const type = renderAgentName(agent.agentType, theme, selected
+      ? { fallbackColor: "text", bold: hasAgentBadge(agent.agentType) }
+      : { fallbackColor: "muted" });
+    const label = selected ? theme.fg("text", agent.label) : agent.label;
+    const model = agent.model ? theme.fg("dim", ` · ${agent.model}`) : "";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)}   │  └─ ${glyph} ${type}  ${label}${model}`;
+    const elapsed = agent.startedAt === undefined
+      ? "queued"
+      : formatFleetElapsed((agent.completedAt ?? Date.now()) - agent.startedAt);
+    const stats = `${elapsed} · ${formatFleetTokens(agent.tokens)}`;
+    return rightAlign(left, theme.fg(selected ? "text" : "dim", stats), width);
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {

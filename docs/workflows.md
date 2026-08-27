@@ -6,6 +6,8 @@ The thing worth understanding up front is that **you do not write these — the 
 
 For the tool's parameter table and where it sits among the other tools, see [`README.md`](../README.md#subagentworkflow).
 
+For reusable adaptive Markdown guidance that the Planner turns into a one-run script, see [Adaptive workflow Playbooks](playbooks.md). A Playbook is the maintained source; this guide covers the temporary/deterministic JavaScript execution layer and legacy saved `.js` workflows.
+
 ## What a workflow is
 
 Until workflows existed, the only way to run several agents at once was to name them one by one in a single message. That is fine for three agents you already know about. It does not work for *"audit every route file in this repo"*, where the list only exists once something has gone and looked.
@@ -28,6 +30,10 @@ There is no `/workflows` command. The tool is model-invoked, so you get a workfl
 | "use a workflow to …" | Forces the shape when the model would otherwise reach for plain `Agent` calls |
 
 You do not have to say "workflow" — the model picks the tool — but saying it removes the ambiguity when the task is borderline.
+
+An adaptive run compiled by a ready `WorkflowPlan` carries a one-use authorization for its exact internally retained script-and-arguments digest and returns an opaque `planRef`; pass that reference to `SubagentWorkflow` unchanged. A valid `planRef` runs directly because it is one-use and digest-bound.
+
+Direct `script`, `scriptPath`, and named `.js` invocations use a different trust boundary. In a UI, every direct invocation is shown as a behavior summary with arguments and requires confirmation, including an exact `resumeFromRunId`; user prose, workflow names, and risk keywords never imply authorization. Headless direct invocations and resumes proceed without UI confirmation because the automation caller is trusted to choose execution. Inline/path scripts that reference the injected `workflow` binding are refused because their child behavior is not in the summary; AST detection covers aliases and indirect call forms and fails closed on parse errors. Saved named workflows may compose nested workflows, but are still UI-confirmed or headless-allowed. `--subagents-workflow-file=` remains the explicit startup automation entry point.
 
 ### 2. Read what came back
 
@@ -68,7 +74,7 @@ A **card in the transcript**, updating as the run goes:
   ⎿  auditing 6 route files
 ```
 
-A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
+A **`workflow` row in FleetView** is a controller node. It starts collapsed; press `→` to expand it into `phase` rows and their workflow-agent children, or `←` to collapse. `Enter` on the workflow opens the same two-pane inspector `/agents → Workflows` does. `Enter` on a child opens the same live `ConversationViewer` used by an ordinary subagent. The child remains owned by the workflow: its stop/skip/retry actions stay in the workflow controller, while the child viewer is read-only with respect to those owner controls.
 
 Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
 
@@ -91,7 +97,7 @@ The fifth key only shows you something:
 
 Because it changes nothing, `c` works at both levels and on an agent that has already settled — which is the usual case, since reading what a child did is most of why the inspector gets opened. The dialog hides itself while the conversation is up and comes back when you close it. A row with no child behind it yet (queued, or replayed from the resume journal) has no conversation to open and does not offer the key.
 
-A run's own agents are not listed separately in the fleet list, the widget, the `/agents` menus or `@handle` resolution — they belong to the run, which reports for them. `c` in the inspector is the one way in to a child's conversation.
+A run's workflow agents are visible only as children of that controller, not as ordinary top-level agents. They remain filtered from the standalone agent widget, `/agents` menus, completion notifications and `@handle` resolution, and remain outside the session `maxConcurrent` pools. The Fleet tree uses the workflow progress log, so queued/replayed children can still be shown even before a live record exists; a child without a live record can be selected but cannot open a conversation.
 
 ### 4. Edit and re-run
 
@@ -110,9 +116,11 @@ Four things it will not do:
 - **Replay a failure.** A journaled failure ends the prefix, so resuming a run that died at agent 5 retries exactly agent 5. That is the point.
 - **Replay a run that used `agent({ resume })` at all.** A replayed agent is text from a file rather than a live child, so there would be no conversation left for a later `resume` to continue.
 
-Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, re-runs that run's own script.
+Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, reuses that run's script path. A resume may instead supply exactly one source. In a UI both exact and changed resumes require direct confirmation; headless resumes proceed under the automation-caller trust boundary.
 
 ### 5. Save it
+
+This section covers legacy deterministic `.js` workflows. For an adaptive run guided by `WORKFLOW.md`, do not save generated JavaScript: ask the model to promote the generalized guidance through `WorkflowPlaybookSave`, which previews and confirms a project/global Markdown Playbook. See [Playbook promotion](playbooks.md#workflowplaybooksave).
 
 A script you will run more than once belongs somewhere durable. Copy it out of the temp directory into one of these, named `<name>.js`:
 
@@ -219,14 +227,15 @@ export const meta = {
 
 | Parameter | Type | Description |
 |---|---|---|
+| `planRef` | string | One-use opaque reference from an approved `WorkflowPlan`; mutually exclusive with `script`, `scriptPath`, `name`, `args`, and `resumeFromRunId` |
 | `script` | string | Inline source. Must begin with `export const meta = { name, description }` |
-| `scriptPath` | string | A script file, absolute or project-relative. **Takes precedence over `script`** — this is how an edited workflow is re-run |
-| `name` | string | A saved workflow — `<name>.js` in one of the three directories above. Lowest precedence |
+| `scriptPath` | string | A script file, absolute or project-relative |
+| `name` | string | A saved workflow — `<name>.js` in one of the three directories above |
 | `args` | any | Handed to the script as the `args` global, verbatim. Must be JSON-shaped |
 | `resumeFromRunId` | string | Replay an earlier run in this session. Matches `^wf_[a-z0-9-]{6,}$` |
 | `title` / `description` | string | Accepted and ignored — for Claude Code parity, so a ported call does not fail. A workflow is named by its `meta` block |
 
-At least one of `script` / `scriptPath` / `name` is required; `scriptPath` wins over `script`, which wins over `name`.
+Use exactly one of `script`, `scriptPath`, or `name`. A source may be omitted only with `resumeFromRunId`, which reuses the prior path. `planRef` is the separate approved-plan source and cannot be combined with a direct source, `args`, or `resumeFromRunId`.
 
 ### `agent(prompt, opts?)`
 
@@ -292,17 +301,17 @@ The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only
 
 | Limit | Value |
 |---|---|
-| Agents running at once | `max(1, min(16, cpus - 2))` — 6 on an 8-core machine |
+| Agents running at once | `2` per workflow by default; excess calls queue |
 | Agents per run, total | 1000 |
 | Items per `parallel`/`pipeline` **call** | 4096 |
 | Nested `workflow()` calls per run | 256 |
 | Script length | 512 KiB |
 
-These are three different things and are easy to conflate: 1000 is a budget for the whole run, the concurrency figure is how many run *simultaneously*, and 4096 is per call rather than per run. Excess items queue rather than melting the machine.
+These are three different things and are easy to conflate: the default concurrency of 2 limits one workflow's simultaneous model calls, 1000 is a budget for the whole run, and 4096 is per call rather than per run. The limit is per workflow, so multiple workflows can still add their capacities. Excess items queue rather than melting the machine.
 
 Above 25 scheduled agents, or 1.5M tokens actual or projected, the card adds `⚠ Large workflow · /agents → Workflows to stop`.
 
-A run's concurrency limit is its own, independent of the session's `maxConcurrent` and `maxConcurrentForeground` pools — its agents do not enter either.
+A run's default concurrency is 2 agents, independent of the session's `maxConcurrent` and `maxConcurrentForeground` pools — its agents do not enter either. Set a different `concurrency` only through the runtime API; workflow scripts cannot raise this limit. Per-agent model selection remains available with `agent(prompt, { model: "provider/model-id" })`, so cheap discovery stages and expensive verification stages can use different configured models.
 
 ### Settings and the CLI flag
 
@@ -392,7 +401,7 @@ Not a git repo, no commits yet, or `git worktree add` failed. Isolation is a str
 The file is not in any of the three directories, or it is there but carries no `export const meta =` declaration, so it is not recognized as a workflow. The message lists the directories it searched and any workflows it did find.
 
 **The run seems stuck with agents queued.**
-Concurrency is capped at `max(1, min(16, cpus - 2))`. Queued agents start as slots free. A pause (`p`) also holds new starts while letting running agents finish.
+Concurrency is capped at 2 agents per workflow by default. Queued agents start as slots free. A pause (`p`) also holds new starts while running agents finish. Multiple workflow runs have separate caps, so several active runs can still create several concurrent provider requests.
 
 ## What workflows can't do
 

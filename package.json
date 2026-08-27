@@ -1,7 +1,7 @@
 {
   "name": "@tintinweb/pi-subagents",
   "version": "0.19.0",
-  "description": "A pi extension for Claude Code-style subagents, structured tasks, and deterministic workflow orchestration.",
+  "description": "A pi extension for Claude Code-style subagents, structured tasks, adaptive Markdown Playbooks, and deterministic multi-agent execution.",
   "author": "tintinweb",
   "license": "MIT",
   "repository": {
@@ -23,6 +23,8 @@
     "agent",
     "task",
     "todo",
+    "playbook",
+    "adaptive-workflow",
     "autonomous"
   ],
   "peerDependencies": {
@@ -31,6 +33,7 @@
     "@earendil-works/pi-tui": ">=0.84.0"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.8",
     "@sinclair/typebox": "^0.34.49",
     "croner": "^10.0.1",
     "nanoid": "^5.1.16",

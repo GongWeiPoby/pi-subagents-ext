@@ -177,11 +177,9 @@ function isWorkflowFile(path: string): boolean {
 /**
  * Resolve which source a `SubagentWorkflow` call runs.
  *
- * `scriptPath` wins over `script`, which wins over `name` — Claude Code's
- * order — and at least one is required: a call with none is a mistake worth
- * naming rather than an empty run. Lives beside {@link resolveWorkflowSource}
- * because that is the function it defers to once precedence is settled, so the
- * two cannot disagree about what a reference means.
+ * The public tool rejects multiple sources before calling this helper. The field
+ * checks below retain a deterministic order for defensive/internal callers, and
+ * the helper still requires at least one usable source.
  */
 export function resolveWorkflowScript(
   params: { script?: string; scriptPath?: string; name?: string },
@@ -211,7 +209,7 @@ export function resolveWorkflowScript(
     ok: false,
     message:
       "Provide `script` (inline source), `scriptPath` (a file to read), or `name` (a saved workflow). " +
-      "`scriptPath` takes precedence, then `script`, then `name`." +
+      "These sources are mutually exclusive." +
       (known.length > 0 ? ` Saved workflows: ${known.join(", ")}.` : ""),
   };
 }

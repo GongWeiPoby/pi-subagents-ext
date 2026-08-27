@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   WORKFLOW_AGENT_CAP,
+  WORKFLOW_DEFAULT_CONCURRENCY,
   WORKFLOW_ITEM_CAP,
   workflowConcurrency,
 } from "../src/workflow/runtime.js";
@@ -136,10 +137,10 @@ describe("the limits it quotes", () => {
     expect(description).toContain(`at most ${WORKFLOW_ITEM_CAP} items`);
   });
 
-  it("describes the concurrency formula the runtime actually applies", () => {
-    expect(description).toContain("min(16, available CPUs - 2)");
-    expect(workflowConcurrency(8)).toBe(6);
-    expect(workflowConcurrency(64)).toBe(16);
+  it("describes the fixed default the runtime actually applies", () => {
+    expect(description).toContain("capped at 2 per workflow by default");
+    expect(WORKFLOW_DEFAULT_CONCURRENCY).toBe(2);
+    expect(workflowConcurrency()).toBe(2);
   });
 });
 
@@ -152,6 +153,6 @@ describe("rendering", () => {
     // A bare `${...}` in the .ts literal would interpolate at module load and
     // reach the model as a value (or throw), not as the example text.
     expect(description).not.toContain("[object Object]");
-    expect(description).toContain("${f.title}");
+    expect(description).toContain(["$", "{f.title}"].join(""));
   });
 });

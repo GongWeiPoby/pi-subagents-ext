@@ -96,6 +96,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
     subagentsExtension(booted.pi);
     const command = booted.commands.get("agents");
     if (!command) throw new Error("the extension did not register /agents");
+    const runCtx = ctx({ cwd: hermetic.dir });
     await booted.tools.get("SubagentWorkflow").execute(
       "tc-0",
       {
@@ -105,7 +106,16 @@ describe("the inspector opens a workflow agent's conversation", () => {
       },
       undefined,
       undefined,
-      ctx({ cwd: hermetic.dir }),
+      {
+        ...runCtx,
+        sessionManager: {
+          ...runCtx.sessionManager,
+          getBranch: vi.fn(() => [{
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "run this workflow" }] },
+          }]),
+        },
+      },
     );
     return { ...booted, command };
   }

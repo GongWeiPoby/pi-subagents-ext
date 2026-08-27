@@ -40,6 +40,9 @@ import type { CompiledSchema } from "./workflow/json-schema.js";
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
   WORKFLOW: "SubagentWorkflow",
+  PLAYBOOK: "WorkflowPlaybook",
+  PLAYBOOK_SAVE: "WorkflowPlaybookSave",
+  PLAN: "WorkflowPlan",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
 } as const;

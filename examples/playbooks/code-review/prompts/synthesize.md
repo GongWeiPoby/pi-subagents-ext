@@ -1,0 +1,1 @@
+Merge the validated findings in {{findings}}. Deduplicate findings that identify the same root cause, preserve reviewer disagreement where material, order by severity, and report residual test gaps separately. Do not reintroduce rejected findings.

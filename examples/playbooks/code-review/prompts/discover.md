@@ -1,0 +1,1 @@
+Inspect {{target}} and summarize the changed surfaces, behavioral intent, risk areas, and relevant project standards. Return a compact review map that helps the Planner select only the review capabilities this change warrants.

@@ -68,7 +68,7 @@ export type WorkflowCollision =
    * Nothing changes — pi has already dropped our registration — but it is worth
    * reporting, because pi resolved it silently.
    */
-  | { kind: "report"; message: string }
+  | { kind: "report"; message: string; withdrawCompanions: true }
   /**
    * Stand down for this session. `withdraw` is false in case 1, where ours
    * never reached the registry and there is nothing to take out of the active
@@ -101,6 +101,7 @@ export function decideWorkflowCollision(input: {
     if (!tookOurName) return { kind: "none" };
     return {
       kind: "report",
+      withdrawCompanions: true,
       message:
         `Another extension (${source}) already registers a "${SUBAGENT_TOOL_NAMES.WORKFLOW}" tool. ` +
         "Pi keeps the first registration, so this extension's workflow tool is not offered to the " +

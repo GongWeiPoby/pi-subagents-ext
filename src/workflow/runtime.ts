@@ -13,7 +13,6 @@
  * to the real manager lives at the call site.
  */
 
-import { cpus } from "node:os";
 import { Worker } from "node:worker_threads";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
 import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
@@ -38,15 +37,18 @@ const PREVIEW_LENGTH = 200;
 
 export class WorkflowRuntimeError extends Error {}
 
+/** Default concurrent agents per workflow run. */
+export const WORKFLOW_DEFAULT_CONCURRENCY = 2;
+
 /**
- * Concurrent agents allowed, leaving two cores for the host and the TUI.
+ * Concurrent agents allowed by default.
  *
- * `Math.max(1, …)` is not decoration: the raw `min(16, cpus - 2)` is 0 on a one-
- * or two-core machine, and a semaphore with zero permits never hands out a slot,
- * so the run would hang before its first agent rather than fail.
+ * Kept as a function for callers and tests that already use it, while the
+ * policy itself is the explicit constant above. A run may still inject a
+ * different value through `RunWorkflowOptions.concurrency`.
  */
-export function workflowConcurrency(cpuCount: number = cpus().length): number {
-  return Math.max(1, Math.min(16, cpuCount - 2));
+export function workflowConcurrency(): number {
+  return WORKFLOW_DEFAULT_CONCURRENCY;
 }
 
 /** One agent the script asked for. `agentId` is the handle for {@link WorkflowHost.abortAgent}. */

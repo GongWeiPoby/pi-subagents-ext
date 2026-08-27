@@ -621,6 +621,9 @@ describe("Workflow tool registration", () => {
     // The exclusion list is derived from this object; a Workflow tool missing
     // here is a Workflow tool every spawned child inherits.
     expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("SubagentWorkflow");
+    expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlaybook");
+    expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlaybookSave");
+    expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlan");
     expect(SUBAGENT_TOOL_NAMES.WORKFLOW).toBe("SubagentWorkflow");
   });
 });
@@ -639,6 +642,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
   let hermetic: Hermetic;
   let booted: ReturnType<typeof makePi>;
   let tools: Map<string, any>;
+  let workflowConfirm: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     // Hermetic dir first — settings and agent files are read at boot.
@@ -646,6 +650,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     booted = makePi();
     subagentsExtension(booted.pi);
     tools = booted.tools;
+    workflowConfirm = vi.fn(async () => true);
   });
 
   afterEach(async () => {
@@ -655,7 +660,236 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     vi.restoreAllMocks();
   });
 
-  const workflowCtx = () => ctx({ cwd: hermetic.dir });
+  const workflowCtx = () => {
+    const context = ctx({ cwd: hermetic.dir });
+    return {
+      ...context,
+      hasUI: true,
+      ui: { ...context.ui, confirm: workflowConfirm },
+    };
+  };
+
+  const headlessCtx = () => {
+    const context = ctx({ cwd: hermetic.dir });
+    return {
+      ...context,
+      hasUI: false,
+      ui: { ...context.ui, confirm: workflowConfirm },
+    };
+  };
+
+  it("routes every direct UI source through confirmation and labels the selected source", async () => {
+    const path = join(hermetic.dir, "direct.js");
+    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
+    writeFileSync(path, fileScript);
+    writeFileSync(join(hermetic.dir, ".pi", "workflows", "saved.js"), fileScript);
+    workflowConfirm.mockResolvedValue(false);
+
+    const cases = [
+      { id: "inline", params: { script: inlineScript }, source: "Source: inline script" },
+      { id: "path", params: { scriptPath: path }, source: `Source: script path: ${path}` },
+      { id: "name", params: { name: "saved" }, source: "Source: saved workflow: saved" },
+    ];
+    for (const testCase of cases) {
+      workflowConfirm.mockClear();
+      const result = await tools.get("SubagentWorkflow").execute(
+        `tc-ui-${testCase.id}`,
+        testCase.params,
+        undefined,
+        undefined,
+        workflowCtx(),
+      );
+      expect(textOf(result)).toContain("not approved");
+      expect(workflowConfirm).toHaveBeenCalledWith("Run workflow?", expect.stringContaining(testCase.source));
+    }
+  });
+
+  it("allows every direct source headlessly without inspecting user prose or risk keywords", async () => {
+    const path = join(hermetic.dir, "direct.js");
+    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
+    writeFileSync(path, fileScript);
+    writeFileSync(join(hermetic.dir, ".pi", "workflows", "prod.js"), fileScript);
+
+    const results = await Promise.all([
+      tools.get("SubagentWorkflow").execute(
+        "tc-headless-inline",
+        { script: `${inlineScript}// Deploy production` },
+        undefined,
+        undefined,
+        headlessCtx(),
+      ),
+      tools.get("SubagentWorkflow").execute(
+        "tc-headless-path",
+        { scriptPath: path },
+        undefined,
+        undefined,
+        headlessCtx(),
+      ),
+      tools.get("SubagentWorkflow").execute(
+        "tc-headless-name",
+        { name: "prod" },
+        undefined,
+        undefined,
+        headlessCtx(),
+      ),
+    ]);
+
+    for (const result of results) expect(textOf(result)).toContain("started in the background");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
+  it("detects nested workflow behavior through executable references and fails closed on parse errors", async () => {
+    const mentions = [
+      inlineScript,
+      '// workflow("comment")',
+      'const ordinary = "workflow(\\\'string\\\')";',
+      "const template = `workflow(\\\"template\\\")`;",
+      "const property = { workflow: true };",
+      "return ordinary + template + property.workflow;",
+    ].join("\n");
+    const allowed = await tools.get("SubagentWorkflow").execute(
+      "tc-nested-mentions",
+      { script: mentions },
+      undefined,
+      undefined,
+      headlessCtx(),
+    );
+    expect(textOf(allowed)).toContain("started in the background");
+
+    const bypasses = [
+      'return await workflow?.("child");',
+      'return await workflow.call(null, "child");',
+      'return await workflow.apply(null, ["child"]);',
+      'return await (0, workflow)("child");',
+      'const nested = workflow; return await nested("child");',
+      'const refs = [workflow]; return await refs[0]("child");',
+      "const broken = ;",
+    ];
+    for (const [index, body] of bypasses.entries()) {
+      const result = await tools.get("SubagentWorkflow").execute(
+        `tc-nested-bypass-${index}`,
+        { script: `${inlineScript}${body}` },
+        undefined,
+        undefined,
+        headlessCtx(),
+      );
+      expect(textOf(result)).toContain("nested workflow behavior cannot be approved");
+      expect(textOf(result)).not.toContain("started in the background");
+    }
+  });
+
+  it("summarizes actual prompts, options, phases, relationships, schemas, and nested calls", async () => {
+    workflowConfirm.mockResolvedValue(false);
+    const script = [
+      'export const meta = { name: "parent", description: "review orchestration", phases: [{ title: "Discover" }, { title: "Verify" }] };',
+      'phase("Discover");',
+      'await parallel([',
+      '  () => agent("Deploy the auth diff", { label: "auth scan", agentType: "Explore", model: "haiku", effort: "high", schema: { type: "object" } }),',
+      '  () => agent("Inspect the tests", { label: "test scan", isolation: "worktree" }),',
+      ']);',
+      'await pipeline(["finding"], item => agent("Verify " + item, { label: "verify finding", phase: "Verify" }));',
+      'return await workflow("child");',
+    ].join("\n");
+    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
+    writeFileSync(join(hermetic.dir, ".pi", "workflows", "parent.js"), script);
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-approval-summary",
+      { name: "parent" },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("not approved");
+    const approval = String(workflowConfirm.mock.calls[0]?.[1]);
+    expect(approval).toContain("Deploy the auth diff");
+    expect(approval).toContain("agentType: Explore");
+    expect(approval).toContain("model: haiku");
+    expect(approval).toContain("effort: high");
+    expect(approval).toContain("phase: Discover");
+    expect(approval).toContain("parallel barrier");
+    expect(approval).toContain("pipeline stage");
+    expect(approval).toContain("structured output: configured");
+    expect(approval).toContain("verify finding");
+    expect(approval).toContain("child");
+    expect(approval).toContain("Discover -> Verify");
+  });
+
+  it("requires direct approval for a legacy script that did not come from WorkflowPlan", async () => {
+    workflowConfirm.mockResolvedValue(false);
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-unplanned-denied",
+      { script: `${inlineScript}// \u202ehidden`, args: { target: "src\rhidden" } },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("not approved");
+    expect(workflowConfirm).toHaveBeenCalledWith(
+      "Run workflow?",
+      expect.stringContaining("Agent call sites:"),
+    );
+    const approval = String(workflowConfirm.mock.calls[0]?.[1]);
+    expect(approval).toContain('Parameters:\n{\n  "target": "src\\rhidden"\n}');
+    expect(approval).not.toContain("export const meta");
+    expect(approval).not.toContain("\u202e");
+    expect(textOf(result)).not.toContain("Task ID:");
+  });
+
+  it("consumes a ready WorkflowPlan script authorization exactly once", async () => {
+    const planned = await tools.get("WorkflowPlan").execute(
+      "tc-plan-authorize",
+      {
+        objective: "Inspect safely",
+        nodes: [{ id: "inspect", title: "Inspect", capability: "review", prompt: "Inspect the diff" }],
+      },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+    const planRef = planned.details?.planRef;
+    expect(planRef).toMatch(/^wfp_[a-f0-9]{24}$/);
+    workflowConfirm.mockClear();
+
+    const combinedResume = await tools.get("SubagentWorkflow").execute(
+      "tc-plan-resume-conflict",
+      { planRef, resumeFromRunId: "wf_unrelated" },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+    expect(textOf(combinedResume)).toContain("cannot be combined");
+
+    const changedArgs = await tools.get("SubagentWorkflow").execute(
+      "tc-plan-changed-args",
+      { planRef, args: { target: "different" } },
+      undefined,
+      undefined,
+      ctx({ cwd: hermetic.dir }),
+    );
+    const first = await tools.get("SubagentWorkflow").execute(
+      "tc-plan-run",
+      { planRef },
+      undefined,
+      undefined,
+      ctx({ cwd: hermetic.dir }),
+    );
+    const replay = await tools.get("SubagentWorkflow").execute(
+      "tc-plan-replay",
+      { planRef },
+      undefined,
+      undefined,
+      ctx({ cwd: hermetic.dir }),
+    );
+
+    expect(textOf(changedArgs)).toContain("cannot be combined");
+    expect(textOf(first)).toContain("started in the background");
+    expect(textOf(replay)).toContain("unknown, expired, or already consumed");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
 
   it("runs the inline script when only `script` is given, and persists it", async () => {
     const result = await tools.get("SubagentWorkflow").execute("tc-1", { script: inlineScript }, undefined, undefined, workflowCtx());
@@ -667,18 +901,23 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(existsSync(scriptLine!.slice("Script: ".length))).toBe(true);
   });
 
-  it("prefers scriptPath over script when both are given", async () => {
-    const path = join(hermetic.dir, "wf.js");
-    writeFileSync(path, fileScript);
-
+  it.each([
+    { label: "script and scriptPath", params: { script: inlineScript, scriptPath: "wf.js" } },
+    { label: "script and name", params: { script: inlineScript, name: "saved" } },
+    { label: "scriptPath and name", params: { scriptPath: "wf.js", name: "saved" } },
+    { label: "all direct sources", params: { script: inlineScript, scriptPath: "wf.js", name: "saved" } },
+  ])("rejects $label instead of choosing a precedence winner", async ({ params }) => {
     const result = await tools.get("SubagentWorkflow").execute(
-      "tc-2",
-      { script: inlineScript, scriptPath: path },
-      undefined, undefined, workflowCtx(),
+      "tc-source-conflict",
+      params,
+      undefined,
+      undefined,
+      workflowCtx(),
     );
 
-    expect(textOf(result)).toMatch(/Workflow "from-file" started/);
-    expect(textOf(result)).not.toMatch(/from-inline/);
+    expect(textOf(result)).toContain("Provide only one workflow source");
+    expect(textOf(result)).not.toContain("started");
+    expect(workflowConfirm).not.toHaveBeenCalled();
   });
 
   it("resolves a relative scriptPath against the project directory", async () => {
@@ -694,10 +933,10 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(textOf(result)).toMatch(/Workflow "from-file" started/);
   });
 
-  it("reports a missing scriptPath instead of silently falling back to `script`", async () => {
+  it("reports a missing scriptPath when it is the selected source", async () => {
     const result = await tools.get("SubagentWorkflow").execute(
       "tc-4",
-      { script: inlineScript, scriptPath: join(hermetic.dir, "nope.js") },
+      { scriptPath: join(hermetic.dir, "nope.js") },
       undefined, undefined, workflowCtx(),
     );
 
@@ -727,17 +966,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(text).toContain(join(".pi", "workflows", "nightly.js"));
   });
 
-  it("lets script and scriptPath both outrank name", async () => {
-    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
-    writeFileSync(join(hermetic.dir, ".pi", "workflows", "nightly.js"), fileScript);
 
-    const viaScript = await tools.get("SubagentWorkflow").execute(
-      "tc-name-2",
-      { script: inlineScript, name: "nightly" },
-      undefined, undefined, workflowCtx(),
-    );
-    expect(textOf(viaScript)).toMatch(/Workflow "from-inline" started/);
-  });
 
   it("names the saved workflows it does have when the name is unknown", async () => {
     mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
@@ -884,6 +1113,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       undefined, undefined, workflowCtx(),
     );
     const runId = (started.details as { taskId: string }).taskId;
+    workflowConfirm.mockClear();
 
     // The run is detached: it has to actually settle before it can be resumed,
     // and the worker thread takes a moment to start, compile and finish.
@@ -892,7 +1122,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       await flush();
       result = await tools.get("SubagentWorkflow").execute(
         `tc-resume-5-${attempt}`,
-        { script: inlineScript, resumeFromRunId: runId },
+        { resumeFromRunId: runId },
         undefined, undefined, workflowCtx(),
       );
       if (!/is still running/.test(textOf(result))) break;
@@ -903,6 +1133,80 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     // reporting a resume that silently replayed nothing.
     expect(textOf(result)).toMatch(new RegExp(`Nothing to replay from ${runId}`));
     expect(textOf(result)).toMatch(/started in the background/);
+    expect(workflowConfirm).toHaveBeenCalledWith(
+      "Run workflow?",
+      expect.stringContaining("Source: resumed script path:"),
+    );
+  });
+
+  it("allows an exact resume headlessly without confirmation", async () => {
+    const started = await tools.get("SubagentWorkflow").execute(
+      "tc-headless-resume-start",
+      { script: inlineScript },
+      undefined,
+      undefined,
+      headlessCtx(),
+    );
+    const runId = (started.details as { taskId: string }).taskId;
+    workflowConfirm.mockClear();
+
+    let result: any;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await flush();
+      result = await tools.get("SubagentWorkflow").execute(
+        `tc-headless-resume-${attempt}`,
+        { resumeFromRunId: runId },
+        undefined,
+        undefined,
+        headlessCtx(),
+      );
+      if (!/is still running/.test(textOf(result))) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    expect(textOf(result)).toContain("started in the background");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects resume ids issued by another session", async () => {
+    const started = await tools.get("SubagentWorkflow").execute(
+      "tc-cross-session-start",
+      { script: inlineScript },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+    const runId = (started.details as { taskId: string }).taskId;
+    let settled = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await flush();
+      const probe = await tools.get("SubagentWorkflow").execute(
+        `tc-cross-session-probe-${attempt}`,
+        { script: inlineScript, resumeFromRunId: runId },
+        undefined,
+        undefined,
+        workflowCtx(),
+      );
+      if (!/is still running/.test(textOf(probe))) {
+        settled = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(settled).toBe(true);
+    const nextSession = workflowCtx();
+    nextSession.sessionManager.getSessionId = vi.fn(() => "s2");
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-cross-session-resume",
+      { script: inlineScript, resumeFromRunId: runId },
+      undefined,
+      undefined,
+      nextSession,
+    );
+
+    expect(textOf(result)).toContain("belongs to a different session");
+    expect(textOf(result)).not.toContain("started in the background");
   });
 
   it("ignores title and description rather than rejecting them", async () => {
@@ -981,6 +1285,34 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
   const startedTaskId = (result: unknown) => /Task ID: (\S+)/.exec(textOf(result))![1];
 
+  it("cancels a tool-started completion nudge after switching sessions", async () => {
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-switch-tool",
+      { script: `${inlineScript}return "done before switch";` },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    await vi.waitFor(
+      () => {
+        const card = String(
+          tools.get("SubagentWorkflow")
+            .renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false })
+            .text ?? "",
+        );
+        expect(card).toContain("done");
+      },
+      { timeout: 4_000, interval: 5 },
+    );
+    await booted.lifecycle.get("session_before_switch")?.({}, workflowCtx());
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await flush();
+
+    expect(booted.pi.sendMessage.mock.calls.some((call: any[]) => call[0]?.customType === "subagent-notification")).toBe(false);
+    expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
+  });
+
   it("kills a still-running workflow (and its worker thread) on session shutdown", async () => {
     // A never-returning script: only the run's own abort signal can stop it, so
     // abortAll() over the agent records would leave the worker spinning.
@@ -1048,7 +1380,7 @@ describe("--subagents-workflow-file", () => {
       hasUI: true,
       cwd: hermetic.dir,
       ui: {
-        setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(),
+        setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), confirm: vi.fn(async () => true),
         addAutocompleteProvider: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()),
       },
       ...overrides,
@@ -1067,7 +1399,7 @@ describe("--subagents-workflow-file", () => {
     await booted.tools.get("SubagentWorkflow").execute(
       "tc-fleet",
       { script: inlineScript },
-      undefined, undefined, ctx({ cwd: hermetic.dir }),
+      undefined, undefined, uiCtx(),
     );
 
     const keys = context.ui.setWidget.mock.calls.map((call: any[]) => call[0]);
@@ -1141,6 +1473,22 @@ describe("--subagents-workflow-file", () => {
 
     expect(context.ui.notify.mock.calls.some((c: any[]) => /Could not read/.test(String(c[0])))).toBe(true);
     expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
+  });
+
+  it("suppresses a startup-file completion after switching sessions", async () => {
+    const path = join(hermetic.dir, "switch-flow.js");
+    writeFileSync(path, `${fileScript}await new Promise(() => {});`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+    const context = uiCtx();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+    await booted.lifecycle.get("session_before_switch")?.({}, context);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await flush();
+
+    expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
+    expect(booted.pi.sendMessage.mock.calls.some((call: any[]) => call[0]?.customType === "workflow-result")).toBe(false);
   });
 
   it("renders the finished run as a session entry and hands it to the model as next-turn context", async () => {
@@ -1243,11 +1591,19 @@ describe("workflowsEnabled — the master switch", () => {
   it("stays off when the setting says so explicitly", () => {
     // Not registered at all: the model is never told the feature exists. The
     // switch buys zero tool-spec tokens, which a refusing tool would not.
-    expect(boot({ workflowsEnabled: false }).tools.has("SubagentWorkflow")).toBe(false);
+    const booted = boot({ workflowsEnabled: false });
+    expect(booted.tools.has("SubagentWorkflow")).toBe(false);
+    expect(booted.tools.has("WorkflowPlaybook")).toBe(false);
+    expect(booted.tools.has("WorkflowPlaybookSave")).toBe(false);
+    expect(booted.tools.has("WorkflowPlan")).toBe(false);
   });
 
   it("registers the tool once the setting turns it on", () => {
-    expect(boot({ workflowsEnabled: true }).tools.has("SubagentWorkflow")).toBe(true);
+    const booted = boot({ workflowsEnabled: true });
+    expect(booted.tools.has("SubagentWorkflow")).toBe(true);
+    expect(booted.tools.has("WorkflowPlaybook")).toBe(true);
+    expect(booted.tools.has("WorkflowPlaybookSave")).toBe(true);
+    expect(booted.tools.has("WorkflowPlan")).toBe(true);
   });
 
   it("refuses the startup flag while off, instead of running the script anyway", async () => {
@@ -1301,7 +1657,7 @@ describe("collisions with another extension", () => {
   const warnings = (context: any) =>
     context.ui.notify.mock.calls.filter((c: any[]) => c[1] === "warning").map((c: any[]) => String(c[0]));
 
-  it("warns when another extension already owns the tool name", async () => {
+  it("warns and withdraws companion tools when another extension owns the runtime name", async () => {
     // Pi keeps the FIRST registration per tool name, across extensions. Ours
     // never reaches the registry, and nothing in pi says so.
     const booted = boot();
@@ -1318,6 +1674,10 @@ describe("collisions with another extension", () => {
 
     expect(warnings(context).some(m => /already registers a "SubagentWorkflow" tool/.test(m))).toBe(true);
     expect(warnings(context).some(m => /other-ext/.test(m))).toBe(true);
+    expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
   });
 
   it("stays quiet when the registered tool is our own", async () => {
@@ -1392,6 +1752,9 @@ describe("collisions with another extension", () => {
     // and session_start runs before any turn, so the model never sees it.
     expect(booted.pi.setActiveTools).toHaveBeenCalled();
     expect(booted.pi.getActiveTools()).not.toContain("SubagentWorkflow");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
     // Everything else this extension registered stays.
     expect(booted.pi.getActiveTools()).toContain("Agent");
     expect(warnings(context).some(m => /already provides a "Workflow" tool/.test(m))).toBe(true);
@@ -1408,17 +1771,21 @@ describe("collisions with another extension", () => {
     expect(warnings(context).some(m => /workflowsEnabled/.test(m))).toBe(true);
   });
 
-  it("stands down without withdrawing when the foreign tool took our own name", async () => {
-    // First registration wins, so ours never reached the registry. There is
-    // nothing to withdraw — but the menu and the CLI flag would still be live,
-    // driving a tool the model cannot call, so the feature comes down anyway.
+  it("stands down and withdraws companion tools when the foreign tool took our own name", async () => {
+    // First registration wins, so our SubagentWorkflow never reached the registry.
+    // The companion Playbook/Plan tools are ours, though, and must be withdrawn
+    // when the workflow runtime stands down; the foreign SubagentWorkflow stays.
     const booted = bootAuto();
     booted.pi.getAllTools.mockReturnValue([foreign("SubagentWorkflow")]);
     const context = uiContext();
 
     await booted.lifecycle.get("session_start")?.({}, context);
 
-    expect(booted.pi.setActiveTools).not.toHaveBeenCalled();
+    expect(booted.pi.setActiveTools).toHaveBeenCalled();
+    expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
+    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
     expect(warnings(context).some(m => /already provides a "SubagentWorkflow" tool/.test(m))).toBe(true);
   });
 

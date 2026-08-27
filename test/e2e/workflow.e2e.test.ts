@@ -181,7 +181,7 @@ describe("Workflow end to end", () => {
 
     const childPrompts: string[] = [];
     const run = await runPrintMode({
-      prompt: "run the saved workflow",
+      prompt: "run the saved parent workflow",
       cwd,
       maxModelCalls: 32,
       live: false, // scripted on purpose: a real model would not emit the tool call
