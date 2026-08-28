@@ -1,7 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
+import {
+  type AgentActivity,
+  AgentWidget,
+  fgPreservingNestedStyles,
+  formatCost,
+  formatSessionTokens,
+  SPINNER,
+  SPINNER_INTERVAL_MS,
+  type Theme,
+  type UICtx,
+} from "../src/ui/agent-widget.js";
+import type { FleetWorkflow } from "../src/workflow/fleet.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -56,6 +67,11 @@ describe("renderRunningAgentStatus", () => {
 
 describe("AgentWidget", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const taggedTheme = {
+    fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+    bold: (text: string) => text,
+  };
+  type WidgetFactory = Exclude<Parameters<UICtx["setWidget"]>[1], undefined>;
 
   function makeActivity(): AgentActivity {
     return {
@@ -86,8 +102,14 @@ describe("AgentWidget", () => {
     };
   }
 
-  /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
-  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode, showModel = false): string {
+  function renderLines(
+    manager: unknown,
+    activityId: string,
+    mode?: () => WidgetMode,
+    showModel = false,
+    workflows?: () => readonly FleetWorkflow[],
+    renderTheme: Theme = theme,
+  ): string {
     const widget = new AgentWidget(
       manager as any,
       new Map([[activityId, makeActivity()]]),
@@ -95,6 +117,7 @@ describe("AgentWidget", () => {
       () => false,
       () => showModel,
     );
+    if (workflows) widget.setWorkflowSource(workflows);
     let factory: any;
     widget.setUICtx({
       setStatus: () => {},
@@ -102,9 +125,33 @@ describe("AgentWidget", () => {
     });
     widget.update();
     if (!factory) return "";
-    return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+    return factory({ terminal: { columns: 120 }, requestRender: () => {} }, renderTheme)
       .render()
       .join("\n");
+  }
+
+  function makeWorkflow(overrides: Partial<FleetWorkflow> = {}): FleetWorkflow {
+    return {
+      id: "wf_audit",
+      name: "Audit workflow",
+      status: "running",
+      doneCount: 1,
+      totalCount: 3,
+      startedAt: Date.now() - 12_000,
+      tokens: 1200,
+      phases: [{
+        id: "phase:inspect",
+        title: "Inspect",
+        doneCount: 1,
+        totalCount: 3,
+        agents: [
+          { index: 0, label: "queued child", state: "queued", agentType: "Explore", tokens: 0 },
+          { index: 1, label: "running child", state: "running", agentType: "Explore", tokens: 500, startedAt: Date.now() - 5000 },
+          { index: 2, label: "failed child", state: "failed", agentType: "Explore", tokens: 700, startedAt: Date.now() - 8000, completedAt: Date.now() - 1000 },
+        ],
+      }],
+      ...overrides,
+    };
   }
 
   // "all" (and the no-policy constructor default) shows every agent.
@@ -217,6 +264,475 @@ describe("AgentWidget", () => {
     expect(lines).not.toContain("q1 description");
     for (const i of [1, 2, 3]) expect(lines).toContain(`fin${i} description`);
     expect(lines).not.toContain("more (");
+  });
+
+  it("renders a workflow root before its phase and child hierarchy", () => {
+    const workflow = makeWorkflow();
+    const manager = { listAgents: () => [] };
+    const lines = renderLines(manager, "unused", () => "background", false, () => [workflow]).split("\n");
+
+    expect(lines[0]).toContain("Agents");
+    expect(lines[1]).toContain("Audit workflow");
+    expect(lines[2]).toContain("Inspect");
+    expect(lines[3]).toContain("queued child");
+    expect(lines[4]).toContain("running child");
+    expect(lines[5]).toContain("failed child");
+    expect(lines[1]).toMatch(/1\/3 agents/);
+  });
+
+  it("renders each workflow root immediately before its own hierarchy", () => {
+    const workflowA = makeWorkflow({
+      id: "wf_a",
+      name: "Workflow A",
+      phases: [{
+        id: "phase:a",
+        title: "Phase A",
+        doneCount: 0,
+        totalCount: 5,
+        agents: Array.from({ length: 5 }, (_, index) => ({
+          index,
+          label: `A child ${index}`,
+          state: "running" as const,
+          agentType: "Explore",
+          tokens: 0,
+          startedAt: Date.now(),
+        })),
+      }],
+    });
+    const workflowB = makeWorkflow({
+      id: "wf_b",
+      name: "Workflow B",
+      phases: [{
+        id: "phase:b",
+        title: "Phase B",
+        doneCount: 0,
+        totalCount: 1,
+        agents: [{
+          index: 0,
+          label: "B child",
+          state: "queued",
+          agentType: "Explore",
+          tokens: 0,
+        }],
+      }],
+    });
+    const ordinary = makeRecord("ordinary", { isBackground: true });
+    const lines = renderLines(
+      { listAgents: () => [ordinary] },
+      ordinary.id,
+      () => "all",
+      false,
+      () => [workflowA, workflowB],
+    ).split("\n");
+    const indexOf = (text: string) => lines.findIndex(line => line.includes(text));
+
+    expect(lines).toHaveLength(12);
+    expect(indexOf("Workflow A")).toBeLessThan(indexOf("Phase A"));
+    expect(indexOf("Phase A")).toBeLessThan(indexOf("A child 0"));
+    expect(indexOf("A child 4")).toBeLessThan(indexOf("Workflow B"));
+    expect(indexOf("Workflow B")).toBeLessThan(indexOf("Phase B"));
+    expect(indexOf("Phase B")).toBeLessThan(indexOf("B child"));
+    expect(lines.join("\n")).toContain("hidden: 1 agent");
+  });
+
+  it("reserves later active workflow roots before spending descendant budget", () => {
+    const workflowA = makeWorkflow({
+      id: "wf_a",
+      name: "Oversized A",
+      phases: [{
+        id: "phase:a",
+        title: "A descendants",
+        doneCount: 0,
+        totalCount: 20,
+        agents: Array.from({ length: 20 }, (_, index) => ({
+          index,
+          label: `large child ${index}`,
+          state: "running" as const,
+          agentType: "Explore",
+          tokens: 0,
+          startedAt: Date.now(),
+        })),
+      }],
+    });
+    const workflowB = makeWorkflow({ id: "wf_b", name: "Retained B" });
+    const lines = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [workflowA, workflowB],
+    ).split("\n");
+
+    expect(lines.length).toBeLessThanOrEqual(12);
+    expect(lines.findIndex(line => line.includes("Oversized A")))
+      .toBeLessThan(lines.findIndex(line => line.includes("Retained B")));
+    expect(lines.join("\n")).toContain("Retained B");
+    expect(lines.join("\n")).toMatch(/hidden: \d+ workflow nodes?/);
+  });
+
+  it.each([
+    ["running", "accent", SPINNER[0]],
+    ["paused", "warning", "‖"],
+    ["completed", "success", "✓"],
+    ["failed", "error", "✗"],
+    ["killed", "dim", "■"],
+  ] as const)("renders the %s workflow root marker", (status, color, marker) => {
+    const terminal = status === "completed" || status === "failed" || status === "killed";
+    const workflow = makeWorkflow({
+      status,
+      ...(terminal ? { completedAt: Date.now() } : {}),
+      phases: [],
+    });
+    const root = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [workflow],
+      taggedTheme,
+    ).split("\n")[1];
+
+    expect(root).toContain(`<${color}>${marker}</${color}>`);
+    expect(root).toContain(status);
+    expect(root).toContain("<dim>└─</dim>");
+  });
+
+  it.each([
+    ["running", "accent", SPINNER[0]],
+    ["done", "success", "✓"],
+    ["failed", "error", "✗"],
+    ["blocked", "error", "✗"],
+    ["queued", "accent", "○"],
+    ["interrupted", "dim", "■"],
+    ["skipped", "dim", "■"],
+  ] as const)("derives and renders %s phase/child semantics", (state, color, marker) => {
+    const workflow = makeWorkflow({
+      phases: [{
+        id: `phase:${state}`,
+        title: `Phase ${state}`,
+        doneCount: state === "done" ? 1 : 0,
+        totalCount: 1,
+        agents: [{ index: 0, label: `${state} child`, state, agentType: "Explore", tokens: 0 }],
+      }],
+    });
+    const lines = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [workflow],
+      taggedTheme,
+    ).split("\n");
+    const phase = lines.find(line => line.includes(`Phase ${state}`));
+    const child = lines.find(line => line.includes(`${state} child`));
+
+    expect(phase).toContain(`<${color}>${marker}</${color}>`);
+    expect(child).toContain(`<${color}>${marker}</${color}>`);
+  });
+
+  it("omits elapsed tails for queued and never-started interrupted children", () => {
+    const workflow = makeWorkflow({
+      phases: [{
+        id: "phase:tails",
+        title: "Tails",
+        doneCount: 0,
+        totalCount: 2,
+        agents: [
+          { index: 0, label: "queued child", state: "queued", agentType: "Explore", tokens: 0 },
+          { index: 1, label: "interrupted child", state: "interrupted", agentType: "Explore", tokens: 0 },
+        ],
+      }],
+    });
+    const lines = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [workflow],
+    ).split("\n");
+    const queued = lines.find(line => line.includes("queued child"));
+    const interrupted = lines.find(line => line.includes("interrupted child"));
+
+    expect(queued).toMatch(/queued child queued$/);
+    expect(queued).not.toContain("queued · queued");
+    expect(interrupted).toMatch(/interrupted child interrupted$/);
+    expect(interrupted).not.toContain("interrupted · queued");
+  });
+
+  it("uses branch connectors for child siblings and closes the last branch", () => {
+    const lines = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [makeWorkflow()],
+    ).split("\n");
+
+    expect(lines[1]).toContain("└─");
+    expect(lines[2]).toContain("└─");
+    expect(lines[3]).toContain("├─");
+    expect(lines[4]).toContain("├─");
+    expect(lines[5]).toContain("└─");
+  });
+
+  it("marks a declared phase with no agents as not-started", () => {
+    const workflow = makeWorkflow({
+      phases: [{ id: "phase:later", title: "Later", doneCount: 0, totalCount: 0, agents: [] }],
+    });
+    const lines = renderLines({ listAgents: () => [] }, "unused", () => "all", false, () => [workflow]);
+
+    expect(lines).toContain("○ phase Later  not-started · 0/0");
+  });
+
+  it("does not duplicate workflow children as ordinary agent rows", () => {
+    const child = makeRecord("child", { isBackground: true, workflowId: "wf_audit" });
+    const ordinary = makeRecord("ordinary", { isBackground: true });
+    const lines = renderLines(
+      { listAgents: () => [child, ordinary] },
+      "ordinary",
+      () => "all",
+      false,
+      () => [makeWorkflow()],
+    );
+
+    expect(lines).toContain("Audit workflow");
+    expect(lines).toContain("ordinary description");
+    expect(lines).not.toContain("child description");
+  });
+
+  it("shows no workflow or agent content when widget mode is off", () => {
+    const lines = renderLines(
+      { listAgents: () => [makeRecord("ordinary", { isBackground: true })] },
+      "ordinary",
+      () => "off",
+      false,
+      () => [makeWorkflow()],
+    );
+    expect(lines).toBe("");
+  });
+
+  it("shows a settled workflow for four seconds and then removes it", () => {
+    vi.useFakeTimers();
+    const workflow = makeWorkflow({ status: "completed", completedAt: Date.now() });
+    const manager = { listAgents: () => [] };
+    const widget = new AgentWidget(
+      manager as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      new Map(),
+      () => "all",
+    );
+    widget.setWorkflowSource(() => [workflow]);
+    let factory: WidgetFactory | undefined;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+
+    widget.update();
+    const render = () => {
+      if (!factory) return "";
+      return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    };
+    expect(render()).toContain("Audit workflow");
+    vi.advanceTimersByTime(3999);
+    widget.update();
+    expect(render()).toContain("Audit workflow");
+    vi.advanceTimersByTime(1);
+    widget.update();
+    expect(factory).toBeUndefined();
+    widget.dispose();
+    vi.useRealTimers();
+  });
+
+  it("subtracts resumed pause duration from workflow elapsed", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const workflow = makeWorkflow({ startedAt: 1_000, totalPausedMs: 4_000, phases: [] });
+
+    const lines = renderLines(
+      { listAgents: () => [] },
+      "unused",
+      () => "all",
+      false,
+      () => [workflow],
+    );
+
+    expect(lines).toContain("5.0s");
+    expect(lines).not.toContain("9.0s");
+    vi.useRealTimers();
+  });
+
+  it("caps mixed workflow and ordinary content with typed hidden counts", () => {
+    const workflowA = makeWorkflow({
+      id: "wf_a",
+      name: "Workflow A",
+      phases: Array.from({ length: 2 }, (_, phaseIndex) => ({
+        id: `phase:a:${phaseIndex}`,
+        title: `A phase ${phaseIndex}`,
+        doneCount: 0,
+        totalCount: 2,
+        agents: Array.from({ length: 2 }, (_, index) => ({
+          index: phaseIndex * 2 + index,
+          label: `A child ${phaseIndex}-${index}`,
+          state: "running" as const,
+          agentType: "Explore",
+          tokens: 0,
+          startedAt: Date.now(),
+        })),
+      })),
+    });
+    const workflowB = makeWorkflow({
+      id: "wf_b",
+      name: "Workflow B",
+      phases: [{
+        id: "phase:b",
+        title: "B phase",
+        doneCount: 0,
+        totalCount: 2,
+        agents: Array.from({ length: 2 }, (_, index) => ({
+          index,
+          label: `B child ${index}`,
+          state: "queued" as const,
+          agentType: "Explore",
+          tokens: 0,
+        })),
+      }],
+    });
+    const running = makeRecord("ordinary-running", { isBackground: true });
+    const queued = { ...makeRecord("ordinary-queued", { isBackground: true }), status: "queued" };
+    const finished = {
+      ...makeRecord("ordinary-finished", { isBackground: true }),
+      status: "completed",
+      completedAt: Date.now(),
+    };
+    const lines = renderLines(
+      { listAgents: () => [running, queued, finished] },
+      running.id,
+      () => "all",
+      false,
+      () => [workflowA, workflowB],
+    ).split("\n");
+    const rendered = lines.join("\n");
+
+    expect(lines.length).toBeLessThanOrEqual(12);
+    expect(rendered).toContain("1 queued");
+    expect(rendered).not.toContain("ordinary-finished description");
+    expect(rendered).toContain("hidden: 2 workflow nodes, 2 agents");
+  });
+
+  it("singularizes mixed workflow and agent hidden counts", () => {
+    const workflow = makeWorkflow({
+      phases: [{
+        id: "phase:large",
+        title: "Large phase",
+        doneCount: 0,
+        totalCount: 9,
+        agents: Array.from({ length: 9 }, (_, index) => ({
+          index,
+          label: `child ${index}`,
+          state: "running" as const,
+          agentType: "Explore",
+          tokens: 0,
+          startedAt: Date.now(),
+        })),
+      }],
+    });
+    const ordinary = makeRecord("ordinary", { isBackground: true });
+    const rendered = renderLines(
+      { listAgents: () => [ordinary] },
+      ordinary.id,
+      () => "all",
+      false,
+      () => [workflow],
+    );
+
+    expect(rendered).toContain("hidden: 1 workflow node, 1 agent");
+  });
+
+  it("shows a workflow even when there are no ordinary agents", () => {
+    expect(renderLines({ listAgents: () => [] }, "unused", () => "background", false, () => [makeWorkflow()]))
+      .toContain("Audit workflow");
+  });
+
+  it("advances the shared spinner only on timer ticks, not event updates", () => {
+    vi.useFakeTimers();
+    const record = makeRecord("running", { isBackground: true });
+    const widget = new AgentWidget(
+      { listAgents: () => [record] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      new Map(),
+      () => "all",
+    );
+    let factory: WidgetFactory | undefined;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    widget.update();
+    const render = () => {
+      if (!factory) throw new Error("widget factory was not registered");
+      return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    };
+    const frame = () => render().split("\n")[1].trim().split(" ")[1];
+    const first = frame();
+    for (let i = 0; i < 5; i++) widget.update();
+    expect(frame()).toBe(first);
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
+    expect(frame()).not.toBe(first);
+    expect(SPINNER).toContain(frame());
+    widget.dispose();
+    vi.useRealTimers();
+  });
+
+  it("stops advancing frames after a running workflow settles", () => {
+    vi.useFakeTimers();
+    const workflow = makeWorkflow();
+    const widget = new AgentWidget(
+      { listAgents: () => [] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      new Map(),
+      () => "all",
+    );
+    widget.setWorkflowSource(() => [workflow]);
+    let factory: WidgetFactory | undefined;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    widget.update();
+    const frame = () => {
+      if (!factory) throw new Error("widget factory was not registered");
+      return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+        .render()[1].trim().split(" ")[1];
+    };
+
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
+    const settledFrame = frame();
+    workflow.status = "completed";
+    workflow.completedAt = Date.now();
+    widget.update();
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 3);
+    workflow.status = "running";
+    workflow.completedAt = undefined;
+    widget.update();
+
+    expect(frame()).toBe(settledFrame);
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
+    expect(frame()).not.toBe(settledFrame);
+    widget.dispose();
+    vi.useRealTimers();
+  });
+
+  it("does not keep the animation interval alive for a paused workflow", () => {
+    vi.useFakeTimers();
+    const workflow = makeWorkflow({ status: "paused" });
+    const widget = new AgentWidget(
+      { listAgents: () => [] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      new Map(),
+      () => "all",
+    );
+    widget.setWorkflowSource(() => [workflow]);
+    let factory: WidgetFactory | undefined;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    widget.update();
+
+    expect(vi.getTimerCount()).toBe(0);
+    if (!factory) throw new Error("widget factory was not registered");
+    const before = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render()[1];
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 3);
+    const after = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render()[1];
+    expect(before).toContain("‖");
+    expect(after).toContain("‖");
+    widget.dispose();
+    vi.useRealTimers();
   });
 
   // "off" hides the widget entirely — even a background agent renders nothing.
@@ -423,8 +939,10 @@ describe("AgentWidget overflow accounting", () => {
     return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
   }
 
-  /** The `+N more (…)` footer, if the widget overflowed. */
-  const footer = (lines: string[]) => lines.find(l => l.includes("more ("));
+  /** The typed hidden-count footer, if the widget overflowed. */
+  const footer = (lines: string[]) => lines.find(l => l.includes("hidden:"));
+  const hiddenAgentCount = (line: string | undefined) =>
+    Number(/(\d+) agents?/.exec(line ?? "")?.[1] ?? 0);
 
   /** Every fleet shape worth rendering — swept, not sampled. */
   const SHAPES: { running: number; queued: number; finished: number }[] = [];
@@ -444,12 +962,12 @@ describe("AgentWidget overflow accounting", () => {
     for (const counts of SHAPES) {
       const f = footer(renderFleet(counts));
       if (!f) continue;
-      const total = Number(/\+(\d+) more/.exec(f)?.[1]);
+      const total = hiddenAgentCount(f);
       const where = `${JSON.stringify(counts)} → ${f}`;
-      // A visible footer means something was dropped, so "+0 more ()" is a lie...
+      // A visible agents-only footer must name at least one hidden agent.
       expect(total, where).toBeGreaterThan(0);
-      // ...and it counts agents that have their own row, so it can never exceed
-      // them — in particular the queued summary must not be counted as an agent.
+      // Queued agents share one visible summary and are not counted as hidden
+      // per-agent rows.
       expect(total, where).toBeLessThanOrEqual(counts.running + counts.finished);
     }
   });
@@ -474,8 +992,12 @@ describe("AgentWidget overflow accounting", () => {
       .filter(i => !body.includes(`fin${i} description`)).length;
     const actuallyHidden = (counts.running - shownRunning) + (counts.finished - shownFinished);
 
-    const reported = Number(/\+(\d+) more/.exec(footer(lines) ?? "")?.[1] ?? -1);
+    const reported = hiddenAgentCount(footer(lines));
     expect(reported).toBe(actuallyHidden);
+  });
+
+  it("pluralizes multiple hidden ordinary agents", () => {
+    expect(footer(renderFleet({ running: 6, queued: 1, finished: 1 }))).toMatch(/\d+ agents/);
   });
 
   it("gives the queued summary priority over finished lines", () => {

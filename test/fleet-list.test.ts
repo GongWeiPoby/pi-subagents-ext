@@ -89,7 +89,7 @@ interface Harness {
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
-  render: (width?: number) => string[];
+  render: (width?: number, renderTheme?: typeof theme) => string[];
   setEditorText: (t: string) => void;
   /** Whether an overlay has been opened. */
   overlayOpened: () => boolean;
@@ -110,6 +110,7 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
     totalCount: 3,
     startedAt: Date.now() - 32_000,
     tokens: 26_400,
+    phases: [],
     ...over,
   };
 }
@@ -170,7 +171,9 @@ function harness(
     manager,
     overlayComponent: () => overlayComponent,
     press: (data) => inputHandler?.(data),
-    render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
+    render: (width = 120, renderTheme = theme) => (
+      widgetFactory ? widgetFactory(fakeTui, renderTheme).render(width) : []
+    ),
     setEditorText: (t) => { editorText = t; },
     overlayOpened: () => opened,
     overlayClosed: () => closed,
@@ -466,6 +469,123 @@ describe("FleetList rendering", () => {
     h.overlayComponent()!.handleInput("x");
     h.overlayComponent()!.handleInput("x");
     expect((h.manager.abort as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("renders exact sibling-aware connectors across two workflow phases", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const phases: FleetWorkflowPhase[] = [
+        {
+          id: "phase:discover",
+          title: "Discover",
+          doneCount: 1,
+          totalCount: 1,
+          agents: [{
+            index: 0,
+            label: "first child",
+            state: "done",
+            agentType: "Explore",
+            tokens: 10,
+            startedAt: 1_000,
+            completedAt: 2_000,
+          }],
+        },
+        {
+          id: "phase:verify",
+          title: "Verify",
+          doneCount: 0,
+          totalCount: 1,
+          agents: [{
+            index: 1,
+            label: "second child",
+            state: "interrupted",
+            agentType: "Explore",
+            tokens: 20,
+            startedAt: 3_000,
+            completedAt: 6_000,
+          }],
+        },
+      ];
+      const h = harness([makeRecord({
+        id: "ordinary",
+        description: "ordinary top-level",
+        startedAt: 9_000,
+      })]);
+      h.setWorkflows([makeWorkflow({ doneCount: 1, totalCount: 2, phases })]);
+      h.press(LEFT);
+      h.press(DOWN);
+      h.press(RIGHT);
+      for (let index = 0; index < 5; index++) h.press(DOWN);
+
+      const width = 120;
+      const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+      const rendered = h.render(width, plainTheme);
+      const rows = rendered.filter(row => row.includes("phase") || row.includes("child"));
+      expect(rows).toEqual([
+        "  ○   ├─ phase  Discover".padEnd(width - "1/1".length) + "1/1",
+        "  ○   │  └─ ✓ Explore  first child".padEnd(width - "1s · ↓ 10 tokens".length) + "1s · ↓ 10 tokens",
+        "  ○   └─ phase  Verify".padEnd(width - "0/1".length) + "0/1",
+        "  ○      └─ ■ Explore  second child".padEnd(width - "3s · ↓ 20 tokens".length) + "3s · ↓ 20 tokens",
+      ]);
+      const ordinaryStats = "1s · ↓ 13.1k tokens";
+      expect(rendered.find(row => row.includes("ordinary top-level"))).toBe(
+        `  ● ${getDisplayName("general-purpose")}  ordinary top-level`.padEnd(width - ordinaryStats.length)
+          + ordinaryStats,
+      );
+      h.fleet.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders exact branch and closing connectors for two child siblings", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const phases: FleetWorkflowPhase[] = [{
+        id: "phase:inspect",
+        title: "Inspect",
+        doneCount: 2,
+        totalCount: 2,
+        agents: [
+          {
+            index: 0,
+            label: "first child",
+            state: "done",
+            agentType: "Explore",
+            tokens: 10,
+            startedAt: 1_000,
+            completedAt: 2_000,
+          },
+          {
+            index: 1,
+            label: "second child",
+            state: "done",
+            agentType: "Explore",
+            tokens: 20,
+            startedAt: 3_000,
+            completedAt: 6_000,
+          },
+        ],
+      }];
+      const h = harness([]);
+      h.setWorkflows([makeWorkflow({ doneCount: 2, totalCount: 2, phases })]);
+      h.press(LEFT);
+      h.press(DOWN);
+      h.press(RIGHT);
+
+      const width = 120;
+      const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+      const rows = h.render(width, plainTheme).filter(row => row.includes("child"));
+      expect(rows).toEqual([
+        "  ○      ├─ ✓ Explore  first child".padEnd(width - "1s · ↓ 10 tokens".length) + "1s · ↓ 10 tokens",
+        "  ○      └─ ✓ Explore  second child".padEnd(width - "3s · ↓ 20 tokens".length) + "3s · ↓ 20 tokens",
+      ]);
+      h.fleet.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
@@ -861,5 +981,59 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ status: "completed", startedAt: completedAt - 12_000, completedAt })]);
 
     expect(h.render().map(plain).join("\n")).toContain("12s");
+  });
+
+  it("freezes an interrupted started child's clock during workflow linger", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(6_000);
+    try {
+      const phases: FleetWorkflowPhase[] = [{
+        id: "phase:interrupted",
+        title: "Interrupted",
+        doneCount: 0,
+        totalCount: 1,
+        agents: [{
+          index: 0,
+          label: "interrupted child",
+          state: "interrupted",
+          agentType: "Explore",
+          tokens: 0,
+          startedAt: 1_000,
+          completedAt: 5_000,
+        }],
+      }];
+      const h = harness([]);
+      h.setWorkflows([makeWorkflow({
+        status: "failed",
+        startedAt: 1_000,
+        completedAt: 5_000,
+        phases,
+      })]);
+      h.press(LEFT);
+      h.press(DOWN);
+      h.press(RIGHT);
+
+      expect(h.render(120).map(plain).find(line => line.includes("interrupted child"))).toContain("4s");
+      vi.advanceTimersByTime(2_000);
+      expect(h.render(120).map(plain).find(line => line.includes("interrupted child"))).toContain("4s");
+      h.fleet.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("subtracts paused time after a workflow resumes", () => {
+    const h = harness([]);
+    const completedAt = Date.now() - 1_000;
+    h.setWorkflows([makeWorkflow({
+      status: "completed",
+      startedAt: completedAt - 12_000,
+      completedAt,
+      totalPausedMs: 4_000,
+    })]);
+
+    const rendered = h.render().map(plain).join("\n");
+    expect(rendered).toContain("8s");
+    expect(rendered).not.toContain("12s");
   });
 });

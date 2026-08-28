@@ -6,6 +6,8 @@
  * the widget, so anything unrecognised falls back to the built-in glyph.
  */
 
+import { BRAILLE_SPINNER_FRAMES } from "../ui/spinner.js";
+
 /** A fully resolved glyph set — what the render sites consume. */
 export interface TaskGlyphs {
   /** Completed task rows, in the widget and the /tasks list. */
@@ -45,17 +47,16 @@ export type TaskGlyphsConfig = Partial<Omit<TaskGlyphs, "spinner">> & { spinner?
 /** Every glyph's built-in default. `completedSummary` is deliberately absent: it has
  *  no literal of its own and inherits whatever `completed` resolves to.
  *
- *  The spinner walks the dingbat block. Claude Code's own spinner is a shorter
- *  mirrored sequence (`· ✢ ✳ ✶ ✻ ✽` and its reverse, with a ghostty variant);
- *  this one is deliberately ours.
+ *  The spinner uses the shared agent braille sequence so active execution looks
+ *  consistent across the two persistent widgets.
  *
  *  `truncation` is three ASCII dots rather than `…` because that is pi-tui's own
  *  default, and the widget has always clipped with it. */
 const DEFAULT_GLYPHS: Omit<TaskGlyphs, "completedSummary"> = {
-  completed: "✔",
+  completed: "✓",
   inProgress: "◼",
   pending: "◻",
-  spinner: ["✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼", "✽"],
+  spinner: BRAILLE_SPINNER_FRAMES,
   header: "●",
   overflow: "…",
   blocked: "›",

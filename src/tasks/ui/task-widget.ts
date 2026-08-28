@@ -2,10 +2,10 @@
  * task-widget.ts — Persistent widget showing task list with status glyphs and progress.
  *
  * Display style matches Claude Code's task list:
- *   ✔ completed tasks (strikethrough + dim)
+ *   ✓ completed tasks (strikethrough + dim)
  *   ◼ in_progress tasks
  *   ◻ pending tasks
- *   ✳/✽ actively executing task (star spinner with activeForm text)
+ *   ⠋/⠏ actively executing task (shared braille spinner with activeForm text)
  *
  * Every glyph on screen is a default that `glyphs` in tasks-config.json can
  * replace — see task-glyphs.ts.
@@ -13,6 +13,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { SPINNER_INTERVAL_MS } from "../../ui/spinner.js";
 import { resolveTaskGlyphs } from "../task-glyphs.js";
 import type { TaskStore } from "../task-store.js";
 import type { TasksConfig } from "../tasks-config.js";
@@ -89,7 +90,14 @@ export class TaskWidget {
   ) {}
 
   setStore(store: TaskStore) {
+    if (store === this.store) return;
     this.store = store;
+    this.activeTaskIds.clear();
+    this.metrics.clear();
+    if (this.widgetInterval) {
+      clearInterval(this.widgetInterval);
+      this.widgetInterval = undefined;
+    }
   }
 
   setUICtx(ctx: UICtx) {
@@ -106,6 +114,7 @@ export class TaskWidget {
       this.ensureTimer();
     } else if (taskId) {
       this.activeTaskIds.delete(taskId);
+      this.metrics.delete(taskId);
     }
     this.update();
   }
@@ -130,7 +139,7 @@ export class TaskWidget {
       this.widgetInterval = setInterval(() => {
         this.widgetFrame++;
         this.update();
-      }, 150);
+      }, SPINNER_INTERVAL_MS);
       this.widgetInterval.unref();
     }
   }

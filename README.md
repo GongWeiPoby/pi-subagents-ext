@@ -16,8 +16,8 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, and optional subagent cascade. **[Task guide](docs/tasks.md)**
 - **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator prompts with YAML metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` discovers guidance; `WorkflowPlan` validates an AI-selected DAG, presents a human-readable behavior summary for approval, returns a one-use opaque `planRef`, and keeps generated execution JavaScript internal; `WorkflowPlaybookSave` promotes a generalized result to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
-- **Workflow execution trees** — each workflow is a controller node in FleetView with expandable phase and child-agent rows. Child agents use the same conversation viewer as ordinary agents, while pause/skip/retry/stop remain workflow-owned.
-- **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
+- **Workflow execution trees** — each workflow is a controller node in the above-editor Agents widget and in FleetView, with phase and child-agent rows. Child agents use the same conversation viewer as ordinary agents in FleetView, while pause/skip/retry/stop remain workflow-owned.
+- **Live widget UI** — persistent above-editor widget with workflow → phase → child hierarchy ahead of ordinary agents, animated spinners, live tool activity, token counts, and colored status icons, all within one 12-line budget. Configurable via `/agents → Settings → Widget`: `all` (every top-level agent plus workflows), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result, but still shows workflows), or `off` (hides both)
 - **FleetView** — Claude Code-style navigable list of `main`, workflow controllers, workflow phases/children, and ordinary subagents rendered below the editor. Workflows start collapsed; `→` expands a workflow into its phase and child-agent tree, `←` collapses it, `Enter` opens the workflow controller or the selected child conversation. Workflow children reuse the ordinary conversation viewer but remain owned by the workflow for stop/skip/retry, notifications, mentions, and concurrency. Finished entries linger briefly. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too. Assistant text renders as Markdown; `m` cycles that between off, assistant-only and everything (see [Viewer markdown](#persistent-settings))
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
@@ -156,18 +156,22 @@ Restrictions:
 
 ## UI
 
-The extension renders a persistent widget above the editor showing active agents. By default it shows background runs only (`widgetMode: background`) — foreground agents already render inline as the `Agent` tool result, so the widget would otherwise double-render them. Switch to `all` (every agent) or `off` (hide the widget) via `/agents → Settings → Widget`:
+The extension renders a persistent Agents widget above the editor. Workflows appear first as workflow → phase → child trees, followed by ordinary top-level agents. By default it shows background runs plus workflows (`widgetMode: background`) — foreground agents already render inline as the `Agent` tool result, so the widget would otherwise double-render them. Switch to `all` (every top-level agent plus workflows) or `off` (hide both agents and workflows) via `/agents → Settings → Widget`:
 
-```
+```text
 ● Agents
+├─ ⠹ audit-src  running · 2/4 agents · 8.2s
+│  ├─ ⠹ phase Inspect  running · 1/2
+│  │  ├─ ✓ Explore  inventory routes done · 3.1s
+│  │  └─ ⠹ Explore  inspect auth running · 5.0s
+│  └─ ○ phase Verify  not-started · 0/0
 ├─ ⠹ Agent  Refactor auth module · ↻5≤30 · 5 tool uses · 33.8k token (62%) · 12.3s
 │    ⎿  editing 2 files…
-├─ ⠹ Explore  Find auth files · ↻3 · 3 tool uses · 12.4k token (8%) · 4.1s
-│    ⎿  searching…
-├─ ⠹ Agent  Long-running task · ↻42 · 38 tool uses · 91.0k token (84% · ⇊2) · 2m17s
-│    ⎿  reading…
-└─ 2 queued
+├─ ◦ 2 queued
+└─ hidden: 2 workflow nodes, 1 agent
 ```
+
+Running workflows and agents use the shared braille animation at 80 ms; paused workflows use the stable `‖` marker and their elapsed time excludes completed pauses. Terminal workflows linger for four seconds. Each workflow root is followed immediately by its own phases and children; under pressure, descendant rows collapse before a later active workflow root is hidden. Workflow trees take priority, then running top-level agents, the queued summary, and finished agents. The heading, body, and explicit `hidden: N workflow node(s), M agent(s)` line share one 12-line cap.
 
 The token field is annotated with two optional signals inside parens:
 - **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
@@ -187,7 +191,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-Running [workflows](#subagentworkflow) appear as controller rows above ordinary agents. A workflow starts collapsed; press `→` to expand it into phase rows and child-agent rows, or `←` to collapse it. `Enter` on the workflow opens the two-pane inspector `/agents → Workflows`; `Enter` on a child opens the same live conversation viewer as an ordinary subagent. The children remain owned by the workflow, so workflow pause/skip/retry/stop controls are not bypassed by opening a child. They remain filtered from the standalone widget, `/agents` menus, completion notifications and `@handle` resolution, and stay outside the session concurrency pools. Queued or replayed children without a live record remain visible in the tree but cannot open a conversation. Large fan-outs are windowed so they do not displace the rest of the fleet. At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Esc` (or `↑` above `main`) returns to the prompt. Typing anything at a non-empty prompt behaves normally. Disable it entirely via `/agents → Settings → Fleet view`.
+Running [workflows](#subagentworkflow) appear as controller rows above ordinary agents. A workflow starts collapsed; press `→` to expand it into phase rows and child-agent rows, or `←` to collapse it. `Enter` on the workflow opens the two-pane inspector `/agents → Workflows`; `Enter` on a child opens the same live conversation viewer as an ordinary subagent. The children remain owned by the workflow, so workflow pause/skip/retry/stop controls are not bypassed by opening a child. They remain filtered from standalone top-level agent rows, `/agents` menus, completion notifications, and `@handle` resolution, but appear exactly once beneath their workflow controller in the above-editor Agents widget and FleetView tree. They stay outside the session concurrency pools. Queued or replayed children without a live record remain visible in the tree but cannot open a conversation. Large fan-outs are windowed so they do not displace the rest of the fleet. At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Esc` (or `↑` above `main`) returns to the prompt. Typing anything at a non-empty prompt behaves normally. Disable it entirely via `/agents → Settings → Fleet view`.
 
 ### Agent mentions
 
@@ -460,12 +464,12 @@ Use tasks for a mutable work list whose status and dependencies evolve during a 
 | `TaskGet` | Read full task details and metadata | `taskId` |
 | `TaskUpdate` | Change fields/status and add dependency edges | `taskId`, optional `status`, fields, `addBlocks`, `addBlockedBy` |
 | `TaskExecute` | Launch pending agent-backed tasks | `task_ids`, optional `additional_context`, `model`, `max_turns` |
-| `TaskOutput` | Explicitly inspect or join an agent-backed task | `task_id`, `block` (default `true`), `timeout` (default `30000`, max `600000`) |
+| `TaskOutput` | Explicitly inspect or join an agent-backed task or `SubagentWorkflow` run | `task_id` (task/agent ID or `wf_*` run ID), `block` (default `true`), `timeout` (default `30000`, max `600000`) |
 | `TaskStop` | Stop a running agent-backed task | `task_id` |
 
 `TaskUpdate.status` accepts `pending`, `in_progress`, `completed`, or `deleted`; `deleted` permanently removes the task and cleans its dependency edges. `addBlocks` and `addBlockedBy` maintain both sides of an edge. Self-edges, cycles, and missing targets are retained with warnings, matching Claude Code's permissive behavior.
 
-`TaskExecute` requires each task to be pending, have `agentType`, and have every blocker completed. It launches through this extension's existing subagent RPC path, so model scoping, concurrency, lifecycle events, result consumption, and stopping use the same contracts as other top-level agents. With `autoCascade` on, a completion starts newly unblocked dependents and injects completed prerequisite results into their prompts. `TaskOutput` is an explicit join/status action; do not poll a running task.
+`TaskExecute` requires each task to be pending, have `agentType`, and have every blocker completed. It launches through this extension's existing subagent RPC path, so model scoping, concurrency, lifecycle events, result consumption, and stopping use the same contracts as other top-level agents. With `autoCascade` on, a completion starts newly unblocked dependents and injects completed prerequisite results into their prompts. `TaskOutput` is an explicit join/status action for either an agent-backed structured task or the `wf_*` run ID returned by `SubagentWorkflow`; do not poll a running task. `block: false` returns current workflow status and counts immediately. `block: true` waits event-first until the run settles, the timeout expires, the call is aborted, or the session changes. A timeout or abort leaves the future completion notification intact; returning settled workflow output consumes its held notification so the same result is not delivered twice.
 
 ### Task storage
 
@@ -566,11 +570,11 @@ Validate an adaptive structured DAG and compile temporary JavaScript for `Subage
 | `nodes` | object[] | yes | Work nodes with prompts, agents, options, and dependencies |
 | `omitted` | object[] | no | Material capabilities omitted with reasons |
 
-The tool rejects duplicate/unsafe IDs, unknown/self dependencies, cycles, invalid confidence, excessive prompt volume, unsupported options, and worktree nodes when project isolation is disabled. Every adaptive Plan is shown for direct confirmation before compilation because selected agents may have broad tools; model-supplied approval/effect metadata is descriptive, not the authorization boundary. The approval view is a behavior summary rather than generated JavaScript, and still includes each node's task prompt, model, effort, dependencies, isolation, gate, side effects, and structured-output requirement. Without a UI or approval, no script is produced. A ready result contains an inspectable YAML summary and a one-use opaque `planRef`; pass that reference to `SubagentWorkflow` rather than copying generated source.
+The tool rejects duplicate/unsafe IDs, unknown/self dependencies, cycles, invalid confidence, excessive prompt volume, unsupported options, and worktree nodes when project isolation is disabled. Every adaptive Plan is shown for direct confirmation before compilation because selected agents may have broad tools; model-supplied approval/effect metadata is descriptive, not the authorization boundary. The approval view places a compact exact-dependency map near the top, before the full node details: `START` roots, prerequisite-result handoffs, joins, `END` sinks, and a node legend with title, capability, and text/structured output contracts; it also notes that failure or skip can yield `null` while final results retain each node output. The full behavior summary remains below it, including each node's task prompt, model, effort, dependencies, isolation, gate, side effects, and structured-output requirement. Without a UI or approval, no script is produced. A ready result contains an inspectable YAML summary and a one-use opaque `planRef`; pass that reference to `SubagentWorkflow` rather than copying generated source.
 
 ### `SubagentWorkflow`
 
-Run a deterministic script that orchestrates many subagents. Returns a task id immediately; the run continues in the background and notifies on completion.
+Run a deterministic script that orchestrates many subagents. Returns a task id immediately; the run continues in the background and notifies on completion. A tool-started completion stays inside this extension while the parent is active, then enters the conversation only after `agent_settled` confirms the owning session is idle; idle is checked again at the actual send point so a newly started turn cannot strand the result in pi's abort-clearable follow-up queue. Use `TaskOutput` with the returned `wf_*` ID for an explicit status/join request; settled output consumes the held notification.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -584,7 +588,7 @@ Run a deterministic script that orchestrates many subagents. Returns a task id i
 
 Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. `planRef` is the one-use exact Plan handoff and cannot be combined with a direct source, `args`, or `resumeFromRunId`. A valid `planRef` executes directly because it is one-use and bound to the internally retained script-and-arguments digest.
 
-Every non-`planRef` invocation uses the direct policy. When `ctx.hasUI` is true, the tool always previews the selected source's behavior summary and arguments for confirmation, including exact resumes; it never infers authorization from user prose, workflow names, or risk keywords. When `ctx.hasUI` is false, direct invocations and resumes proceed without a UI prompt because the automation caller is the trust boundary. Direct inline/path scripts that reference the injected `workflow` binding are refused because nested behavior cannot be approved from the parent summary; detection uses the Babel AST, covers optional/indirect/aliased references, and fails closed on parse errors. Saved named workflows may compose nested workflows but remain UI-confirmed or headless-allowed.
+Every non-`planRef` invocation uses the direct policy. When `ctx.hasUI` is true, the tool always previews the selected source's behavior summary and arguments for confirmation, including exact resumes; an ASCII-only static flow map appears near the top before the parameters and per-agent details, showing execution/control order, parallel branches, overlapping pipeline stages, nested workflow sites, and each agent's text or structured output contract. Its arrows are never data-dependency claims: handoffs are script-defined and reported as not statically proven. It also states that runtime fan-out/control flow may differ. The tool refuses UI-confirmed direct scripts when an injected global (`agent`, `parallel`, `pipeline`, `phase`, or `workflow`) is aliased, invoked through `.call`/`.apply`, hidden in a computed/conditional/sequence callee, or shadowed by a local declaration or parameter; rewrite these as direct identifier calls and rename local shadows. It also refuses agent calls whose arguments or option object use spreads, computed keys, methods, shorthand properties, a non-object options value, or dynamic behavior fields, because those forms can hide gates, isolation, resumes, or other previewed behavior. An explicit dynamic schema such as `schema: REPORT_SCHEMA` remains supported and is shown as configured with its expression. User prose, workflow names, and risk keywords never imply authorization. When `ctx.hasUI` is false, these direct-preview completeness checks are skipped because the automation caller is the trust boundary; exact-approved `planRef` runs are unaffected. Direct inline/path scripts that reference the injected `workflow` binding remain refused because nested behavior cannot be approved from the parent summary; detection uses the Babel AST, covers optional/indirect/aliased references, and fails closed on parse errors. Saved named workflows may compose nested workflows through direct `workflow(...)` calls but remain UI-confirmed or headless-allowed.
 
 The explicit `--subagents-workflow-file=` CLI startup path remains available for automation. Each invocation's script is persisted to the session directory and its path returned, so iterating means editing that file and re-running rather than resending the source. A saved workflow reports its own file instead, so the same loop works on it — project `.pi/workflows/` shadows a same-named global one. Those directories are ordinary folders that may hold other scripts, so only files carrying the `export const meta = { name, description }` declaration are listed or resolved; naming anything else reports that it is not a workflow rather than running it. The check is a regex over the source — nothing in the file is executed to make it, and even a real parse evaluates only the `meta` object literal, in an empty `node:vm` context with a 100ms bound.
 
@@ -647,15 +651,15 @@ Send a steering message to a running agent. The message interrupts after the cur
  Dynamically discover files under src/ and audit each …                    1/3 agents · 32s
 
  ╭ Phases ──────────┬ Discover · 1 agent ──────────────────────────────────────────────╮
- │ ❯ ✔ Discover 1/1 │ ❯ ✔ discover:src Opus 5 (1M context) · 26.4k tok             25s │
- │   2 Audit    0/2 │                                                                  │
+ │ ❯ ✓ Discover 1/1 │ ❯ ✓ discover:src Opus 5 (1M context) · 26.4k tok             25s │
+ │   ⠉ Audit    0/2 │                                                                  │
  │   3 Verify       │                                                                  │
  │   4 Synthesize   │                                                                  │
  ╰──────────────────┴──────────────────────────────────────────────────────────────────╯
  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
 ```
 
-The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
+The overview puts the phases on the left (a phase shows its number until it starts, the shared braille spinner while running, then `✓`/`✗`; ASCII terminals keep `√`/`×`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
 
 The run itself takes five keys, and the footer offers each only while it can actually do something:
 
@@ -1168,7 +1172,8 @@ src/
     task.ts           # local_workflow task record and batched progress updates
     tool-description.ts # Model-facing description carrying the orchestration patterns
   ui/
-    agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
+    agent-widget.ts       # Persistent widget: workflow trees, agent activity, statuses, 12-line budget
+    spinner.ts            # Shared braille frames and 80 ms execution animation cadence
     fleet-list.ts         # FleetView: navigable agent list below the editor
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer scroll keys resolved through user keybindings

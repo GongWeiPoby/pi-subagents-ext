@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskStore } from "../../src/tasks/task-store.js";
 import type { TasksConfig } from "../../src/tasks/tasks-config.js";
 import { TaskWidget, type Theme, type UICtx } from "../../src/tasks/ui/task-widget.js";
+import { BRAILLE_SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "../../src/ui/spinner.js";
 
 /** Create a mock theme that returns raw text (no ANSI escapes). */
 function mockTheme(): Theme {
@@ -90,13 +91,24 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("Working on it");
   });
 
-  it("renders completed tasks with ✔ icon and strikethrough", () => {
+  it("keeps inactive in-progress tasks static", () => {
+    store.create("Waiting on agent", "Desc");
+    store.update("1", { status: "in_progress" });
+    widget.update();
+
+    const before = renderWidget(ui.state)[1];
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
+    expect(renderWidget(ui.state)[1]).toBe(before);
+    expect(renderWidget(ui.state)[1]).toContain("◼");
+  });
+
+  it("renders completed tasks with ✓ icon and strikethrough", () => {
     store.create("Done task", "Desc");
     store.update("1", { status: "completed" });
     widget.update();
 
     const lines = renderWidget(ui.state);
-    expect(lines[1]).toContain("✔");
+    expect(lines[1]).toContain("✓");
     expect(lines[1]).toContain("~~#1 Done task~~");
   });
 
@@ -110,6 +122,14 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("Processing data…");
     // Should NOT show ◼ for active task
     expect(lines[1]).not.toContain("◼");
+  });
+
+  it("uses the shared braille frames for active tasks", () => {
+    store.create("Running thing", "Desc", "Processing data");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+
+    expect(BRAILLE_SPINNER_FRAMES).toContain(renderWidget(ui.state)[1].trim().split(" ")[0]);
   });
 
   it("shows blocked-by info for pending tasks", () => {
@@ -468,6 +488,56 @@ describe("TaskWidget", () => {
     expect(lines[1]).not.toContain("Doing work…");
   });
 
+  it("starts fresh metrics after deactivation without resetting repeated activation", () => {
+    vi.setSystemTime(1_000);
+    store.create("Task", "Desc", "Doing work");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+    widget.addTokenUsage(100, 50);
+    vi.advanceTimersByTime(5_000);
+
+    // Repeated activation belongs to the same execution attempt.
+    widget.setActiveTask("1", true);
+    vi.advanceTimersByTime(1_000);
+    let line = renderWidget(ui.state)[1];
+    expect(line).toContain("6s");
+    expect(line).toContain("↑ 100");
+    expect(line).toContain("↓ 50");
+
+    widget.setActiveTask("1", false);
+    vi.advanceTimersByTime(20_000);
+    widget.setActiveTask("1", true);
+    line = renderWidget(ui.state)[1];
+    expect(line).toContain("0s");
+    expect(line).not.toContain("↑ 100");
+    expect(line).not.toContain("↓ 50");
+  });
+
+  it("clears active and metric state when the task store is replaced", () => {
+    store.create("Old task", "Desc", "Old attempt");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+    widget.addTokenUsage(100, 50);
+    vi.advanceTimersByTime(5_000);
+
+    const replacement = new TaskStore();
+    replacement.create("New task", "Desc", "New attempt");
+    replacement.update("1", { status: "in_progress" });
+    widget.setStore(replacement);
+
+    let line = renderWidget(ui.state)[1];
+    expect(line).toContain("◼ #1 New task");
+    expect(line).not.toContain("New attempt…");
+    expect(vi.getTimerCount()).toBe(0);
+
+    widget.setActiveTask("1", true);
+    line = renderWidget(ui.state)[1];
+    expect(line).toContain("New attempt…");
+    expect(line).toContain("0s");
+    expect(line).not.toContain("↑ 100");
+    expect(line).not.toContain("↓ 50");
+  });
+
   it("prunes stale active IDs on update", () => {
     store.create("Task", "Desc");
     store.update("1", { status: "in_progress" });
@@ -479,7 +549,7 @@ describe("TaskWidget", () => {
 
     // Should render as completed, not active
     const lines = renderWidget(ui.state);
-    expect(lines[1]).toContain("✔");
+    expect(lines[1]).toContain("✓");
     expect(lines[1]).toContain("~~#1 Task~~");
   });
 
@@ -723,7 +793,7 @@ describe("configurable glyphs", () => {
     const lines = seed(undefined);
 
     expect(lines[0]).toContain("●");
-    expect(lines[1]).toContain("✔");
+    expect(lines[1]).toContain("✓");
     expect(lines[2]).toContain("◻");
     expect(lines[3]).toContain("◼");
   });
@@ -760,7 +830,7 @@ describe("configurable glyphs", () => {
     const frames: string[] = [];
     for (let i = 0; i < 5; i++) {
       frames.push(renderWidget(ui.state)[3].trim().split(" ")[0]);
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
     }
 
     expect(frames).toEqual(["<", "^", ">", "v", "<"]);
@@ -823,9 +893,9 @@ describe("configurable glyphs", () => {
     widget.setActiveTask("3");
 
     expect(lines[0]).toContain("●");
-    expect(lines[1]).toContain("✔");
+    expect(lines[1]).toContain("✓");
     expect(lines[2]).toContain("◻");
-    expect(renderWidget(ui.state)[3].trim().split(" ")[0]).toBe("✳");
+    expect(renderWidget(ui.state)[3].trim().split(" ")[0]).toBe("⠋");
   });
 
   it("never lets a glyph carry a control character into a rendered line", () => {
@@ -866,7 +936,7 @@ describe("spinner animation timing", () => {
   it("advances one frame per timer tick", () => {
     const frames = [glyph()];
     for (let i = 0; i < 3; i++) {
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
       frames.push(glyph());
     }
     // Four consecutive, distinct frames.
@@ -884,9 +954,9 @@ describe("spinner animation timing", () => {
   });
 
   it("still animates after an unrelated redraw", () => {
-    widget.update();
     const before = glyph();
-    vi.advanceTimersByTime(150);
+    widget.update();
+    vi.advanceTimersByTime(SPINNER_INTERVAL_MS);
 
     expect(glyph()).not.toBe(before);
   });

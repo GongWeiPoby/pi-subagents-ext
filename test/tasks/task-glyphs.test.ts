@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { resolveTaskGlyphs, type TaskGlyphsConfig } from "../../src/tasks/task-glyphs.js";
+import { BRAILLE_SPINNER_FRAMES } from "../../src/ui/spinner.js";
 
 describe("resolveTaskGlyphs", () => {
   it("returns the built-in glyphs when nothing is configured", () => {
     const glyphs = resolveTaskGlyphs(undefined);
 
     expect(glyphs).toEqual({
-      completed: "✔",
+      completed: "✓",
       inProgress: "◼",
       pending: "◻",
-      spinner: ["✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼", "✽"],
-      completedSummary: "✔",
+      spinner: [...BRAILLE_SPINNER_FRAMES],
+      completedSummary: "✓",
       header: "●",
       overflow: "…",
       blocked: "›",
@@ -119,7 +120,7 @@ describe("resolveTaskGlyphs", () => {
     it("falls back through `completed` to the default when both are unusable", () => {
       const glyphs = resolveTaskGlyphs({ completed: "", completedSummary: "" });
 
-      expect(glyphs.completedSummary).toBe("✔");
+      expect(glyphs.completedSummary).toBe("✓");
     });
   });
 

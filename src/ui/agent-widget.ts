@@ -11,14 +11,20 @@ import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import {
+  type FleetWorkflow,
+  type FleetWorkflowAgent,
+  type FleetWorkflowPhase,
+  fleetWorkflowElapsed,
+} from "../workflow/fleet.js";
+import { BRAILLE_SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "./spinner.js";
 
 // ---- Constants ----
 
 /** Maximum number of rendered lines before overflow collapse kicks in. */
 const MAX_WIDGET_LINES = 12;
 
-/** Braille spinner frames for animated running indicator. */
-export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export { BRAILLE_SPINNER_FRAMES as SPINNER, SPINNER_INTERVAL_MS } from "./spinner.js";
 
 /** Statuses that indicate an error/non-success outcome (used for linger behavior and icon rendering). */
 export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped"]);
@@ -33,6 +39,34 @@ const TOOL_DISPLAY: Record<string, string> = {
   find: "finding files",
   ls: "listing",
 };
+
+const WORKFLOW_LINGER_MS = 4000;
+
+export type WorkflowState = FleetWorkflowAgent["state"];
+
+export function workflowPhaseState(phase: FleetWorkflowPhase): WorkflowState | "not-started" {
+  if (phase.agents.length === 0) return "not-started";
+  if (phase.agents.some(agent => agent.state === "failed")) return "failed";
+  if (phase.agents.some(agent => agent.state === "blocked")) return "blocked";
+  if (phase.agents.some(agent => agent.state === "running")) return "running";
+  if (phase.agents.some(agent => agent.state === "queued")) return "queued";
+  if (phase.agents.some(agent => agent.state === "interrupted")) return "interrupted";
+  if (phase.agents.some(agent => agent.state === "skipped")) return "skipped";
+  return "done";
+}
+
+export function workflowStateGlyph(state: WorkflowState | "not-started", frame: string, theme: Theme): string {
+  switch (state) {
+    case "running": return theme.fg("accent", frame);
+    case "done": return theme.fg("success", "✓");
+    case "failed":
+    case "blocked": return theme.fg("error", "✗");
+    case "interrupted":
+    case "skipped": return theme.fg("dim", "■");
+    case "queued": return theme.fg("accent", "○");
+    case "not-started": return theme.fg("dim", "○");
+  }
+}
 
 // ---- Types ----
 
@@ -255,8 +289,12 @@ export class AgentWidget {
   private uiCtx: UICtx | undefined;
   private widgetFrame = 0;
   private widgetInterval: ReturnType<typeof setInterval> | undefined;
+  /** One-shot cleanup for the earliest terminal workflow's four-second linger. */
+  private workflowLingerTimer: ReturnType<typeof setTimeout> | undefined;
   /** Tracks how many turns each finished agent has survived. Key: agent ID, Value: turns since finished. */
   private finishedTurnAge = new Map<string, number>();
+  /** Cached workflow execution trees supplied by the extension. */
+  private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
   /** How many extra turns errors/aborted agents linger (completed agents clear after 1 turn). */
   private static readonly ERROR_LINGER_TURNS = 2;
 
@@ -324,6 +362,12 @@ export class AgentWidget {
     }
   }
 
+  /** Set or clear the cached workflow hierarchy source used by the combined widget. */
+  setWorkflowSource(source: (() => readonly FleetWorkflow[]) | undefined): void {
+    this.workflowSource = source;
+    this.update();
+  }
+
   /**
    * Called on each new turn (tool_execution_start).
    * Ages finished agents and clears those that have lingered long enough.
@@ -340,8 +384,38 @@ export class AgentWidget {
   /** Ensure the widget update timer is running. */
   ensureTimer() {
     if (!this.widgetInterval) {
-      this.widgetInterval = setInterval(() => this.update(), 80);
+      this.widgetInterval = setInterval(() => {
+        this.widgetFrame++;
+        this.update();
+      }, SPINNER_INTERVAL_MS);
+      this.widgetInterval.unref?.();
     }
+  }
+
+  /** Stop the animation interval without affecting terminal-workflow linger cleanup. */
+  private stopTimer(): void {
+    if (!this.widgetInterval) return;
+    clearInterval(this.widgetInterval);
+    this.widgetInterval = undefined;
+  }
+
+  /** Re-arm cleanup for the first terminal workflow whose four-second linger expires. */
+  private scheduleWorkflowLinger(workflows: readonly FleetWorkflow[]): void {
+    if (this.workflowLingerTimer) {
+      clearTimeout(this.workflowLingerTimer);
+      this.workflowLingerTimer = undefined;
+    }
+    const now = Date.now();
+    const remaining = workflows
+      .filter(workflow => workflow.status !== "running" && workflow.status !== "paused")
+      .map(workflow => WORKFLOW_LINGER_MS - (now - (workflow.completedAt ?? now)))
+      .filter(delay => delay > 0);
+    if (remaining.length === 0) return;
+    this.workflowLingerTimer = setTimeout(() => {
+      this.workflowLingerTimer = undefined;
+      this.update();
+    }, Math.min(...remaining));
+    this.workflowLingerTimer.unref?.();
   }
 
   /** Check if a finished agent should still be shown in the widget. */
@@ -410,164 +484,294 @@ export class AgentWidget {
     return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
+  /** Workflows visible under the same mode and four-second settled linger as FleetView. */
+  private widgetWorkflows(): FleetWorkflow[] {
+    if (this.mode() === "off" || !this.workflowSource) return [];
+    const now = Date.now();
+    return [...this.workflowSource()]
+      .filter(workflow => workflow.status === "running"
+        || workflow.status === "paused"
+        || (workflow.completedAt !== undefined && now - workflow.completedAt < WORKFLOW_LINGER_MS))
+      .sort((a, b) => a.startedAt - b.startedAt);
+  }
+
   /**
-   * Render the widget content. Called from the registered widget's render() callback,
-   * reading live state each time instead of capturing it in a closure.
+   * Render the combined above-editor execution section. Workflow roots and their
+   * cached descendants are assembled before ordinary agents so a large workflow
+   * cannot make the widget grow beyond MAX_WIDGET_LINES.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.widgetAgents();
-    const running = allAgents.filter(a => a.status === "running");
-    const queued = allAgents.filter(a => a.status === "queued");
-    const finished = allAgents.filter(a =>
-      a.status !== "running" && a.status !== "queued" && a.completedAt
-      && this.shouldShowFinished(a.id, a.status),
+    const agents = this.widgetAgents();
+    const workflows = this.widgetWorkflows();
+    const running = agents.filter(agent => agent.status === "running");
+    const queued = agents.filter(agent => agent.status === "queued");
+    const finished = agents.filter(agent =>
+      agent.status !== "running" && agent.status !== "queued" && agent.completedAt
+      && this.shouldShowFinished(agent.id, agent.status),
     );
+    const hasActive = running.length > 0 || queued.length > 0 || workflows.some(workflow =>
+      workflow.status === "running" || workflow.status === "paused");
+    if (workflows.length === 0 && running.length === 0 && queued.length === 0 && finished.length === 0) return [];
 
-    const hasActive = running.length > 0 || queued.length > 0;
-    const hasFinished = finished.length > 0;
+    const width = tui.terminal.columns;
+    const truncate = (line: string) => truncateToWidth(line, width);
+    const frame = BRAILLE_SPINNER_FRAMES[this.widgetFrame % BRAILLE_SPINNER_FRAMES.length];
+    const lines: string[] = [
+      truncate(theme.fg(hasActive ? "accent" : "dim", hasActive ? "●" : "○")
+        + " " + theme.fg(hasActive ? "accent" : "dim", "Agents")),
+    ];
+    const activeWorkflows = workflows.filter(workflow =>
+      workflow.status === "running" || workflow.status === "paused");
+    const settledWorkflows = workflows.filter(workflow =>
+      workflow.status !== "running" && workflow.status !== "paused");
+    const orderedWorkflows = [...activeWorkflows, ...settledWorkflows];
+    const workflowDescendantCount = (workflow: FleetWorkflow) =>
+      workflow.phases.reduce((count, phase) => count + 1 + phase.agents.length, 0);
 
-    // Nothing to show — return empty (widget will be unregistered by update())
-    if (!hasActive && !hasFinished) return [];
-
-    const w = tui.terminal.columns;
-    const truncate = (line: string) => truncateToWidth(line, w);
-    const headingColor = hasActive ? "accent" : "dim";
-    const headingIcon = hasActive ? "●" : "○";
-    const frame = SPINNER[this.widgetFrame % SPINNER.length];
-
-    // Build sections separately for overflow-aware assembly.
-    // Each running agent = 2 lines (header + activity), finished = 1 line, queued = 1 line.
-
-    const finishedLines: string[] = [];
-    for (const a of finished) {
-      finishedLines.push(truncate(theme.fg("dim", "├─") + " " + this.renderFinishedLine(a, theme)));
+    interface VisibleWorkflowPhase {
+      phase: FleetWorkflowPhase;
+      agents: FleetWorkflowAgent[];
+      hiddenAgents: number;
+      hasHiddenLaterPhase: boolean;
+    }
+    interface VisibleWorkflowTree {
+      workflow: FleetWorkflow;
+      phases: VisibleWorkflowPhase[];
     }
 
-    const runningLines: string[][] = []; // each entry is [header, activity]
-    for (const a of running) {
-      const modeLabel = getPromptModeLabel(a.type);
+    const renderWorkflowRoot = (workflow: FleetWorkflow, hasLaterTopLevel: boolean): string => {
+      const glyph = workflow.status === "running"
+        ? theme.fg("accent", frame)
+        : workflow.status === "paused"
+          ? theme.fg("warning", "‖")
+          : workflow.status === "completed"
+            ? theme.fg("success", "✓")
+            : workflow.status === "failed"
+              ? theme.fg("error", "✗")
+              : theme.fg("dim", "■");
+      return truncate(
+        `${theme.fg("dim", hasLaterTopLevel ? "├─" : "└─")} ${glyph} ${theme.bold(workflow.name)}`
+        + `  ${theme.fg("dim", workflow.status)} · ${workflow.doneCount}/${workflow.totalCount} agents`
+        + ` · ${formatMs(fleetWorkflowElapsed(workflow, Date.now()))}`,
+      );
+    };
+    const renderWorkflowPhase = (
+      visible: VisibleWorkflowPhase,
+      rootHasLaterTopLevel: boolean,
+      phaseHasLaterSibling: boolean,
+    ): string => {
+      const state = workflowPhaseState(visible.phase);
+      const rootRail = rootHasLaterTopLevel ? "│  " : "   ";
+      return truncate(
+        `${theme.fg("dim", `${rootRail}${phaseHasLaterSibling ? "├─" : "└─"}`)}`
+        + ` ${workflowStateGlyph(state, frame, theme)} ${theme.fg("muted", "phase")}`
+        + ` ${visible.phase.title}  ${theme.fg("dim", `${state} · ${visible.phase.doneCount}/${visible.phase.totalCount}`)}`,
+      );
+    };
+    const renderWorkflowAgent = (
+      agent: FleetWorkflowAgent,
+      rootHasLaterTopLevel: boolean,
+      phaseHasLaterSibling: boolean,
+      childHasLaterSibling: boolean,
+    ): string => {
+      const elapsed = agent.startedAt === undefined
+        ? undefined
+        : formatMs(Math.max(0, (agent.completedAt ?? Date.now()) - agent.startedAt));
+      const tail = [agent.state, agent.model, elapsed].filter((part): part is string => part !== undefined);
+      const rootRail = rootHasLaterTopLevel ? "│  " : "   ";
+      const phaseRail = phaseHasLaterSibling ? "│  " : "   ";
+      return truncate(
+        `${theme.fg("dim", `${rootRail}${phaseRail}${childHasLaterSibling ? "├─" : "└─"}`)}`
+        + ` ${workflowStateGlyph(agent.state, frame, theme)}`
+        + ` ${renderAgentName(agent.agentType, theme, { fallbackColor: "muted" })}  ${agent.label}`
+        + ` ${theme.fg("dim", tail.join(" · "))}`,
+      );
+    };
+
+    const runningLines: string[][] = [];
+    for (const agent of running) {
+      const modeLabel = getPromptModeLabel(agent.type);
       const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-      const elapsed = formatMs(Date.now() - a.startedAt);
-
-      const bg = this.agentActivity.get(a.id);
-      const toolUses = bg?.toolUses ?? a.toolUses;
+      const elapsed = formatMs(Date.now() - agent.startedAt);
+      const activity = this.agentActivity.get(agent.id);
+      const toolUses = activity?.toolUses ?? agent.toolUses;
       // Spend comes from the record, never from the activity tracker: the record
-      // is the one that survives the agent finishing, and the one nested-tools
-      // folds a hidden child's spend into. Reading the tracker while an agent
-      // runs and the record once it stops made the figure jump at completion.
-      const tokens = getLifetimeTotal(a.lifetimeUsage);
-      const contextPercent = getSessionContextPercent(bg?.session);
-      const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
-      const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
-
+      // is the one that survives completion and folds in nested-child spend.
+      const tokens = getLifetimeTotal(agent.lifetimeUsage);
+      const contextPercent = getSessionContextPercent(activity?.session);
+      const tokenText = tokens > 0
+        ? formatSessionTokens(tokens, contextPercent, theme, agent.compactionCount)
+        : "";
+      const costText = this.showCost() ? formatCost(getLifetimeCost(agent.lifetimeUsage)) : "";
       const parts: string[] = [];
       if (this.showModel()) {
-        // Leading, and paired: a thinking level means nothing without the model
-        // it applies to. The tag is taken from buildInvocationTags rather than
-        // rebuilt so the "(asked X)" annotation survives.
-        const { modelName, tags } = buildInvocationTags(a.invocation);
+        const { modelName, tags } = buildInvocationTags(agent.invocation);
         if (modelName) parts.push(modelName);
         const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
         if (thinkingTag) parts.push(thinkingTag);
       }
-      if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
+      if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
       if (costText) parts.push(costText);
       parts.push(elapsed);
-      const statsText = parts.join(" · ");
-
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
-
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${renderAgentName(a.type, theme, { bold: true })}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
-        truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
+        truncate(
+          theme.fg("dim", "├─")
+          + ` ${theme.fg("accent", frame)} ${renderAgentName(agent.type, theme, { bold: true })}${modeTag}`
+          + `  ${theme.fg("muted", agent.description)} ${theme.fg("dim", "·")}`
+          + ` ${fgPreservingNestedStyles(theme, "dim", parts.join(" · "))}`,
+        ),
+        truncate(theme.fg("dim", "│  ") + theme.fg(
+          "dim",
+          `  ⎿  ${activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…"}`,
+        )),
       ]);
     }
-
     const queuedLine = queued.length > 0
       ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${queued.length} queued`)}`)
       : undefined;
+    const finishedLines = finished.map(agent =>
+      truncate(theme.fg("dim", "├─") + " " + this.renderFinishedLine(agent, theme)));
 
-    // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).
-    const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
-    const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
+    const workflowNodeCount = orderedWorkflows.reduce(
+      (count, workflow) => count + 1 + workflowDescendantCount(workflow),
+      0,
+    );
+    const bodyLimit = MAX_WIDGET_LINES - 1;
+    const totalBody = workflowNodeCount + runningLines.length * 2
+      + (queuedLine ? 1 : 0) + finishedLines.length;
+    const overflowed = totalBody > bodyLimit;
+    // A queue is most important when the pool is saturated, so reserve its one
+    // summary row before sharing the remaining rows between trees and agents.
+    const queuedReserve = overflowed && queuedLine ? 1 : 0;
+    let budget = bodyLimit - (overflowed ? 1 : 0) - queuedReserve;
+    let hiddenWorkflow = 0;
+    let hiddenAgents = 0;
+    type TopLevelSection =
+      | { kind: "workflow"; tree: VisibleWorkflowTree }
+      | { kind: "running"; pair: string[] }
+      | { kind: "queued"; line: string }
+      | { kind: "finished"; line: string }
+      | { kind: "overflow"; line: string };
+    const sections: TopLevelSection[] = [];
 
-    const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
+    const appendWorkflow = (workflow: FleetWorkflow, remainingActiveRoots: number): void => {
+      if (budget < 1) {
+        hiddenWorkflow += 1 + workflowDescendantCount(workflow);
+        return;
+      }
 
-    if (totalBody <= maxBody) {
-      // Everything fits — add all lines and fix up connectors for the last item.
-      lines.push(...finishedLines);
-      for (const pair of runningLines) lines.push(...pair);
-      if (queuedLine) lines.push(queuedLine);
+      const tree: VisibleWorkflowTree = { workflow, phases: [] };
+      sections.push({ kind: "workflow", tree });
+      budget--;
+      // Descendants may use only rows that are not promised to later active
+      // roots. This keeps every active controller visible under a tight cap.
+      let descendantBudget = Math.max(0, budget - remainingActiveRoots);
 
-      // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
-      if (lines.length > 1) {
-        const last = lines.length - 1;
-        lines[last] = lines[last].replace("├─", "└─");
-        // If last item is a running agent activity line, fix indent of that line
-        // and fix the header line above it.
-        if (runningLines.length > 0 && !queuedLine) {
-          // The last two lines are the last running agent's header + activity.
-          if (last >= 2) {
-            lines[last - 1] = lines[last - 1].replace("├─", "└─");
-            lines[last] = lines[last].replace("│  ", "   ");
+      for (let phaseIndex = 0; phaseIndex < workflow.phases.length; phaseIndex++) {
+        const phase = workflow.phases[phaseIndex];
+        if (descendantBudget < 1) {
+          hiddenWorkflow += workflow.phases.slice(phaseIndex)
+            .reduce((count, hiddenPhase) => count + 1 + hiddenPhase.agents.length, 0);
+          const lastVisible = tree.phases.at(-1);
+          if (lastVisible) lastVisible.hasHiddenLaterPhase = true;
+          break;
+        }
+
+        const visiblePhase: VisibleWorkflowPhase = {
+          phase,
+          agents: [],
+          hiddenAgents: 0,
+          hasHiddenLaterPhase: false,
+        };
+        tree.phases.push(visiblePhase);
+        budget--;
+        descendantBudget--;
+
+        for (let agentIndex = 0; agentIndex < phase.agents.length; agentIndex++) {
+          if (descendantBudget < 1) {
+            visiblePhase.hiddenAgents = phase.agents.length - agentIndex;
+            hiddenWorkflow += visiblePhase.hiddenAgents;
+            break;
           }
+          visiblePhase.agents.push(phase.agents[agentIndex]);
+          budget--;
+          descendantBudget--;
         }
       }
-    } else {
-      // Overflow — prioritize: running > queued > finished.
-      // Reserve 1 line for overflow indicator.
-      let budget = maxBody - 1;
-      let hiddenRunning = 0;
-      let hiddenFinished = 0;
+    };
 
-      // Reserve the queued line's row up front. It is a single summary of N
-      // waiting agents, so it cannot be folded into the "+N more" count (which
-      // is denominated in agents) without either under-reporting it as 1 or
-      // inflating the total with agents that were never getting their own rows.
-      // Reserving costs at most one running agent — which IS counted below —
-      // and makes the drop unreachable. It matters most exactly when it used to
-      // vanish: the pool is saturated and the queue is what the user needs to see.
-      const queuedReserve = queuedLine ? 1 : 0;
-      budget -= queuedReserve;
+    for (let index = 0; index < activeWorkflows.length; index++) {
+      appendWorkflow(activeWorkflows[index], activeWorkflows.length - index - 1);
+    }
+    for (const workflow of settledWorkflows) appendWorkflow(workflow, 0);
 
-      // 1. Running agents (2 lines each)
-      for (const pair of runningLines) {
-        if (budget >= 2) {
-          lines.push(...pair);
-          budget -= 2;
-        } else {
-          hiddenRunning++;
-        }
+    for (const pair of runningLines) {
+      if (budget < 2) {
+        hiddenAgents++;
+        continue;
       }
-
-      // 2. Queued line (always fits — its row was reserved above)
-      if (queuedLine) {
-        budget += queuedReserve;
-        lines.push(queuedLine);
+      sections.push({ kind: "running", pair });
+      budget -= 2;
+    }
+    if (queuedLine) {
+      if (queuedReserve > 0) budget += queuedReserve;
+      if (budget >= 1) {
+        sections.push({ kind: "queued", line: queuedLine });
         budget--;
       }
-
-      // 3. Finished agents
-      for (const fl of finishedLines) {
-        if (budget >= 1) {
-          lines.push(fl);
-          budget--;
-        } else {
-          hiddenFinished++;
-        }
+    }
+    for (const line of finishedLines) {
+      if (budget < 1) {
+        hiddenAgents++;
+        continue;
       }
-
-      // Overflow summary
-      const overflowParts: string[] = [];
-      if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
-      if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
-      const overflowText = overflowParts.join(", ");
-      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
-      );
+      sections.push({ kind: "finished", line });
+      budget--;
     }
 
+    const plural = (count: number, singular: string, pluralForm = `${singular}s`) =>
+      `${count} ${count === 1 ? singular : pluralForm}`;
+    if (hiddenWorkflow > 0 || hiddenAgents > 0) {
+      const parts: string[] = [];
+      if (hiddenWorkflow > 0) parts.push(plural(hiddenWorkflow, "workflow node"));
+      if (hiddenAgents > 0) parts.push(plural(hiddenAgents, "agent"));
+      sections.push({
+        kind: "overflow",
+        line: truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `hidden: ${parts.join(", ")}`)}`),
+      });
+    }
+
+    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      const section = sections[sectionIndex];
+      const hasLaterTopLevel = sectionIndex < sections.length - 1;
+      if (section.kind === "workflow") {
+        lines.push(renderWorkflowRoot(section.tree.workflow, hasLaterTopLevel));
+        for (let phaseIndex = 0; phaseIndex < section.tree.phases.length; phaseIndex++) {
+          const visiblePhase = section.tree.phases[phaseIndex];
+          const phaseHasLaterSibling = phaseIndex < section.tree.phases.length - 1
+            || visiblePhase.hasHiddenLaterPhase;
+          lines.push(renderWorkflowPhase(visiblePhase, hasLaterTopLevel, phaseHasLaterSibling));
+          for (let agentIndex = 0; agentIndex < visiblePhase.agents.length; agentIndex++) {
+            const childHasLaterSibling = agentIndex < visiblePhase.agents.length - 1
+              || visiblePhase.hiddenAgents > 0;
+            lines.push(renderWorkflowAgent(
+              visiblePhase.agents[agentIndex],
+              hasLaterTopLevel,
+              phaseHasLaterSibling,
+              childHasLaterSibling,
+            ));
+          }
+        }
+      } else if (section.kind === "running") {
+        const [header, activity] = section.pair;
+        lines.push(hasLaterTopLevel ? header : header.replace("├─", "└─"));
+        lines.push(hasLaterTopLevel ? activity : activity.replace("│  ", "   "));
+      } else {
+        lines.push(hasLaterTopLevel ? section.line : section.line.replace("├─", "└─"));
+      }
+    }
     return lines;
   }
 
@@ -575,6 +779,7 @@ export class AgentWidget {
   update() {
     if (!this.uiCtx) return;
     const allAgents = this.widgetAgents();
+    const workflows = this.widgetWorkflows();
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
@@ -585,10 +790,17 @@ export class AgentWidget {
       else if (a.status === "queued") { queuedCount++; }
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
-    const hasActive = runningCount > 0 || queuedCount > 0;
+    const runningWorkflowCount = workflows.filter(workflow => workflow.status === "running").length;
+    const pausedWorkflowCount = workflows.filter(workflow => workflow.status === "paused").length;
+    const hasActiveWorkflow = runningWorkflowCount > 0 || pausedWorkflowCount > 0;
+    const hasActive = runningCount > 0 || queuedCount > 0 || hasActiveWorkflow;
+    const hasWorkflow = workflows.length > 0;
+    this.scheduleWorkflowLinger(workflows);
+    if (runningCount > 0 || runningWorkflowCount > 0) this.ensureTimer();
+    else this.stopTimer();
 
     // Nothing to show — clear widget
-    if (!hasActive && !hasFinished) {
+    if (!hasActive && !hasFinished && !hasWorkflow) {
       if (this.widgetRegistered) {
         this.uiCtx.setWidget("agents", undefined);
         this.widgetRegistered = false;
@@ -598,7 +810,7 @@ export class AgentWidget {
         this.uiCtx.setStatus("subagents", undefined);
         this.lastStatusText = undefined;
       }
-      if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
+      this.stopTimer();
       // Clean up stale entries
       for (const [id] of this.finishedTurnAge) {
         if (!allAgents.some(a => a.id === id)) this.finishedTurnAge.delete(id);
@@ -609,18 +821,26 @@ export class AgentWidget {
     // Status bar — only call setStatus when the text actually changes
     let newStatusText: string | undefined;
     if (hasActive) {
-      const statusParts: string[] = [];
-      if (runningCount > 0) statusParts.push(`${runningCount} running`);
-      if (queuedCount > 0) statusParts.push(`${queuedCount} queued`);
-      const total = runningCount + queuedCount;
-      newStatusText = `${statusParts.join(", ")} agent${total === 1 ? "" : "s"}`;
+      const statusSections: string[] = [];
+      const agentParts: string[] = [];
+      if (runningCount > 0) agentParts.push(`${runningCount} running`);
+      if (queuedCount > 0) agentParts.push(`${queuedCount} queued`);
+      const agentTotal = runningCount + queuedCount;
+      if (agentTotal > 0) {
+        statusSections.push(`${agentParts.join(", ")} agent${agentTotal === 1 ? "" : "s"}`);
+      }
+      if (runningWorkflowCount > 0) {
+        statusSections.push(`${runningWorkflowCount} running workflow${runningWorkflowCount === 1 ? "" : "s"}`);
+      }
+      if (pausedWorkflowCount > 0) {
+        statusSections.push(`${pausedWorkflowCount} paused workflow${pausedWorkflowCount === 1 ? "" : "s"}`);
+      }
+      newStatusText = statusSections.join(" · ");
     }
     if (newStatusText !== this.lastStatusText) {
       this.uiCtx.setStatus("subagents", newStatusText);
       this.lastStatusText = newStatusText;
     }
-
-    this.widgetFrame++;
 
     // Register widget callback once; subsequent updates use requestRender()
     // which re-invokes render() without replacing the component (avoids layout thrashing).
@@ -644,14 +864,17 @@ export class AgentWidget {
   }
 
   dispose() {
-    if (this.widgetInterval) {
-      clearInterval(this.widgetInterval);
-      this.widgetInterval = undefined;
+    this.stopTimer();
+    if (this.workflowLingerTimer) {
+      clearTimeout(this.workflowLingerTimer);
+      this.workflowLingerTimer = undefined;
     }
+    this.workflowSource = undefined;
     if (this.uiCtx) {
       this.uiCtx.setWidget("agents", undefined);
       this.uiCtx.setStatus("subagents", undefined);
     }
+    this.uiCtx = undefined;
     this.widgetRegistered = false;
     this.tui = undefined;
     this.lastStatusText = undefined;

@@ -11,7 +11,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import initExtension from "../../src/tasks/index.js";
 import { flush, installSubagentsMock, mockPi } from "./helpers/mock-pi.js";
 
@@ -132,6 +132,184 @@ describe("TaskOutput", () => {
     await mock.executeTool("TaskCreate", { subject: "Manual", description: "d" });
     await expect(mock.executeTool("TaskOutput", { task_id: "1", block: false, timeout: 30000 }))
       .rejects.toThrow("No background process for task 1");
+  });
+});
+
+describe("TaskOutput — workflow runs", () => {
+  interface WorkflowSnapshot {
+    id: string;
+    status: "running" | "paused" | "completed" | "failed" | "killed";
+    name?: string;
+    doneCount: number;
+    totalCount: number;
+    replayedCount: number;
+    totalTokens: number;
+    totalToolCalls: number;
+    elapsedMs: number;
+    output?: string;
+    scriptPath?: string;
+  }
+
+  function workflowHarness(initial: WorkflowSnapshot) {
+    let current: WorkflowSnapshot | undefined = initial;
+    let settleWait: (() => void) | undefined;
+    const consume = vi.fn();
+    const adapter = {
+      get: (id: string) => current?.id === id ? current : undefined,
+      list: () => current ? [current.id] : [],
+      wait: (_id: string, options: { signal?: AbortSignal; timeoutMs: number }) =>
+        new Promise<WorkflowSnapshot | undefined>((resolve) => {
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            options.signal?.removeEventListener("abort", finish);
+            resolve(current);
+          };
+          const timer = setTimeout(finish, options.timeoutMs);
+          settleWait = finish;
+          if (options.signal?.aborted) finish();
+          else options.signal?.addEventListener("abort", finish, { once: true });
+        }),
+      consume,
+    };
+    return {
+      adapter,
+      consume,
+      set(next: WorkflowSnapshot | undefined) { current = next; },
+      settle() { settleWait?.(); },
+    };
+  }
+
+  const running = (): WorkflowSnapshot => ({
+    id: "wf_test123",
+    status: "running",
+    name: "status regression",
+    doneCount: 1,
+    totalCount: 3,
+    replayedCount: 0,
+    totalTokens: 120,
+    totalToolCalls: 4,
+    elapsedMs: 2500,
+    scriptPath: "/tmp/wf_test123.workflow.js",
+  });
+
+  it("returns workflow status without blocking or consuming its future notification", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness(running());
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const result = await mock.executeTool("TaskOutput", { task_id: "wf_test123", block: false });
+
+    expect(result.content[0].text).toContain('Workflow wf_test123 [running] "status regression"');
+    expect(result.content[0].text).toContain("1/3 agents");
+    expect(result.content[0].text).toContain("120 tokens");
+    expect(harness.consume).not.toHaveBeenCalled();
+  });
+
+  it("escapes terminal, line, C1, bidi, and carriage-return controls in workflow metadata", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness({
+      ...running(),
+      status: "completed",
+      name: "safe\nforged\tname\u001b[2J\u0085\u202ename\rnext",
+      scriptPath: "/tmp/safe\nforged\tpath\u001b]8;;file\u0007\u2066path\r.js",
+      output: "first line\nsecond\tcolumn\u001b[31m\u009bhidden\u202eright\rreturn",
+    });
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const result = await mock.executeTool("TaskOutput", { task_id: "wf_test123", block: false });
+    const text = result.content[0].text;
+
+    expect(text).toContain('"safe\\u000aforged\\u0009name\\u001b[2J\\u0085\\u202ename\\u000dnext"');
+    expect(text).toContain(
+      "Script: /tmp/safe\\u000aforged\\u0009path\\u001b]8;;file\\u0007\\u2066path\\u000d.js",
+    );
+    expect(text).toContain("first line\nsecond\tcolumn\\u001b[31m\\u009bhidden\\u202eright\\u000dreturn");
+    expect(text).toMatch(/first line\nsecond\tcolumn/);
+    expect(text).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/);
+  });
+
+  it("waits for workflow completion and consumes the delivered output", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness(running());
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const pending = mock.executeTool("TaskOutput", {
+      task_id: "wf_test123",
+      block: true,
+      timeout: 5000,
+    });
+    void pending.catch(() => {});
+    await flush();
+    harness.set({ ...running(), status: "completed", doneCount: 3, output: "all checks passed" });
+    harness.settle();
+
+    expect((await pending).content[0].text).toContain("all checks passed");
+    expect(harness.consume).toHaveBeenCalledTimes(1);
+    expect(harness.consume).toHaveBeenCalledWith("wf_test123");
+  });
+
+  it("leaves a timed-out running workflow unconsumed", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness(running());
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const result = await mock.executeTool("TaskOutput", {
+      task_id: "wf_test123",
+      block: true,
+      timeout: 20,
+    });
+
+    expect(result.content[0].text).toContain("[running]");
+    expect(harness.consume).not.toHaveBeenCalled();
+  });
+
+  it("leaves an aborted running workflow unconsumed", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness(running());
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+    const controller = new AbortController();
+
+    const pending = mock.executeToolWithSignal(
+      "TaskOutput",
+      { task_id: "wf_test123", block: true, timeout: 30000 },
+      controller.signal,
+    );
+    void pending.catch(() => {});
+    await flush();
+    controller.abort();
+
+    expect((await pending).content[0].text).toContain("[running]");
+    expect(harness.consume).not.toHaveBeenCalled();
+  });
+
+  it("returns already-settled output and consumes it exactly once per returned result", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness({
+      ...running(),
+      status: "failed",
+      output: "gate failed",
+    });
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const result = await mock.executeTool("TaskOutput", { task_id: "wf_test123", block: false });
+
+    expect(result.content[0].text).toContain("[failed]");
+    expect(result.content[0].text).toContain("gate failed");
+    expect(harness.consume).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a workflow-specific error for an unknown workflow run ID", async () => {
+    const mock = mockPi();
+    const harness = workflowHarness(running());
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    await expect(mock.executeTool("TaskOutput", { task_id: "wf_missing", block: false }))
+      .rejects.toThrow("No workflow run with ID wf_missing");
+    await expect(mock.executeTool("TaskOutput", { task_id: "wf_missing", block: false }))
+      .rejects.toThrow("wf_test123");
   });
 });
 

@@ -90,6 +90,20 @@ const execResult = (overrides: Partial<{ stdout: string; stderr: string; code: n
   ...overrides,
 });
 
+function callField(call: unknown, index: number): unknown {
+  return Array.isArray(call) ? call[index] : undefined;
+}
+
+function objectField(value: unknown, key: string): unknown {
+  return value !== null && typeof value === "object" && key in value
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function callMessageField(call: unknown, key: string): unknown {
+  return objectField(callField(call, 0), key);
+}
+
 /* ------------------------------------------------------------------------- *
  * The host adapter
  * ------------------------------------------------------------------------- */
@@ -738,6 +752,88 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(workflowConfirm).not.toHaveBeenCalled();
   });
 
+  it("skips approval-completeness preflight for trusted headless direct scripts", async () => {
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-headless-indirection",
+      { script: `${inlineScript}const launch = agent; return typeof launch;` },
+      undefined,
+      undefined,
+      headlessCtx(),
+    );
+
+    expect(textOf(result)).toContain("started in the background");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported injected-global indirection before direct UI approval", async () => {
+    const cases = [
+      ["alias", "const launch = agent; return launch('inspect');"],
+      ["call", "return agent.call(null, 'inspect');"],
+      ["sequence", "return (0, agent)('inspect');"],
+      ["globalThis.agent", "return globalThis.agent('inspect');"],
+      ["globalThis computed agent", "return globalThis['agent']('inspect');"],
+      ["Reflect.get agent", "return Reflect.get(globalThis, 'agent')('inspect');"],
+      ["this.agent", "return this.agent('inspect');"],
+      ["local-shadow", "function agent() { return 'local'; } return agent();"],
+    ] as const;
+
+    for (const [label, body] of cases) {
+      workflowConfirm.mockClear();
+      const result = await tools.get("SubagentWorkflow").execute(
+        `tc-indirect-${label}`,
+        { script: `${inlineScript}${body}` },
+        undefined,
+        undefined,
+        workflowCtx(),
+      );
+      expect(textOf(result)).toContain("unsupported indirection");
+      expect(textOf(result)).toContain("direct calls");
+      expect(textOf(result)).not.toContain("started in the background");
+      expect(workflowConfirm).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects an aliased nested workflow call in a saved workflow before approval", async () => {
+    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
+    writeFileSync(
+      join(hermetic.dir, ".pi", "workflows", "aliased-parent.js"),
+      `${fileScript}const nested = workflow; return nested('child');`,
+    );
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-saved-workflow-alias",
+      { name: "aliased-parent" },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("unsupported indirection");
+    expect(textOf(result)).not.toContain("started in the background");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["spread options", "agent('inspect', { ...hidden, gate: 'npm test' });"],
+    ["dynamic gate", "agent('inspect', { gate: command });"],
+    ["argument spread", "agent(...args);"],
+    ["computed key", "agent('inspect', { [optionName]: 'worktree' });"],
+    ["literal prototype property", "agent('inspect', { __proto__: { gate: 'npm test' } });"],
+  ])("rejects agent behavior hidden by %s before direct UI approval", async (_label, body) => {
+    workflowConfirm.mockClear();
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-unresolved-options",
+      { script: `${inlineScript}${body}` },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("cannot faithfully preview agent options");
+    expect(textOf(result)).not.toContain("started in the background");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
   it("detects nested workflow behavior through executable references and fails closed on parse errors", async () => {
     const mentions = [
       inlineScript,
@@ -763,6 +859,8 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       'return await (0, workflow)("child");',
       'const nested = workflow; return await nested("child");',
       'const refs = [workflow]; return await refs[0]("child");',
+      'return await globalThis.workflow("child");',
+      'return await this.workflow("child");',
       "const broken = ;",
     ];
     for (const [index, body] of bypasses.entries()) {
@@ -1271,6 +1369,173 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(card).toContain("done");
   });
 
+  it("holds a workflow completion while the parent is active and flushes it after agent_settled", async () => {
+    let idle = false;
+    const context = workflowCtx();
+    context.isIdle = vi.fn(() => idle);
+    context.ui.onTerminalInput = vi.fn(() => vi.fn());
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-active-parent",
+      { script: `${inlineScript}return "held until settled";` },
+      undefined,
+      undefined,
+      context,
+    );
+    const taskId = startedTaskId(result);
+
+    await vi.waitFor(() => {
+      const card = String(
+        tools.get("SubagentWorkflow")
+          .renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false })
+          .text ?? "",
+      );
+      expect(card).toContain("done");
+    }, { timeout: 4_000, interval: 5 });
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    expect(booted.pi.sendMessage.mock.calls.filter(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toHaveLength(0);
+
+    idle = true;
+    await booted.lifecycle.get("agent_settled")?.({}, context);
+    await booted.lifecycle.get("agent_settled")?.({}, context);
+    const sent = await awaitNotification(taskId);
+    expect(booted.pi.sendMessage.mock.calls.filter(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toHaveLength(1);
+    expect(String(sent[0].content)).toContain("<result>held until settled</result>");
+  });
+
+  it("re-checks idle after the notification hold and retries on a later settle", async () => {
+    let idle = true;
+    const context = workflowCtx();
+    context.isIdle = vi.fn(() => idle);
+    context.ui.onTerminalInput = vi.fn(() => vi.fn());
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-idle-race",
+      { script: `${inlineScript}return "race result";` },
+      undefined,
+      undefined,
+      context,
+    );
+    const taskId = startedTaskId(result);
+
+    await vi.waitFor(() => {
+      const card = String(
+        tools.get("SubagentWorkflow")
+          .renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false })
+          .text ?? "",
+      );
+      expect(card).toContain("done");
+    }, { timeout: 4_000, interval: 5 });
+    idle = false;
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    expect(booted.pi.sendMessage.mock.calls.filter(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toHaveLength(0);
+
+    idle = true;
+    await booted.lifecycle.get("agent_settled")?.({}, context);
+    await booted.lifecycle.get("agent_settled")?.({}, context);
+    const sent = await awaitNotification(taskId);
+    expect(booted.pi.sendMessage.mock.calls.filter(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toHaveLength(1);
+    expect(String(sent[0].content)).toContain("<result>race result</result>");
+  });
+
+  it("lets TaskOutput join and consume a held workflow completion", async () => {
+    const context = workflowCtx();
+    context.isIdle = vi.fn(() => false);
+    context.ui.onTerminalInput = vi.fn(() => vi.fn());
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    const started = await tools.get("SubagentWorkflow").execute(
+      "tc-task-output-consume",
+      { script: `${inlineScript}return "joined workflow result";` },
+      undefined,
+      undefined,
+      context,
+    );
+    const taskId = startedTaskId(started);
+    const firstOutput = await tools.get("TaskOutput").execute(
+      "tc-task-output-join",
+      { task_id: taskId, block: true, timeout: 5000 },
+      undefined,
+      undefined,
+      context,
+    );
+    const secondOutput = await tools.get("TaskOutput").execute(
+      "tc-task-output-settled-read",
+      { task_id: taskId, block: true, timeout: 5000 },
+      undefined,
+      undefined,
+      context,
+    );
+
+    for (const output of [firstOutput, secondOutput]) {
+      expect(textOf(output)).toContain(`Workflow ${taskId} [completed]`);
+      expect(textOf(output)).toContain("joined workflow result");
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(booted.pi.sendMessage.mock.calls.some(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toBe(false);
+  });
+
+  it("invalidates a blocking workflow TaskOutput when the session changes", async () => {
+    const context = workflowCtx();
+    context.isIdle = vi.fn(() => false);
+    context.ui.onTerminalInput = vi.fn(() => vi.fn());
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    const started = await tools.get("SubagentWorkflow").execute(
+      "tc-task-output-switch",
+      { script: `${inlineScript}await new Promise(() => {});` },
+      undefined,
+      undefined,
+      context,
+    );
+    const taskId = startedTaskId(started);
+    const waiting = tools.get("TaskOutput").execute(
+      "tc-task-output-switch-wait",
+      { task_id: taskId, block: true, timeout: 5000 },
+      undefined,
+      undefined,
+      context,
+    );
+    void waiting.catch(() => {});
+    await flush();
+
+    await booted.lifecycle.get("session_before_switch")?.({}, context);
+
+    await expect(waiting).rejects.toThrow("Workflow context changed while waiting for output");
+    await expect(tools.get("TaskOutput").execute(
+      "tc-task-output-after-switch",
+      { task_id: taskId, block: false },
+      undefined,
+      undefined,
+      context,
+    )).rejects.toThrow(`No workflow run with ID ${taskId}`);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(booted.pi.sendMessage.mock.calls.some(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toBe(false);
+  });
+
+  function notificationIncludesTaskId(call: unknown, taskId: string): boolean {
+    if (!Array.isArray(call)) return false;
+    const message: unknown = call[0];
+    return message !== null && typeof message === "object" && "content" in message
+      && String(message.content).includes(taskId);
+  }
+
   /** Wait for the completion notification a background run sends for `taskId`. */
   async function awaitNotification(taskId: string) {
     await vi.waitFor(
@@ -1313,19 +1578,32 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
   });
 
-  it("kills a still-running workflow (and its worker thread) on session shutdown", async () => {
+  it("kills a still-running workflow without delivering after session shutdown", async () => {
     // A never-returning script: only the run's own abort signal can stop it, so
-    // abortAll() over the agent records would leave the worker spinning.
+    // abortAll() over the agent records would leave the worker spinning. The
+    // task card still reaches its terminal state, but shutdown invalidates the
+    // detached completion before it can enqueue a message into the dead session.
     const result = await tools.get("SubagentWorkflow").execute(
       "tc-shutdown",
       { script: `${inlineScript}await new Promise(() => {});\n` },
       undefined, undefined, workflowCtx(),
     );
+    const taskId = startedTaskId(result);
 
     await booted.lifecycle.get("session_shutdown")?.({}, workflowCtx());
 
-    const sent = await awaitNotification(startedTaskId(result));
-    expect(String(sent[0].content)).toContain("<status>Stopped</status>");
+    await vi.waitFor(() => {
+      const card = String(
+        tools.get("SubagentWorkflow")
+          .renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false })
+          .text ?? "",
+      );
+      expect(card).toContain("stopped");
+    }, { timeout: 4_000, interval: 5 });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(booted.pi.sendMessage.mock.calls.some(
+      call => notificationIncludesTaskId(call, taskId),
+    )).toBe(false);
   });
 
   it("reports a script that threw, rather than a run that quietly ended", async () => {
@@ -1406,6 +1684,37 @@ describe("--subagents-workflow-file", () => {
     expect(keys, "the run has to claim its row before its first agent starts").toContain("fleet");
   });
 
+  it("registers a renderable Agents root and declared phase before any child starts", async () => {
+    const booted = makePi();
+    subagentsExtension(booted.pi);
+    const context = uiCtx();
+    await booted.lifecycle.get("session_start")?.({}, context);
+    context.ui.setWidget.mockClear();
+
+    const script = 'export const meta = { name: "cached-root", description: "root", phases: [{ title: "Inspect" }] };\n';
+    await booted.tools.get("SubagentWorkflow").execute(
+      "tc-agents-root",
+      { script },
+      undefined,
+      undefined,
+      context,
+    );
+
+    const calls: unknown[] = context.ui.setWidget.mock.calls;
+    expect(calls.map(call => callField(call, 0))).toEqual(expect.arrayContaining(["agents", "fleet"]));
+    const agentsCall = calls.find(call => callField(call, 0) === "agents");
+    const content = callField(agentsCall, 1);
+    expect(content).toBeTypeOf("function");
+    if (typeof content !== "function") throw new Error("Agents widget factory was not registered");
+    const rendered = content(
+      { terminal: { columns: 120 }, requestRender: () => {} },
+      plainTheme,
+    ).render().join("\n");
+    expect(rendered).toContain("cached-root");
+    expect(rendered).toContain("Inspect");
+    expect(rendered).toContain("not-started");
+  });
+
   it("captures the UI at session_start, before any tool has executed", () => {
     // A flag-launched workflow runs from session_start, so a UI captured only
     // from tool_execution_start would leave it with no widget and no fleet row.
@@ -1437,6 +1746,47 @@ describe("--subagents-workflow-file", () => {
     await booted.lifecycle.get("session_start")?.({}, uiCtx());
 
     expect(booted.pi.getFlag).toHaveBeenCalledWith(WORKFLOW_FILE_FLAG);
+  });
+
+  it("lets TaskOutput consume a joined startup-file completion without duplicate model delivery", async () => {
+    const path = join(hermetic.dir, "joined-flow.js");
+    writeFileSync(path, `${fileScript}return "joined startup result";\n`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+    const context = uiCtx();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+    let lookupError: unknown;
+    try {
+      await booted.tools.get("TaskOutput").execute(
+        "tc-startup-output-lookup",
+        { task_id: "wf_missing", block: false },
+        undefined,
+        undefined,
+        context,
+      );
+    } catch (error) {
+      lookupError = error;
+    }
+    const taskId = /Known workflow runs: (wf_[a-z0-9]+)/.exec(String(lookupError))?.[1];
+    expect(taskId).toBeTruthy();
+
+    const output = await booted.tools.get("TaskOutput").execute(
+      "tc-startup-output-join",
+      { task_id: taskId, block: true, timeout: 5000 },
+      undefined,
+      undefined,
+      context,
+    );
+
+    expect(textOf(output)).toContain(`Workflow ${taskId} [completed]`);
+    expect(textOf(output)).toContain("joined startup result");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(booted.pi.appendEntry).toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
+    expect(booted.pi.sendMessage.mock.calls.filter((call: unknown) =>
+      ["workflow-result", "subagent-notification"].includes(String(callMessageField(call, "customType")))
+      && String(callMessageField(call, "content")).includes(taskId),
+    )).toHaveLength(0);
   });
 
   it("explains the `=` form when the flag arrives bare as boolean true", async () => {
@@ -1509,8 +1859,17 @@ describe("--subagents-workflow-file", () => {
     expect(data.progress).toContainEqual({ type: "workflow_log", message: "scanned" });
 
     // nextTurn, not followUp: a flag-launched run puts its result in context
-    // without forcing a turn the user never asked for.
-    const sent = booted.pi.sendMessage.mock.calls.find((c: any[]) => c[0]?.customType === "workflow-result");
+    // without forcing a turn the user never asked for. Delivery is held briefly
+    // so TaskOutput can consume the same result without a duplicate.
+    await vi.waitFor(
+      () => expect(booted.pi.sendMessage.mock.calls.some(
+        (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+      )).toBe(true),
+      { timeout: 1000 },
+    );
+    const sent = booted.pi.sendMessage.mock.calls.find(
+      (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+    );
     expect(sent, "the run's outcome must reach the model").toBeTruthy();
     expect(sent![1]).toMatchObject({ deliverAs: "nextTurn" });
     expect(String(sent![0].content)).toContain("<result>all clear</result>");

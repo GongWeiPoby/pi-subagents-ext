@@ -302,6 +302,29 @@ describe("WorkflowPlan compilation", () => {
     expect(() => extractMeta(result.script)).not.toThrow();
   });
 
+  it("shows exact dependency handoffs, output contracts, and null behavior", () => {
+    const input = plan();
+    input.nodes[1].schema = { type: "object" };
+    const result = compileWorkflowPlan(input);
+    if (!result.ok) throw new Error("plan did not compile");
+
+    const approval = formatWorkflowPlanApproval(result.plan);
+    const map = approval.split("Workflow map ")[1]?.split("Execution layers")[0] ?? "";
+
+    expect(map).toContain("exact dependencies; arrows mean prerequisite result handoff");
+    expect(map).toContain("Handoffs: downstream nodes read the listed upstream outputs; final results retain each node output.");
+    expect(map).toContain("START -> inspect");
+    expect(map).toContain("inspect -> review");
+    expect(map).toContain("inspect -> tests");
+    expect(map).toContain("review + tests -> verify");
+    expect(map).toContain("verify -> END");
+    expect(map).not.toContain("START -> review");
+    expect(map).not.toContain("review -> tests");
+    expect(map).toContain("[inspect] title=Inspect change capability=code-discovery output=text");
+    expect(map).toContain("[review] title=Review correctness capability=code-review output=structured (schema)");
+    expect(map).toContain("[verify] title=Verify findings capability=finding-verification output=text");
+    expect(map).toContain("Failure/skip: either can yield null; final results retain each node output.");
+  });
   it("formats a complete approval view with every behavior-affecting field", () => {
     const result = compileWorkflowPlan(plan({
       nodes: [

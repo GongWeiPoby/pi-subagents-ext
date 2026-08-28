@@ -205,11 +205,15 @@ export function resumeWorkflowTask(task: WorkflowTask, now = Date.now()): boolea
 }
 
 /** Settle a task from the run's own result. */
-export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResult): void {
+export function completeWorkflowTask(
+  task: WorkflowTask,
+  result: WorkflowRunResult,
+  now = Date.now(),
+): void {
   // Banked before the status moves off "paused": a run that finished while held
   // still spent that time held, and the elapsed figure has to say so.
   if (task.pausedAt !== undefined) {
-    task.totalPausedMs = (task.totalPausedMs ?? 0) + Math.max(0, Date.now() - task.pausedAt);
+    task.totalPausedMs = (task.totalPausedMs ?? 0) + Math.max(0, now - task.pausedAt);
     task.pausedAt = undefined;
   }
   // Nothing left to control, and holding the handle would let the dialog offer
@@ -222,21 +226,24 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.replayedCount = result.replayedCount;
   task.value = result.value;
   task.error = result.error;
-  task.endTime = Date.now();
-  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false);
+  task.endTime = now;
+  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false, now);
 }
 
 /**
  * Settle a task that never produced a result — a script rejected before the
  * worker started (bad `meta`, oversized source, non-JSON `args`).
  */
-export function failWorkflowTask(task: WorkflowTask, error: string): void {
+export function failWorkflowTask(task: WorkflowTask, error: string, now = Date.now()): void {
+  if (task.pausedAt !== undefined) {
+    task.totalPausedMs = (task.totalPausedMs ?? 0) + Math.max(0, now - task.pausedAt);
+    task.pausedAt = undefined;
+  }
   task.control = undefined;
-  task.pausedAt = undefined;
   task.status = "failed";
   task.error = error;
-  task.endTime = Date.now();
-  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false);
+  task.endTime = now;
+  task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false, now);
 }
 
 /** The run's outcome as text, for the notification and the LLM-facing result. */

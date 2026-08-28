@@ -16,9 +16,10 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import type { FleetWorkflow, FleetWorkflowAgent, FleetWorkflowPhase } from "../workflow/fleet.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
+import { type FleetWorkflow, type FleetWorkflowAgent, type FleetWorkflowPhase, fleetWorkflowElapsed } from "../workflow/fleet.js";
+import { type AgentActivity, formatCost, type Theme, workflowStateGlyph } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { BRAILLE_SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "./spinner.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -48,12 +49,19 @@ export type FleetUICtx = {
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
-type WorkflowPhaseEntry = { kind: "workflow-phase"; workflowId: string; phase: FleetWorkflowPhase };
+type WorkflowPhaseEntry = {
+  kind: "workflow-phase";
+  workflowId: string;
+  phase: FleetWorkflowPhase;
+  hasLaterSibling: boolean;
+};
 type WorkflowAgentEntry = {
   kind: "workflow-agent";
   workflowId: string;
   phaseId: string;
   agent: FleetWorkflowAgent;
+  phaseHasLaterSibling: boolean;
+  hasLaterSibling: boolean;
 };
 type FleetEntry = MainEntry | WorkflowEntry | WorkflowPhaseEntry | WorkflowAgentEntry | AgentEntry;
 
@@ -289,14 +297,23 @@ export class FleetList {
     for (const workflow of this.workflows()) {
       workflows.push({ kind: "workflow", workflow });
       if (!this.expandedWorkflows.has(workflow.id)) continue;
-      for (const phase of workflow.phases) {
-        workflows.push({ kind: "workflow-phase", workflowId: workflow.id, phase });
-        for (const agent of phase.agents) {
+      for (let phaseIndex = 0; phaseIndex < workflow.phases.length; phaseIndex++) {
+        const phase = workflow.phases[phaseIndex];
+        const phaseHasLaterSibling = phaseIndex < workflow.phases.length - 1;
+        workflows.push({
+          kind: "workflow-phase",
+          workflowId: workflow.id,
+          phase,
+          hasLaterSibling: phaseHasLaterSibling,
+        });
+        for (let agentIndex = 0; agentIndex < phase.agents.length; agentIndex++) {
           workflows.push({
             kind: "workflow-agent",
             workflowId: workflow.id,
             phaseId: phase.id,
-            agent,
+            agent: phase.agents[agentIndex],
+            phaseHasLaterSibling,
+            hasLaterSibling: agentIndex < phase.agents.length - 1,
           });
         }
       }
@@ -540,9 +557,17 @@ export class FleetList {
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
         : row.kind === "workflow-phase" ?
-          this.renderWorkflowPhaseRow(a + 1, sel, row.phase, width, theme)
+          this.renderWorkflowPhaseRow(a + 1, sel, row.phase, row.hasLaterSibling, width, theme)
         : row.kind === "workflow-agent" ?
-          this.renderWorkflowAgentRow(a + 1, sel, row.agent, width, theme)
+          this.renderWorkflowAgentRow(
+            a + 1,
+            sel,
+            row.agent,
+            row.phaseHasLaterSibling,
+            row.hasLaterSibling,
+            width,
+            theme,
+          )
         : this.renderAgentRow(a + 1, sel, row.record, width, theme),
       );
     }
@@ -573,7 +598,7 @@ export class FleetList {
     const disclosure = this.expandedWorkflows.has(workflow.id) ? "▾" : "▸";
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${disclosure} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
-    const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
+    const elapsed = fleetWorkflowElapsed(workflow, Date.now());
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
     const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
@@ -583,12 +608,13 @@ export class FleetList {
     rosterIndex: number,
     sel: number,
     phase: FleetWorkflowPhase,
+    hasLaterSibling: boolean,
     width: number,
     theme: Theme,
   ): string {
     const selected = rosterIndex === sel;
     const title = selected ? theme.fg("text", phase.title) : theme.fg("muted", phase.title);
-    const left = `  ${this.bullet(rosterIndex, sel, theme)}   ├─ phase  ${title}`;
+    const left = `  ${this.bullet(rosterIndex, sel, theme)}   ${hasLaterSibling ? "├─" : "└─"} phase  ${title}`;
     const stats = `${phase.doneCount}/${phase.totalCount}`;
     return rightAlign(left, theme.fg(selected ? "text" : "dim", stats), width);
   }
@@ -597,20 +623,21 @@ export class FleetList {
     rosterIndex: number,
     sel: number,
     agent: FleetWorkflowAgent,
+    phaseHasLaterSibling: boolean,
+    hasLaterSibling: boolean,
     width: number,
     theme: Theme,
   ): string {
     const selected = rosterIndex === sel;
-    const glyph = agent.state === "done" ? theme.fg("success", "✓")
-      : agent.state === "failed" || agent.state === "blocked" ? theme.fg("error", "✗")
-      : agent.state === "skipped" || agent.state === "interrupted" ? theme.fg("dim", "■")
-      : theme.fg("accent", "○");
+    const frame = BRAILLE_SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % BRAILLE_SPINNER_FRAMES.length];
+    const glyph = workflowStateGlyph(agent.state, frame, theme);
     const type = renderAgentName(agent.agentType, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(agent.agentType) }
       : { fallbackColor: "muted" });
     const label = selected ? theme.fg("text", agent.label) : agent.label;
     const model = agent.model ? theme.fg("dim", ` · ${agent.model}`) : "";
-    const left = `  ${this.bullet(rosterIndex, sel, theme)}   │  └─ ${glyph} ${type}  ${label}${model}`;
+    const phaseRail = phaseHasLaterSibling ? "│  " : "   ";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)}   ${phaseRail}${hasLaterSibling ? "├─" : "└─"} ${glyph} ${type}  ${label}${model}`;
     const elapsed = agent.startedAt === undefined
       ? "queued"
       : formatFleetElapsed((agent.completedAt ?? Date.now()) - agent.startedAt);

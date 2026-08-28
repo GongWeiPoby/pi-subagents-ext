@@ -34,10 +34,65 @@ function containsWorkflowReference(value: unknown, parent?: Record<string, unkno
   if (value === null || typeof value !== "object") return false;
 
   const node = value as Record<string, unknown>;
+  if ((node.type === "CallExpression" || node.type === "OptionalCallExpression")
+    && isReflectGetWorkflowCall(node)) {
+    return true;
+  }
   if (node.type === "Identifier" && node.name === "workflow" && isBindingReference(parent, parentKey)) {
     return true;
   }
+  if ((node.type === "Identifier" && node.name === "globalThis" && isBindingReference(parent, parentKey))
+    || node.type === "ThisExpression") {
+    if (isWorkflowGlobalAccess(parent, parentKey)) return true;
+  }
   return Object.entries(node).some(([key, child]) => containsWorkflowReference(child, node, key));
+}
+
+function isWorkflowGlobalAccess(
+  parent: Record<string, unknown> | undefined,
+  parentKey: string | undefined,
+): boolean {
+  if (!parent || parentKey !== "object"
+    || (parent.type !== "MemberExpression" && parent.type !== "OptionalMemberExpression")) {
+    return false;
+  }
+  if (parent.computed !== true) {
+    const property = astRecord(parent.property);
+    return property?.type === "Identifier" && property.name === "workflow";
+  }
+  const property = astRecord(parent.property);
+  return property?.type !== "StringLiteral" || property.value === "workflow";
+}
+
+function isReflectGetWorkflowCall(node: Record<string, unknown>): boolean {
+  const callee = astRecord(node.callee);
+  if (!callee || (callee.type !== "MemberExpression" && callee.type !== "OptionalMemberExpression")
+    || !isGlobalObjectMember(callee.object, "Reflect") || !isStaticProperty(callee, "get")
+    || !Array.isArray(node.arguments) || node.arguments.length < 2
+    || !isGlobalObjectExpression(node.arguments[0])) {
+    return false;
+  }
+  const property = astRecord(node.arguments[1]);
+  return property?.type !== "StringLiteral" || property.value === "workflow";
+}
+
+function isGlobalObjectExpression(value: unknown): boolean {
+  const node = astRecord(value);
+  return (node?.type === "Identifier" && node.name === "globalThis") || node?.type === "ThisExpression";
+}
+
+function isGlobalObjectMember(value: unknown, name: string): boolean {
+  const node = astRecord(value);
+  return node?.type === "Identifier" && node.name === name;
+}
+
+function isStaticProperty(node: Record<string, unknown>, name: string): boolean {
+  if (node.computed !== true) {
+    const property = astRecord(node.property);
+    return property?.type === "Identifier" && property.name === name;
+  }
+  const property = astRecord(node.property);
+  return property?.type === "StringLiteral" && property.value === name;
 }
 
 function isBindingReference(parent: Record<string, unknown> | undefined, parentKey: string | undefined): boolean {
@@ -59,6 +114,85 @@ function isBindingReference(parent: Record<string, unknown> | undefined, parentK
   return !(type === "MetaProperty" && (parentKey === "meta" || parentKey === "property"));
 }
 
+export type DirectWorkflowApprovalCompleteness =
+  | { ok: true }
+  | { kind: "indirection" | "options" | "parse"; message: string; ok: false };
+
+/**
+ * Prove that a direct UI approval preview observes every injected call and each
+ * behavior-affecting agent option. Headless automation and exact-approved Plans
+ * deliberately do not use this policy boundary.
+ */
+export function validateDirectWorkflowApprovalCompleteness(
+  source: string,
+): DirectWorkflowApprovalCompleteness {
+  const ast = parseWorkflowAst(source);
+  if (!ast) {
+    return {
+      ok: false,
+      kind: "parse",
+      message: "the workflow script could not be parsed, so its approval preview cannot be proven complete",
+    };
+  }
+
+  const indirect = new Set<string>();
+  collectUnsupportedInjectedReferences(ast, indirect);
+  if (indirect.size > 0) {
+    return {
+      ok: false,
+      kind: "indirection",
+      message: `unsupported indirect reference to injected workflow global(s): ${[...indirect].sort().join(", ")}`,
+    };
+  }
+
+  const calls: StaticCall[] = [];
+  collectCallsFromAst(ast, source, calls);
+  const unresolved = calls
+    .filter((call) => call.name === "agent")
+    .flatMap((call, index) => (call.agentOptions?.unresolved ?? [])
+      .map((reason) => `agent call ${index + 1}: ${reason}`));
+  if (unresolved.length > 0) {
+    return {
+      ok: false,
+      kind: "options",
+      message: `agent options cannot be previewed statically (${unresolved.join("; ")})`,
+    };
+  }
+  return { ok: true };
+}
+
+function collectUnsupportedInjectedReferences(
+  value: unknown,
+  indirect: Set<string>,
+  parent?: Record<string, unknown>,
+  parentKey?: string,
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectUnsupportedInjectedReferences(item, indirect, parent, parentKey);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+
+  const node = value as Record<string, unknown>;
+  if (node.type === "ThisExpression") indirect.add("this");
+  if (node.type === "Identifier" && typeof node.name === "string"
+    && (node.name === "globalThis" || CALL_NAMES.has(node.name))
+    && isBindingReference(parent, parentKey) && !isSupportedDirectCallee(parent, parentKey)) {
+    indirect.add(node.name);
+  }
+  for (const [key, child] of Object.entries(node)) {
+    collectUnsupportedInjectedReferences(child, indirect, node, key);
+  }
+}
+
+function isSupportedDirectCallee(
+  parent: Record<string, unknown> | undefined,
+  parentKey: string | undefined,
+): boolean {
+  return parentKey === "callee"
+    && (parent?.type === "CallExpression" || parent?.type === "OptionalCallExpression");
+}
+
 /** Recursively guard strings and object keys before rendering structured values. */
 export function hasUnsafeControlDeep(value: unknown, seen = new WeakSet<object>()): boolean {
   if (typeof value === "string") {
@@ -75,11 +209,54 @@ export function hasUnsafeControlDeep(value: unknown, seen = new WeakSet<object>(
 
 const RISK_WORDS = /\b(deploy|publish|release|push|merge|delete|destroy|drop|truncate|wipe|send|post|upload|submit|charge|purchase|pay)\b/gi;
 const CALL_NAMES = new Set(["agent", "parallel", "pipeline", "phase", "workflow"]);
+const BEHAVIOR_OPTION_NAMES = [
+  "label",
+  "phase",
+  "agentType",
+  "model",
+  "effort",
+  "isolation",
+  "gate",
+  "resume",
+] as const;
+const BEHAVIOR_OPTION_NAME_SET = new Set<string>(BEHAVIOR_OPTION_NAMES);
+
+type BehaviorOptionName = typeof BEHAVIOR_OPTION_NAMES[number];
+
+type StaticOptionValue =
+  | { kind: "absent" }
+  | { kind: "static"; value: string }
+  | { expression: string; kind: "dynamic" };
+
+type StaticSchemaOption =
+  | { kind: "absent" }
+  | { kind: "configured" }
+  | { expression: string; kind: "dynamic" };
+
+interface StaticAgentOptions {
+  fields: Record<BehaviorOptionName, StaticOptionValue>;
+  schema: StaticSchemaOption;
+  unresolved: string[];
+}
 
 interface StaticCall {
-  args: string[];
+  agentOptions?: StaticAgentOptions;
+  argRanges: StaticRange[];
   end: number;
   name: string;
+  parallelBranchRanges?: StaticRange[];
+  start: number;
+  staticArgs: Array<string | undefined>;
+}
+
+interface StaticMapNode {
+  call: StaticCall;
+  label: string;
+  purpose: string | undefined;
+}
+
+interface StaticRange {
+  end: number;
   start: number;
 }
 
@@ -99,14 +276,14 @@ export interface DirectWorkflowApprovalInput {
  * exact agent counts.
  */
 export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput): string {
-  const calls = scanCalls(input.script);
+  const calls = collectStaticCalls(input.script);
   const parallel = calls.filter((call) => call.name === "parallel");
   const pipelines = calls.filter((call) => call.name === "pipeline");
   const agents = calls.filter((call) => call.name === "agent");
   const nested = calls.filter((call) => call.name === "workflow");
   const phaseCalls = calls.filter((call) => call.name === "phase");
   const declaredPhases = input.meta.phases?.map((phase) => phase.title) ?? [];
-  const observedPhases = phaseCalls.map((call) => staticString(call.args[0])).filter((value): value is string => value !== undefined);
+  const observedPhases = phaseCalls.map((call) => call.staticArgs[0]).filter((value): value is string => value !== undefined);
   const phases = [...new Set([...declaredPhases, ...observedPhases])];
   const risks = [...new Set(`${input.script}\n${safeJson(input.args)}`.match(RISK_WORDS)?.map((word) => word.toLowerCase()) ?? [])];
 
@@ -119,6 +296,7 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
     `Orchestration: ${orchestrationSummary(parallel.length, pipelines.length, nested.length)}`,
     "Runtime shape: static call sites are listed below; loops, branches, discovered lists, and nested results may change the number and order of agents at runtime.",
     `Side effects: ${risks.length > 0 ? `potential external/high-impact actions (${risks.map(safeLine).join(", ")})` : "not declared; determined by agent tools and prompts"}`,
+    ...workflowMap(calls),
     "Parameters:",
     safeJson(input.args),
     "",
@@ -127,31 +305,31 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
 
   if (agents.length === 0) lines.push("- none found statically (the script may compute calls dynamically)");
   for (const [index, call] of agents.entries()) {
-    const options = objectOptions(call.args[1]);
-    const phase = options.phase ?? ambientPhase(call, phaseCalls) ?? "runtime/default";
+    const options = call.agentOptions ?? emptyAgentOptions();
+    const phase = renderOptionValue(options.fields.phase, ambientPhase(call, phaseCalls) ?? "runtime/default");
     const peers = enclosingCalls(call, parallel).length > 0
       ? "parallel barrier"
       : enclosingCalls(call, pipelines).length > 0
         ? "pipeline stage (items overlap without a stage barrier)"
         : "script order/runtime control flow";
-    lines.push(`- ${index + 1}. ${safeLine(options.label ?? `agent call ${index + 1}`)}`);
-    lines.push(`  task: ${safeLine(staticString(call.args[0]) ?? "dynamic prompt computed at runtime")}`);
-    lines.push(`  agentType: ${safeLine(options.agentType ?? "general-purpose")}`);
-    lines.push(`  model: ${safeLine(options.model ?? "inherit")}`);
-    lines.push(`  effort: ${safeLine(options.effort ?? "inherit")}`);
+    lines.push(`- ${index + 1}. ${safeLine(renderOptionValue(options.fields.label, `agent call ${index + 1}`))}`);
+    lines.push(`  task: ${safeLine(call.staticArgs[0] ?? "dynamic prompt computed at runtime")}`);
+    lines.push(`  agentType: ${safeLine(renderOptionValue(options.fields.agentType, "general-purpose"))}`);
+    lines.push(`  model: ${safeLine(renderOptionValue(options.fields.model, "inherit"))}`);
+    lines.push(`  effort: ${safeLine(renderOptionValue(options.fields.effort, "inherit"))}`);
     lines.push(`  phase: ${safeLine(phase)}`);
     lines.push(`  dependency/parallel relation: ${peers}`);
-    lines.push(`  isolation: ${safeLine(options.isolation ?? "none")}`);
-    lines.push(`  gate: ${safeLine(options.gate ?? "none")}`);
-    lines.push(`  structured output: ${hasObjectOption(call.args[1], "schema") ? "configured" : "none"}`);
-    lines.push(`  resume: ${safeLine(options.resume ?? "none")}`);
+    lines.push(`  isolation: ${safeLine(renderOptionValue(options.fields.isolation, "none"))}`);
+    lines.push(`  gate: ${safeLine(renderOptionValue(options.fields.gate, "none"))}`);
+    lines.push(`  structured output: ${safeLine(renderSchemaOption(options.schema))}`);
+    lines.push(`  resume: ${safeLine(renderOptionValue(options.fields.resume, "none"))}`);
   }
 
   lines.push("", "Nested workflow calls:");
   if (nested.length === 0) lines.push("- none");
   else {
     for (const call of nested) {
-      lines.push(`- ${safeLine(staticString(call.args[0]) ?? "dynamic workflow reference")}`);
+      lines.push(`- ${safeLine(call.staticArgs[0] ?? "dynamic workflow reference")}`);
     }
   }
   lines.push("", "Omitted capabilities:", "- not declared by a direct script");
@@ -166,11 +344,148 @@ function orchestrationSummary(parallel: number, pipelines: number, nested: numbe
   return parts.join("; ") || "sequential/dynamic script control flow";
 }
 
+function workflowMap(calls: StaticCall[]): string[] {
+  const agents = calls.filter((call) => call.name === "agent");
+  const mapCalls = calls.filter((call) =>
+    call.name === "agent" || call.name === "workflow" || call.name === "parallel" || call.name === "pipeline"
+  );
+  const nodes = new Map<StaticCall, StaticMapNode>();
+  for (const call of mapCalls) {
+    if (call.name === "agent") {
+      const agentIndex = agents.indexOf(call);
+      const options = call.agentOptions ?? emptyAgentOptions();
+      nodes.set(call, {
+        call,
+        label: renderOptionValue(options.fields.label, `agent call ${agentIndex + 1}`),
+        purpose: call.staticArgs[0],
+      });
+    } else if (call.name === "workflow") {
+      nodes.set(call, {
+        call,
+        label: `workflow: ${call.staticArgs[0] ?? "dynamic workflow reference"}`,
+        purpose: "nested workflow call",
+      });
+    }
+  }
+  const roots = mapCalls.filter((call) => enclosingCalls(call, mapCalls).length === 0);
+  const lines = [
+    "Workflow map (execution/control order; based on static call sites; runtime fan-out/control flow may differ):",
+    "Handoffs: script-defined; handoff not statically proven.",
+  ];
+  if (roots.length === 0) {
+    lines.push("  (no static nodes found; runtime calls may still occur)");
+    return lines;
+  }
+
+  for (const [index, call] of roots.entries()) {
+    if (index > 0) lines.push("     v");
+    lines.push(...renderMapCall(call, `  ${index + 1}. `, "     ", "", mapCalls, nodes));
+  }
+  return lines;
+}
+
+function renderMapCall(
+  call: StaticCall,
+  prefix: string,
+  childIndent: string,
+  label: string,
+  calls: StaticCall[],
+  nodes: Map<StaticCall, StaticMapNode>,
+): string[] {
+  const node = nodes.get(call);
+  if (node) {
+    const argumentRoots = callsInArgumentOrder(call, calls);
+    if (argumentRoots.length === 0) return [`${prefix}${label}${renderMapNode(node)}`];
+
+    const lines = [`${prefix}${label}argument evaluation/control order:`];
+    for (const [index, root] of argumentRoots.entries()) {
+      if (index > 0) lines.push(`${childIndent}       v`);
+      lines.push(...renderMapCall(root, `${childIndent}+-- `, `${childIndent}    `, "", calls, nodes));
+    }
+    lines.push(`${childIndent}       v`);
+    lines.push(`${childIndent}+-- ${renderMapNode(node)}`);
+    return lines;
+  }
+
+  const pipeline = call.name === "pipeline";
+  const lines = [
+    `${prefix}${label}${call.name}() [${pipeline ? "overlapping per-item stages" : "barrier; parallel branches"}]`,
+  ];
+  const regions = pipeline ? call.argRanges.slice(1) : parallelBranchRanges(call);
+  if (regions.length === 0) {
+    lines.push(`${childIndent}+-- (no static callbacks found)`);
+    return lines;
+  }
+
+  for (const [index, region] of regions.entries()) {
+    const regionLabel = pipeline ? `stage ${index + 1}` : `branch ${index + 1}`;
+    const roots = callsInRange(region, calls);
+    if (roots.length === 0) {
+      lines.push(`${childIndent}+-- ${regionLabel}: (no static nodes found; callback computed at runtime)`);
+      continue;
+    }
+    if (roots.length === 1) {
+      const root = roots[0];
+      const nestedLabel = pipeline || root.name === "parallel" || root.name === "pipeline" ? `${regionLabel}: ` : "";
+      lines.push(...renderMapCall(root, `${childIndent}+-- `, `${childIndent}    `, nestedLabel, calls, nodes));
+      continue;
+    }
+
+    lines.push(`${childIndent}+-- ${regionLabel} [callback control flow; handoff not proven]`);
+    for (const [rootIndex, root] of roots.entries()) {
+      if (rootIndex > 0) lines.push(`${childIndent}       v`);
+      lines.push(...renderMapCall(root, `${childIndent}    +-- `, `${childIndent}        `, "", calls, nodes));
+    }
+  }
+  return lines;
+}
+
+function parallelBranchRanges(call: StaticCall): StaticRange[] {
+  if (call.parallelBranchRanges) return call.parallelBranchRanges;
+  const range = call.argRanges[0];
+  return range ? [range] : [];
+}
+
+function callsInRange(range: StaticRange, calls: StaticCall[]): StaticCall[] {
+  const contained = calls.filter((call) => call.start >= range.start && call.end <= range.end);
+  return contained.filter((call) => enclosingCalls(call, contained).length === 0);
+}
+
+function callsInArgumentOrder(call: StaticCall, calls: StaticCall[]): StaticCall[] {
+  const candidates = calls.filter((candidate) => candidate !== call);
+  const roots: StaticCall[] = [];
+  const seen = new Set<StaticCall>();
+  for (const range of call.argRanges) {
+    for (const root of callsInRange(range, candidates)) {
+      if (seen.has(root)) continue;
+      seen.add(root);
+      roots.push(root);
+    }
+  }
+  return roots;
+}
+
+function renderMapNode(node: StaticMapNode): string {
+  const output = node.call.name === "agent"
+    ? node.call.agentOptions?.schema.kind === "absent" ? "text" : "structured (schema)"
+    : "nested workflow result";
+  return `[${safeAsciiLine(node.label)}] ${compactMapText(node.purpose, "dynamic prompt computed at runtime")} [output=${output}]`;
+}
+
+function compactMapText(value: string | undefined, fallback: string): string {
+  const text = safeAsciiLine(value ?? fallback).replace(/\s+/g, " ").trim();
+  return text.length <= 88 ? text : `${text.slice(0, 85)}...`;
+}
+
+function safeAsciiLine(value: string): string {
+  return safeLine(value).replace(/[^\x20-\x7E]/g, unicodeEscape);
+}
+
 function ambientPhase(call: StaticCall, phases: StaticCall[]): string | undefined {
   let selected: string | undefined;
   for (const phase of phases) {
     if (phase.start >= call.start) break;
-    selected = staticString(phase.args[0]) ?? selected;
+    selected = phase.staticArgs[0] ?? selected;
   }
   return selected;
 }
@@ -201,192 +516,191 @@ function safeJson(value: unknown): string {
   }
 }
 
-function objectOptions(source: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!source) return out;
-  const trimmed = source.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return out;
-  for (const field of splitTopLevel(trimmed.slice(1, -1))) {
-    const colon = topLevelColon(field);
-    if (colon < 0) continue;
-    const key = field.slice(0, colon).trim().replace(/^['"]|['"]$/g, "");
-    if (!["label", "phase", "agentType", "model", "effort", "isolation", "gate", "resume"].includes(key)) continue;
-    const value = staticString(field.slice(colon + 1));
-    if (value !== undefined) out[key] = value;
+function emptyAgentOptions(): StaticAgentOptions {
+  return {
+    fields: Object.fromEntries(
+      BEHAVIOR_OPTION_NAMES.map((name) => [name, { kind: "absent" as const }]),
+    ) as Record<BehaviorOptionName, StaticOptionValue>,
+    schema: { kind: "absent" },
+    unresolved: [],
+  };
+}
+
+function renderOptionValue(option: StaticOptionValue, fallback: string): string {
+  if (option.kind === "static") return option.value;
+  return option.kind === "dynamic" ? "dynamic/unknown" : fallback;
+}
+
+function renderSchemaOption(schema: StaticSchemaOption): string {
+  if (schema.kind === "absent") return "none";
+  if (schema.kind === "configured") return "configured";
+  return `configured (dynamic expression: ${schema.expression})`;
+}
+
+function staticStringFromNode(value: unknown): string | undefined {
+  const node = astRecord(value);
+  if (node?.type === "StringLiteral" && typeof node.value === "string") return node.value;
+  if (node?.type !== "TemplateLiteral" || !Array.isArray(node.expressions)
+    || node.expressions.length > 0 || !Array.isArray(node.quasis) || node.quasis.length !== 1) {
+    return undefined;
   }
-  return out;
+  const quasi = astRecord(node.quasis[0]);
+  const cooked = astRecord(quasi?.value)?.cooked;
+  return typeof cooked === "string" ? cooked : undefined;
 }
 
-function hasObjectOption(source: string | undefined, wanted: string): boolean {
-  if (!source) return false;
-  const trimmed = source.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
-  return splitTopLevel(trimmed.slice(1, -1)).some((field) => {
-    const colon = topLevelColon(field);
-    return colon >= 0 && field.slice(0, colon).trim().replace(/^['"]|['"]$/g, "") === wanted;
-  });
+function staticPropertyName(node: Record<string, unknown>): string | undefined {
+  if (node.computed === true) return undefined;
+  const key = astRecord(node.key);
+  if (key?.type === "Identifier" && typeof key.name === "string") return key.name;
+  if (key?.type === "StringLiteral" && typeof key.value === "string") return key.value;
+  return undefined;
 }
 
-function topLevelColon(source: string): number {
-  const positions = delimiterPositions(source, ":");
-  return positions[0] ?? -1;
+function sourceForNode(value: unknown, source: string): string {
+  const range = astRange(value);
+  return range ? source.slice(range.start, range.end).trim() : "unknown expression";
 }
 
-function splitTopLevel(source: string): string[] {
-  const positions = delimiterPositions(source, ",");
-  const result: string[] = [];
-  let start = 0;
-  for (const position of positions) {
-    result.push(source.slice(start, position).trim());
-    start = position + 1;
+function collectAgentOptions(argumentNodes: unknown[], source: string): StaticAgentOptions {
+  const options = emptyAgentOptions();
+  if (argumentNodes.some((argument) => astRecord(argument)?.type === "SpreadElement")) {
+    options.unresolved.push("spread arguments can hide the prompt or options object");
+    return options;
   }
-  result.push(source.slice(start).trim());
-  return result.filter(Boolean);
-}
+  if (argumentNodes.length < 2) return options;
 
-function delimiterPositions(source: string, delimiter: string): number[] {
-  const positions: number[] = [];
-  let braces = 0;
-  let brackets = 0;
-  let parens = 0;
-  let mode: "code" | "single" | "double" | "template" = "code";
-  for (let index = 0; index < source.length; index++) {
-    const char = source[index];
-    if (mode !== "code") {
-      if (char === "\\") index++;
-      else if ((mode === "single" && char === "'") || (mode === "double" && char === '"') || (mode === "template" && char === "`")) mode = "code";
+  const object = astRecord(argumentNodes[1]);
+  if (object?.type !== "ObjectExpression" || !Array.isArray(object.properties)) {
+    options.unresolved.push("the second argument is not an object literal");
+    return options;
+  }
+
+  for (const propertyValue of object.properties) {
+    const property = astRecord(propertyValue);
+    if (!property) {
+      options.unresolved.push("an option property has no static syntax node");
       continue;
     }
-    if (char === "'") { mode = "single"; continue; }
-    if (char === '"') { mode = "double"; continue; }
-    if (char === "`") { mode = "template"; continue; }
-    if (char === "{") braces++;
-    else if (char === "}") braces--;
-    else if (char === "[") brackets++;
-    else if (char === "]") brackets--;
-    else if (char === "(") parens++;
-    else if (char === ")") parens--;
-    else if (char === delimiter && braces === 0 && brackets === 0 && parens === 0) positions.push(index);
-  }
-  return positions;
-}
-
-function staticString(source: string | undefined): string | undefined {
-  const value = source?.trim();
-  if (!value) return undefined;
-  const quote = value[0];
-  if ((quote !== "'" && quote !== '"' && quote !== "`") || value.at(-1) !== quote) return undefined;
-  if (quote === "`" && /\$\{/.test(value)) return undefined;
-  const simple: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "0": "\0" };
-  let output = "";
-  for (let index = 1; index < value.length - 1; index++) {
-    const char = value[index];
-    if (char !== "\\") { output += char; continue; }
-    const escaped = value[++index];
-    if (escaped === undefined) return undefined;
-    if (escaped === "x") {
-      const hex = value.slice(index + 1, index + 3);
-      if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return undefined;
-      output += String.fromCharCode(Number.parseInt(hex, 16));
-      index += 2;
+    if (property.type === "SpreadElement") {
+      options.unresolved.push("an object spread can hide or override behavior options");
       continue;
     }
-    if (escaped === "u") {
-      if (value[index + 1] === "{") {
-        const close = value.indexOf("}", index + 2);
-        const hex = close < 0 ? "" : value.slice(index + 2, close);
-        const codePoint = Number.parseInt(hex, 16);
-        if (!/^[0-9A-Fa-f]{1,6}$/.test(hex) || codePoint > 0x10ffff) return undefined;
-        output += String.fromCodePoint(codePoint);
-        index = close;
-        continue;
+    if (property.type !== "ObjectProperty") {
+      options.unresolved.push("an option method cannot be previewed as data");
+      continue;
+    }
+    if (property.computed === true) {
+      options.unresolved.push("a computed option key can hide or override behavior options");
+      continue;
+    }
+    if (property.shorthand === true) {
+      options.unresolved.push("a shorthand option property cannot be previewed faithfully");
+      continue;
+    }
+
+    const key = staticPropertyName(property);
+    if (!key) continue;
+    if (key === "__proto__") {
+      options.unresolved.push("a literal __proto__ property can change the options object's prototype");
+      continue;
+    }
+    if (BEHAVIOR_OPTION_NAME_SET.has(key)) {
+      const optionName = key as BehaviorOptionName;
+      const value = staticStringFromNode(property.value);
+      if (value === undefined) {
+        options.fields[optionName] = {
+          kind: "dynamic",
+          expression: sourceForNode(property.value, source),
+        };
+        options.unresolved.push(`behavior option ${JSON.stringify(key)} has a dynamic value`);
+      } else {
+        options.fields[optionName] = { kind: "static", value };
       }
-      const hex = value.slice(index + 1, index + 5);
-      if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return undefined;
-      output += String.fromCharCode(Number.parseInt(hex, 16));
-      index += 4;
       continue;
     }
-    if (escaped === "\n") continue;
-    if (escaped === "\r") {
-      if (value[index + 1] === "\n") index++;
-      continue;
+    if (key === "schema") {
+      const schema = astRecord(property.value);
+      options.schema = schema?.type === "ObjectExpression"
+        ? { kind: "configured" }
+        : { kind: "dynamic", expression: sourceForNode(property.value, source) };
     }
-    output += simple[escaped] ?? escaped;
   }
-  return output;
+  return options;
 }
 
-function scanCalls(source: string): StaticCall[] {
-  const calls: StaticCall[] = [];
-  let index = 0;
-  while (index < source.length) {
-    const skipped = skipNonCode(source, index);
-    if (skipped !== index) { index = skipped; continue; }
-    if (!/[A-Za-z_$]/.test(source[index] ?? "")) { index++; continue; }
-    const start = index;
-    index++;
-    while (/[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
-    const name = source.slice(start, index);
-    if (!CALL_NAMES.has(name)) continue;
-    const open = skipWhitespaceAndComments(source, index);
-    if (source[open] !== "(") continue;
-    const end = matchingParen(source, open);
-    if (end < 0) continue;
-    calls.push({ name, start, end: end + 1, args: splitTopLevel(source.slice(open + 1, end)) });
+function parseWorkflowAst(source: string): unknown | undefined {
+  try {
+    return parse(source, {
+      sourceType: "module",
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+    });
+  } catch {
+    return undefined;
   }
+}
+
+function collectStaticCalls(source: string): StaticCall[] {
+  const ast = parseWorkflowAst(source);
+  if (!ast) return [];
+
+  const calls: StaticCall[] = [];
+  collectCallsFromAst(ast, source, calls);
   return calls.sort((left, right) => left.start - right.start);
 }
 
-function skipWhitespaceAndComments(source: string, from: number): number {
-  let index = from;
-  for (;;) {
-    while (/\s/.test(source[index] ?? "")) index++;
-    if (source.startsWith("//", index)) {
-      index = source.indexOf("\n", index + 2);
-      if (index < 0) return source.length;
-      continue;
-    }
-    if (source.startsWith("/*", index)) {
-      const end = source.indexOf("*/", index + 2);
-      return end < 0 ? source.length : skipWhitespaceAndComments(source, end + 2);
-    }
-    return index;
+function collectCallsFromAst(value: unknown, source: string, calls: StaticCall[]): void {
+  if (Array.isArray(value)) {
+    for (const child of value) collectCallsFromAst(child, source, calls);
+    return;
   }
+  if (value === null || typeof value !== "object") return;
+
+  const node = value as Record<string, unknown>;
+  const call = staticCallFromNode(node, source);
+  if (call) calls.push(call);
+  for (const child of Object.values(node)) collectCallsFromAst(child, source, calls);
 }
 
-function skipNonCode(source: string, index: number): number {
-  if (source.startsWith("//", index)) {
-    const end = source.indexOf("\n", index + 2);
-    return end < 0 ? source.length : end + 1;
+function staticCallFromNode(node: Record<string, unknown>, source: string): StaticCall | undefined {
+  if (node.type !== "CallExpression" && node.type !== "OptionalCallExpression") return undefined;
+  const callee = astRecord(node.callee);
+  if (callee?.type !== "Identifier" || typeof callee.name !== "string" || !CALL_NAMES.has(callee.name)) {
+    return undefined;
   }
-  if (source.startsWith("/*", index)) {
-    const end = source.indexOf("*/", index + 2);
-    return end < 0 ? source.length : end + 2;
-  }
-  const quote = source[index];
-  if (quote !== "'" && quote !== '"' && quote !== "`") return index;
-  index++;
-  while (index < source.length) {
-    if (source[index] === "\\") { index += 2; continue; }
-    if (source[index] === quote) return index + 1;
-    index++;
-  }
-  return source.length;
+  const range = astRange(node);
+  if (!range || !Array.isArray(node.arguments)) return undefined;
+
+  const argumentNodes = node.arguments;
+  const argRanges = argumentNodes.map(astRange).filter((argument): argument is StaticRange => argument !== undefined);
+  if (argRanges.length !== argumentNodes.length) return undefined;
+
+  // `agent?.()` still directly invokes the injected identifier when it exists.
+  // Member callees such as `object.agent()` are excluded by the Identifier check above.
+  const firstArgument = astRecord(argumentNodes[0]);
+  const parallelBranchRanges = callee.name === "parallel" && firstArgument?.type === "ArrayExpression"
+    && Array.isArray(firstArgument.elements)
+    ? firstArgument.elements.map(astRange).filter((element): element is StaticRange => element !== undefined)
+    : undefined;
+  return {
+    name: callee.name,
+    start: range.start,
+    end: range.end,
+    staticArgs: argumentNodes.map(staticStringFromNode),
+    argRanges,
+    parallelBranchRanges,
+    ...(callee.name === "agent" ? { agentOptions: collectAgentOptions(argumentNodes, source) } : {}),
+  };
 }
 
-function matchingParen(source: string, open: number): number {
-  let depth = 0;
-  let index = open;
-  while (index < source.length) {
-    const skipped = skipNonCode(source, index);
-    if (skipped !== index) { index = skipped; continue; }
-    if (source[index] === "(") depth++;
-    else if (source[index] === ")") {
-      depth--;
-      if (depth === 0) return index;
-    }
-    index++;
-  }
-  return -1;
+function astRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function astRange(value: unknown): StaticRange | undefined {
+  const node = astRecord(value);
+  return node && typeof node.start === "number" && typeof node.end === "number"
+    ? { start: node.start, end: node.end }
+    : undefined;
 }

@@ -17,6 +17,7 @@ import {
   failWorkflowTask,
   pauseWorkflowTask,
   resumeWorkflowTask,
+  updateWorkflowProgressBatch,
   type WorkflowTask,
 } from "../src/workflow/task.js";
 
@@ -114,19 +115,38 @@ describe("settling a run", () => {
     // A run held at a pause can still settle — its last agents finish and the
     // script returns. That time was spent held, and elapsed has to say so.
     const { task } = runningTask();
-    pauseWorkflowTask(task, Date.now() - 3_000);
-    completeWorkflowTask(task, result);
+    pauseWorkflowTask(task, 4_000);
+    completeWorkflowTask(task, result, 9_000);
 
     expect(task.pausedAt).toBeUndefined();
-    expect(task.totalPausedMs).toBeGreaterThanOrEqual(3_000);
+    expect(task.totalPausedMs).toBe(5_000);
+    expect(task.endTime).toBe(9_000);
     expect(task.status).toBe("completed");
   });
 
-  it("drops the control when the run never started", () => {
+  it("banks an open pause and freezes interrupted children when setup fails", () => {
     const { task } = runningTask();
-    failWorkflowTask(task, "bad meta");
+    updateWorkflowProgressBatch(task, [{
+      type: "workflow_agent",
+      index: 0,
+      label: "started child",
+      state: "progress",
+      startedAt: 2_000,
+      lastProgressAt: 4_000,
+    }]);
+    pauseWorkflowTask(task, 5_000);
+
+    failWorkflowTask(task, "bad meta", 11_000);
 
     expect(task.control).toBeUndefined();
     expect(task.status).toBe("failed");
+    expect(task.pausedAt).toBeUndefined();
+    expect(task.totalPausedMs).toBe(6_000);
+    expect(task.endTime).toBe(11_000);
+    expect(task.fleetPhases[0].agents[0]).toMatchObject({
+      state: "interrupted",
+      startedAt: 2_000,
+      completedAt: 11_000,
+    });
   });
 });

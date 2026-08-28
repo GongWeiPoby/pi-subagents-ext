@@ -172,7 +172,67 @@ function buildSystemReminder(tasks: Task[]): string {
   ].join("\n");
 }
 
-export function registerTasks(pi: ExtensionAPI) {
+export type WorkflowTaskOutputStatus = "running" | "paused" | "completed" | "failed" | "killed";
+
+export interface WorkflowTaskOutputSnapshot {
+  id: string;
+  status: WorkflowTaskOutputStatus;
+  name?: string;
+  doneCount: number;
+  totalCount: number;
+  replayedCount: number;
+  totalTokens: number;
+  totalToolCalls: number;
+  elapsedMs: number;
+  output?: string;
+  scriptPath?: string;
+}
+
+export interface WorkflowTaskOutputAdapter {
+  get(runId: string): WorkflowTaskOutputSnapshot | undefined;
+  list(): readonly string[];
+  wait(
+    runId: string,
+    options: { signal?: AbortSignal; timeoutMs: number },
+  ): Promise<WorkflowTaskOutputSnapshot | undefined>;
+  consume(runId: string): void;
+}
+
+export interface RegisterTasksOptions {
+  workflowOutput?: WorkflowTaskOutputAdapter;
+}
+
+const WORKFLOW_OUTPUT_UNSAFE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
+const WORKFLOW_OUTPUT_SINGLE_LINE_UNSAFE = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
+
+function escapeWorkflowOutputCharacter(character: string): string {
+  return `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+}
+
+function sanitizeWorkflowOutputField(value: string): string {
+  return value.replace(WORKFLOW_OUTPUT_UNSAFE, escapeWorkflowOutputCharacter);
+}
+
+function sanitizeWorkflowOutputLine(value: string): string {
+  return value.replace(WORKFLOW_OUTPUT_SINGLE_LINE_UNSAFE, escapeWorkflowOutputCharacter);
+}
+
+function workflowOutputText(workflow: WorkflowTaskOutputSnapshot): string {
+  const name = workflow.name ? ` "${sanitizeWorkflowOutputLine(workflow.name)}"` : "";
+  const parts = [
+    `${workflow.doneCount}/${workflow.totalCount} agents`,
+    `${workflow.totalTokens} tokens`,
+    `${workflow.totalToolCalls} tool use${workflow.totalToolCalls === 1 ? "" : "s"}`,
+    `${workflow.elapsedMs}ms`,
+  ];
+  if (workflow.replayedCount > 0) parts.push(`${workflow.replayedCount} replayed`);
+  const lines = [`Workflow ${workflow.id} [${workflow.status}]${name} — ${parts.join(", ")}`];
+  if (workflow.scriptPath) lines.push(`Script: ${sanitizeWorkflowOutputLine(workflow.scriptPath)}`);
+  if (workflow.output !== undefined) lines.push("", sanitizeWorkflowOutputField(workflow.output));
+  return lines.join("\n");
+}
+
+export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = {}) {
   const eventUnsubs: Array<() => void> = [];
   // Project overrides require ExtensionContext.cwd, which is unavailable while
   // the extension factory runs. Start with global defaults, then merge the
@@ -1152,14 +1212,14 @@ Set up task dependencies:
   pi.registerTool({
     name: "TaskOutput",
     label: "TaskOutput",
-    description: `- Retrieves status and output from an agent-backed task
-- Takes a task_id parameter identifying the task or an unambiguous agent ID prefix
-- Returns the task status and any completed agent result
-- Use block=true (default) to explicitly join the task
+    description: `- Retrieves status and output from an agent-backed task or a workflow run
+- Takes a task_id parameter identifying a task, an unambiguous agent ID prefix, or a wf_* run ID returned by SubagentWorkflow
+- Returns the current task/workflow status and settled output when available
+- Use block=true (default) to explicitly join the task or workflow
 - Use block=false for a non-blocking status check
-- Task IDs can be found using the /tasks command`,
+- Structured task IDs can be found using the /tasks command`,
     parameters: Type.Object({
-      task_id: Type.String({ description: "The task ID to get output from" }),
+      task_id: Type.String({ description: "The task ID, agent ID/prefix, or SubagentWorkflow wf_* run ID to inspect" }),
       block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion", default: true })),
       timeout: Type.Optional(Type.Number({ description: "Max wait time in ms", default: 30000, minimum: 0, maximum: 600000 })),
     }),
@@ -1173,6 +1233,28 @@ Set up task dependencies:
       // Reject an empty id up front: every agent ID starts with "", so the prefix
       // match below would resolve it to whichever agent the map yields first.
       if (!task_id) throw new Error("task_id is required");
+
+      if (task_id.startsWith("wf_")) {
+        let workflow = options.workflowOutput?.get(task_id);
+        if (!workflow) {
+          const known = options.workflowOutput?.list() ?? [];
+          throw new Error(
+            `No workflow run with ID ${task_id}. ${known.length > 0
+              ? `Known workflow runs: ${known.join(", ")}`
+              : "No workflow runs are available in this session."}`,
+          );
+        }
+        if (block && (workflow.status === "running" || workflow.status === "paused")) {
+          workflow = await options.workflowOutput!.wait(task_id, {
+            timeoutMs: timeout,
+            ...(signal ? { signal } : {}),
+          });
+          if (!workflow) throw new Error("Workflow context changed while waiting for output");
+        }
+        const settled = workflow.status !== "running" && workflow.status !== "paused";
+        if (settled && workflow.output !== undefined) options.workflowOutput?.consume(task_id);
+        return textResult(workflowOutputText(workflow));
+      }
 
       const processOutput = tracker.getOutput(task_id);
       if (!processOutput) {

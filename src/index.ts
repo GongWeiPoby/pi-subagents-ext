@@ -37,7 +37,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { registerTasks } from "./tasks/index.js";
+import { registerTasks, type WorkflowTaskOutputSnapshot } from "./tasks/index.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -65,7 +65,11 @@ import { selectItem } from "./ui/select-item.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
-import { formatDirectWorkflowApproval, hasNestedWorkflowCall } from "./workflow/approval.js";
+import {
+  formatDirectWorkflowApproval,
+  hasNestedWorkflowCall,
+  validateDirectWorkflowApprovalCompleteness,
+} from "./workflow/approval.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
 import type { FleetWorkflow } from "./workflow/fleet.js";
@@ -315,7 +319,14 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
-  registerTasks(pi);
+  registerTasks(pi, {
+    workflowOutput: {
+      get: workflowTaskOutputSnapshot,
+      list: currentWorkflowRunIds,
+      wait: waitForWorkflowTaskOutput,
+      consume: consumeWorkflowTaskOutput,
+    },
+  });
 
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
@@ -1108,16 +1119,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
-    workflowSessionGeneration++;
-    activeWorkflowSessionId = undefined;
-    currentCtx = undefined;
+    invalidateWorkflowLifecycle();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.clearCompleted(true);
-    for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
     workflowTaskSessionIds.clear();
     plannedWorkflowScripts.clear();
+    widget.update();
+    fleet.update();
     scheduler.stop();
   });
 
@@ -1129,19 +1139,17 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
-    currentCtx = undefined;
+    invalidateWorkflowLifecycle();
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
       delete (globalThis as any)[MANAGER_KEY];
     }
     scheduler.stop();
-    // Before abortAll, and not folded into it: a workflow owns a worker thread
-    // as well as its children, and only its own signal terminates that.
-    for (const task of workflowTasks.values()) task.abortController.abort();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    widget.dispose();
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
@@ -2340,12 +2348,100 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
   const workflowTaskSessionIds = new Map<string, string | undefined>();
   const workflowTaskGenerations = new WeakMap<WorkflowTask, number>();
+  const workflowOutputWaiters = new Map<string, Set<() => void>>();
+  const heldWorkflowNotifications = new Map<string, WorkflowTask>();
+  const consumedWorkflowOutputs = new WeakSet<WorkflowTask>();
 
   function isCurrentWorkflowTask(task: WorkflowTask): boolean {
     return workflowTasks.get(task.id) === task
       && workflowTaskSessionIds.get(task.id) === task.sessionId
       && workflowTaskGenerations.get(task) === workflowSessionGeneration
       && (activeWorkflowSessionId === undefined || task.sessionId === activeWorkflowSessionId);
+  }
+
+  function workflowTaskOutputSnapshot(runId: string): WorkflowTaskOutputSnapshot | undefined {
+    const task = workflowTasks.get(runId);
+    if (!task || !isCurrentWorkflowTask(task)) return undefined;
+    const settled = task.status !== "running" && task.status !== "paused";
+    return {
+      id: task.id,
+      status: task.status,
+      name: task.workflowName ?? task.meta?.name,
+      doneCount: task.doneCount,
+      totalCount: task.agentCount,
+      replayedCount: task.replayedCount,
+      totalTokens: task.totalTokens,
+      totalToolCalls: task.totalToolCalls,
+      elapsedMs: elapsedMs(task, Date.now()),
+      ...(settled ? { output: workflowResultText(task) } : {}),
+      ...(task.scriptPath !== undefined ? { scriptPath: task.scriptPath } : {}),
+    };
+  }
+
+  function currentWorkflowRunIds(): string[] {
+    return [...workflowTasks.values()].filter(isCurrentWorkflowTask).map(task => task.id);
+  }
+
+  function finishWorkflowOutputWaiters(runId: string): void {
+    const waiters = workflowOutputWaiters.get(runId);
+    if (!waiters) return;
+    for (const finish of [...waiters]) finish();
+  }
+
+  function finishAllWorkflowOutputWaiters(): void {
+    for (const runId of [...workflowOutputWaiters.keys()]) finishWorkflowOutputWaiters(runId);
+  }
+
+  /** Invalidate detached workflow delivery before aborting its worker threads. */
+  function invalidateWorkflowLifecycle(): void {
+    workflowSessionGeneration++;
+    activeWorkflowSessionId = undefined;
+    currentCtx = undefined;
+    heldWorkflowNotifications.clear();
+    finishAllWorkflowOutputWaiters();
+    for (const task of workflowTasks.values()) task.abortController.abort();
+  }
+
+  function waitForWorkflowTaskOutput(
+    runId: string,
+    options: { signal?: AbortSignal; timeoutMs: number },
+  ): Promise<WorkflowTaskOutputSnapshot | undefined> {
+    const initial = workflowTaskOutputSnapshot(runId);
+    if (!initial || (initial.status !== "running" && initial.status !== "paused")) {
+      return Promise.resolve(initial);
+    }
+
+    return new Promise(resolve => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (timer !== undefined) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", finish);
+        const waiters = workflowOutputWaiters.get(runId);
+        waiters?.delete(finish);
+        if (waiters?.size === 0) workflowOutputWaiters.delete(runId);
+        resolve(workflowTaskOutputSnapshot(runId));
+      };
+      const waiters = workflowOutputWaiters.get(runId) ?? new Set<() => void>();
+      waiters.add(finish);
+      workflowOutputWaiters.set(runId, waiters);
+      timer = setTimeout(finish, options.timeoutMs);
+      if (options.signal?.aborted) finish();
+      else options.signal?.addEventListener("abort", finish, { once: true });
+
+      const current = workflowTaskOutputSnapshot(runId);
+      if (!current || (current.status !== "running" && current.status !== "paused")) finish();
+    });
+  }
+
+  function consumeWorkflowTaskOutput(runId: string): void {
+    const task = workflowTasks.get(runId);
+    if (!task || !isCurrentWorkflowTask(task)) return;
+    consumedWorkflowOutputs.add(task);
+    heldWorkflowNotifications.delete(runId);
+    cancelNudge(runId);
   }
 
   /**
@@ -2368,6 +2464,8 @@ Terse command-style prompts produce shallow, generic work.
       totalCount: task.agentCount,
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
+      totalPausedMs: task.totalPausedMs
+        + (task.pausedAt === undefined ? 0 : Math.max(0, Date.now() - task.pausedAt)),
       tokens: task.totalTokens,
       phases: task.fleetPhases,
     }));
@@ -2393,7 +2491,13 @@ Terse command-style prompts produce shallow, generic work.
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
         }),
-        onProgress: entries => updateWorkflowProgressBatch(task, entries),
+        onProgress: entries => {
+          updateWorkflowProgressBatch(task, entries);
+          // Event refreshes never advance the frame; they keep a paused tree
+          // current after its animation interval has stopped.
+          widget.update();
+          fleet.update();
+        },
         // The dialog's pause / skip / retry keys run through this; it is dropped
         // again when the task settles.
         onControl: control => { task.control = control; },
@@ -2410,18 +2514,24 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
-  /**
-   * Hand a finished run back to the model through the SAME channel a background
-   * agent uses — held briefly by `scheduleNudge`, delivered as a follow-up that
-   * triggers a turn, rendered by the existing `subagent-notification` renderer.
-   */
-  function notifyWorkflowFinished(task: WorkflowTask) {
-    if (!isCurrentWorkflowTask(task)) return;
-    widget.update();
-    fleet.update();
-    const result = workflowResultText(task);
+  function workflowParentIsIdle(): boolean {
+    if (!currentCtx) return true;
+    try {
+      return currentCtx.isIdle();
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleWorkflowNotification(task: WorkflowTask): void {
+    if (!isCurrentWorkflowTask(task) || heldWorkflowNotifications.get(task.id) !== task) return;
     scheduleNudge(task.id, () => {
-      if (!isCurrentWorkflowTask(task)) return;
+      if (!isCurrentWorkflowTask(task) || heldWorkflowNotifications.get(task.id) !== task) return;
+      // The parent may have started a new turn during the hold. Keep the result
+      // extension-owned until a later agent_settled instead of handing it to
+      // pi-agent-core's abort-clearable followUp queue.
+      if (!workflowParentIsIdle()) return;
+      const result = workflowResultText(task);
       pi.sendMessage<NotificationDetails>({
         customType: "subagent-notification",
         content: formatWorkflowNotification(task),
@@ -2439,8 +2549,32 @@ Terse command-style prompts produce shallow, generic work.
           resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
         },
       }, { deliverAs: "followUp", triggerTurn: true });
+      heldWorkflowNotifications.delete(task.id);
     });
   }
+
+  /**
+   * Retain a finished run until its parent session is idle. TaskOutput may
+   * consume it while held, in which case both this map and any armed timer are
+   * cancelled before a custom message reaches pi.
+   */
+  function notifyWorkflowFinished(task: WorkflowTask) {
+    if (!isCurrentWorkflowTask(task)) return;
+    widget.update();
+    fleet.update();
+    finishWorkflowOutputWaiters(task.id);
+    if (consumedWorkflowOutputs.has(task)) return;
+    heldWorkflowNotifications.set(task.id, task);
+    if (workflowParentIsIdle()) scheduleWorkflowNotification(task);
+  }
+
+  pi.on("agent_settled", (_event, ctx) => {
+    if (activeWorkflowSessionId !== undefined
+      && ctx.sessionManager.getSessionId() !== activeWorkflowSessionId) return;
+    currentCtx = ctx;
+    if (!workflowParentIsIdle()) return;
+    for (const task of heldWorkflowNotifications.values()) scheduleWorkflowNotification(task);
+  });
 
   const plannedWorkflowScripts = new Map<string, { digest: string; script: string }>();
   const authorizePlannedWorkflowScript = (script: string): string => {
@@ -2619,6 +2753,25 @@ Terse command-style prompts produce shallow, generic work.
         );
       }
       if (!planned && ctx.hasUI) {
+        const completeness = validateDirectWorkflowApprovalCompleteness(resolved.script);
+        if (!completeness.ok) {
+          if (completeness.kind === "indirection") {
+            return textResult(
+              `Workflow approval rejected because unsupported indirection prevents a complete preview: ${completeness.message}. `
+              + "Rewrite injected globals as direct calls such as `agent(...)`, `parallel(...)`, or `workflow(...)`. "
+              + "Local declarations or parameters using injected global names are also rejected; rename those local shadows.",
+            );
+          }
+          if (completeness.kind === "options") {
+            return textResult(
+              `Workflow approval rejected because it cannot faithfully preview agent options: ${completeness.message}. `
+              + "Use a literal options object with literal keys and static string behavior fields; do not use argument/object spreads, computed keys, methods, or shorthand properties.",
+            );
+          }
+          return textResult(
+            `Workflow approval rejected because the script could not be analyzed: ${completeness.message}. Fix the syntax and use direct injected-global calls before retrying.`,
+          );
+        }
         const approvalText = formatDirectWorkflowApproval({
           args: params.args,
           meta,
@@ -2867,15 +3020,19 @@ Terse command-style prompts produce shallow, generic work.
     // minutes — blocking here would hold the whole session's startup.
     void runWorkflowTask(ctx, task).then(() => {
       if (!isCurrentWorkflowTask(task)) return;
+      finishWorkflowOutputWaiters(task.id);
       // No tool call to attach a result card to, so the card becomes a session
-      // entry (same layout), and the outcome is handed to the model as context
-      // for its next turn rather than forcing one.
+      // entry (same layout). Hold the model-facing result briefly so a blocking
+      // TaskOutput resumed above can consume it before next-turn delivery.
       pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
-      pi.sendMessage({
-        customType: "workflow-result",
-        content: formatWorkflowNotification(task),
-        display: false,
-      }, { deliverAs: "nextTurn" });
+      scheduleNudge(task.id, () => {
+        if (!isCurrentWorkflowTask(task) || consumedWorkflowOutputs.has(task)) return;
+        pi.sendMessage({
+          customType: "workflow-result",
+          content: formatWorkflowNotification(task),
+          display: false,
+        }, { deliverAs: "nextTurn" });
+      });
       widget.update();
       fleet.update();
     });
@@ -3839,7 +3996,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "widgetMode",
           label: "Widget",
-          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          description: "Above-editor Agents widget: all = every top-level agent + workflows; background = background agents + workflows; off = hide both agents and workflows.",
           currentValue: getWidgetMode(),
           values: ["all", "background", "off"],
         },
@@ -4151,4 +4308,5 @@ Write the file using the write tool. Only write the file, nothing else.`;
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+  widget.setWorkflowSource(fleetWorkflows);
 }

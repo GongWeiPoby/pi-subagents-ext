@@ -333,6 +333,10 @@ const AGENT_OPTIONS = [
   "schema",
 ];
 
+function ownAgentOption(options, key) {
+  return Object.prototype.hasOwnProperty.call(options, key) ? options[key] : undefined;
+}
+
 /** Claude Code options this runtime does not have, and why. */
 const UNSUPPORTED_AGENT_OPTIONS = {};
 
@@ -445,6 +449,24 @@ async function agentIn(scope, prompt, opts) {
   if (typeof options !== "object" || Array.isArray(options)) {
     throw new Error("agent(prompt, opts) expects opts to be an object.");
   }
+  if (opts !== undefined && opts !== null) {
+    const prototype = Object.getPrototypeOf(options);
+    if (prototype !== null && prototype !== realmObjectPrototype) {
+      throw new Error(
+        "agent(prompt, opts) expects opts to be a plain object with the workflow realm's Object.prototype or a null prototype."
+      );
+    }
+  }
+
+  for (let i = 0; i < AGENT_OPTIONS.length; i++) {
+    const key = AGENT_OPTIONS[i];
+    if (key in options && !Object.prototype.hasOwnProperty.call(options, key)) {
+      throw new Error(
+        "agent() opts." + key
+          + " is inherited from its prototype; every supported option must be an own property."
+      );
+    }
+  }
 
   for (const key of Object.keys(options)) {
     if (AGENT_OPTIONS.indexOf(key) !== -1) continue;
@@ -456,18 +478,18 @@ async function agentIn(scope, prompt, opts) {
     );
   }
 
-  const label = optionalText(options.label, "agent() opts.label");
-  const phaseName = optionalText(options.phase, "agent() opts.phase");
-  const model = optionalText(options.model, "agent() opts.model");
-  const agentType = optionalText(options.agentType, "agent() opts.agentType");
-  const isolation = optionalText(options.isolation, "agent() opts.isolation");
+  const label = optionalText(ownAgentOption(options, "label"), "agent() opts.label");
+  const phaseName = optionalText(ownAgentOption(options, "phase"), "agent() opts.phase");
+  const model = optionalText(ownAgentOption(options, "model"), "agent() opts.model");
+  const agentType = optionalText(ownAgentOption(options, "agentType"), "agent() opts.agentType");
+  const isolation = optionalText(ownAgentOption(options, "isolation"), "agent() opts.isolation");
   if (isolation !== undefined && isolation !== "worktree") {
     throw new Error("agent() opts.isolation must be \\"worktree\\".");
   }
-  const gate = optionalText(options.gate, "agent() opts.gate");
-  const resume = optionalText(options.resume, "agent() opts.resume");
-  const effort = optionalText(options.effort, "agent() opts.effort");
-  const schema = options.schema;
+  const gate = optionalText(ownAgentOption(options, "gate"), "agent() opts.gate");
+  const resume = optionalText(ownAgentOption(options, "resume"), "agent() opts.resume");
+  const effort = optionalText(ownAgentOption(options, "effort"), "agent() opts.effort");
+  const schema = ownAgentOption(options, "schema");
   if (schema !== undefined) {
     if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
       throw new Error("agent() opts.schema must be a JSON Schema object.");

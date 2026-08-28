@@ -235,6 +235,7 @@ export function formatWorkflowPlanApproval(plan: NormalizedWorkflowPlan): string
     `Playbook: ${plan.playbook ?? "(none)"}`,
     `Personas: ${plan.personas.map((persona) => `${persona.name} (${persona.role})`).join(", ") || "(none)"}`,
     `Phases: ${meta.phases?.map((phase) => phase.title).join(" -> ") || "Execute"}`,
+    ...workflowPlanMap(plan),
     "Execution layers (layers run in order; nodes within one layer may run in parallel):",
     ...plan.layers.map((layer, index) => `  ${index + 1}. ${layer.join(" | ")}`),
     "",
@@ -262,6 +263,48 @@ export function formatWorkflowPlanApproval(plan: NormalizedWorkflowPlan): string
   if (plan.omitted.length === 0) lines.push("- none declared");
   else for (const omitted of plan.omitted) lines.push(`- ${omitted.capability}: ${omitted.reason}`);
   return lines.join("\n");
+}
+
+function workflowPlanMap(plan: NormalizedWorkflowPlan): string[] {
+  const consumers = new Set(plan.nodes.flatMap((node) => node.dependsOn));
+  const lines = [
+    "Workflow map (exact dependencies; arrows mean prerequisite result handoff):",
+    "Handoffs: downstream nodes read the listed upstream outputs; final results retain each node output.",
+  ];
+  for (const node of plan.nodes) {
+    const id = safePlanMapText(node.id);
+    if (node.dependsOn.length === 0) lines.push(`  START -> ${id}`);
+    else lines.push(`  ${node.dependsOn.map(safePlanMapText).join(" + ")} -> ${id}`);
+  }
+  for (const node of plan.nodes) {
+    if (!consumers.has(node.id)) lines.push(`  ${safePlanMapText(node.id)} -> END`);
+  }
+  lines.push("Node legend:");
+  for (const node of plan.nodes) {
+    const output = node.schema ? "structured (schema)" : "text";
+    lines.push(
+      `  [${safePlanMapText(node.id)}] title=${compactPlanMapText(node.title)} `
+      + `capability=${compactPlanMapText(node.capability)} output=${output}`,
+    );
+  }
+  lines.push("Failure/skip: either can yield null; final results retain each node output.");
+  return lines;
+}
+
+function compactPlanMapText(value: string): string {
+  const text = safePlanMapText(value).replace(/\s+/g, " ").trim();
+  return text.length <= 56 ? text : `${text.slice(0, 53)}...`;
+}
+
+function safePlanMapText(value: string): string {
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000D\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g, (character) => {
+      if (character === "\n") return "\\n";
+      if (character === "\r") return "\\r";
+      if (character === "\t") return "\\t";
+      return `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    })
+    .replace(/[^\x20-\x7E]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 export function formatWorkflowPlanYaml(plan: NormalizedWorkflowPlan): string {

@@ -108,6 +108,76 @@ describe("script globals", () => {
     expect(calls[0].effort).toBeUndefined();
   });
 
+  it("rejects options with a custom prototype before reaching spawn or gate execution", async () => {
+    const spawnCalls: WorkflowSpawnRequest[] = [];
+    const gateCalls: string[] = [];
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        spawnCalls.push(request);
+        return Promise.resolve({ ok: true, text: "unexpected" });
+      },
+      abortAgent() {},
+      runGate(command) {
+        gateCalls.push(command);
+        return Promise.resolve({ ok: true, output: "unexpected" });
+      },
+    };
+
+    const result = await run(
+      'const inherited = { gate: "echo should not run" };\n'
+        + 'const opts = Object.create(inherited);\n'
+        + 'return await agent("go", opts);',
+      { host },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("plain object");
+    expect(spawnCalls).toHaveLength(0);
+    expect(gateCalls).toHaveLength(0);
+  });
+
+  it("rejects supported options inherited from the realm Object.prototype", async () => {
+    const spawnCalls: WorkflowSpawnRequest[] = [];
+    const gateCalls: string[] = [];
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        spawnCalls.push(request);
+        return Promise.resolve({ ok: true, text: "unexpected" });
+      },
+      abortAgent() {},
+      runGate(command) {
+        gateCalls.push(command);
+        return Promise.resolve({ ok: true, output: "unexpected" });
+      },
+    };
+
+    const result = await run(
+      'Object.prototype.gate = "echo should not run";\n'
+        + 'try { return await agent("go", {}); }\n'
+        + "finally { delete Object.prototype.gate; }",
+      { host },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toBe(
+      "agent() opts.gate is inherited from its prototype; every supported option must be an own property.",
+    );
+    expect(spawnCalls).toHaveLength(0);
+    expect(gateCalls).toHaveLength(0);
+  });
+
+  it("accepts null-prototype options with own properties", async () => {
+    const { host, calls } = stubHost();
+    const result = await run(
+      'const opts = Object.create(null); opts.label = "benign"; return await agent("go", opts);',
+      { host },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].label).toBe("benign");
+  });
+
   it("rejects an effort level pi does not have", async () => {
     const { host, calls } = stubHost();
     const result = await run('await agent("a", { effort: "ultra" });\nreturn null;', { host });

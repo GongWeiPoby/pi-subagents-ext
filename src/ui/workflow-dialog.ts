@@ -6,8 +6,8 @@
  *  Review changed files across dimensions              3/7 agents · 1m12s
  *
  *  ╭ Phases ──────────┬ Verify · 1 agent ──────────────────────────────╮
- *  │ ❯ ✔ Review   3/3 │ ❯ ◌ verify:auth.ts · attempt 2 · waiting 8s    │
- *  │   2 Verify   1/2 │                                                │
+ *  │ ❯ ✓ Review   3/3 │ ❯ ◌ verify:auth.ts · attempt 2 · waiting 8s    │
+ *  │   ⠋ Verify   1/2 │                                                │
  *  │   3 Report       │                                                │
  *  ╰──────────────────┴────────────────────────────────────────────────╯
  *  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
@@ -23,12 +23,14 @@
  * **The glyphs are not the card's glyphs.** `workflow-card.ts` keys off the raw
  * entry `state`; this file keys off the *derived* `displayState(entry, active)`
  * and splits cases the card cannot see — skipped, blocked, queued and
- * interrupted all render as a plain ✘ or ⟳ inline but are distinct here. `◌`
+ * interrupted all render as a plain ✗ or ⠋ inline but are distinct here. `◌`
  * (U+25CC) appears only in this file, and a running row animates a spinner where
  * the card draws a static `⟳`.
  *
- * **The phases pane is stranger still**: a phase that has not finished shows
- * *its number*, not a glyph. That is deliberate, recovered behaviour.
+ * **The phases pane** uses the same execution language as the rest of the
+ * extension: a phase that has not started shows *its number*, a running phase
+ * animates the shared braille spinner, and a finished phase shows `✓`/`✗`.
+ * The number is deliberate, recovered behaviour.
  *
  * **The layout is pure.** `layoutWorkflowDialog` returns coloured segments and
  * `handleWorkflowDialogKey` maps a keypress to the next state plus an optional
@@ -139,8 +141,8 @@ export interface WorkflowDialogGlyphs {
 }
 
 export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
-  tick: UNICODE_GLYPHS.tick,
-  cross: UNICODE_GLYPHS.cross,
+  tick: "✓",
+  cross: "✗",
   queued: "◌",
   pointer: "❯",
   focus: UNICODE_GLYPHS.pointer,
@@ -717,12 +719,15 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
       : group.status === "done" ? "success"
       : group.status === "failed" ? "error"
       : "dim";
-    // An unfinished phase shows its number where a finished one shows a glyph —
-    // so the list doubles as a numbered plan of the run.
+    // A phase that has not started shows its number, so the list doubles as a
+    // numbered plan of the run; a running phase animates the shared braille
+    // spinner; a finished phase shows ✓/✗ like FleetView and the Agents widget.
     const glyph =
       group.status === "done" ? glyphs.tick
       : group.status === "failed" ? glyphs.cross
-      : String(i + 1);
+      : group.status === "running"
+        ? glyphs.spinner[spinnerFrame % glyphs.spinner.length]
+        : String(i + 1);
     phaseRows.push(
       rightAlign(
         [
@@ -1038,11 +1043,7 @@ export class WorkflowDialog implements Component {
     initialPhaseIndex = 0,
   ) {
     this.state = initialWorkflowDialogState(initialPhaseIndex);
-    this.timer = setInterval(() => {
-      this.spinnerFrame++;
-      if (!this.closed) this.tui.requestRender();
-    }, WORKFLOW_DIALOG_SPINNER_MS);
-    this.timer.unref?.();
+    this.syncTimer();
   }
 
   handleInput(data: string): void {
@@ -1051,12 +1052,15 @@ export class WorkflowDialog implements Component {
     if (!result) return;
     this.state = result.state;
     if (result.action) this.dispatch(result.action);
+    this.syncTimer();
     this.tui.requestRender();
   }
 
   render(width: number): string[] {
+    const source = this.source();
+    this.syncTimer(source);
     const lines = layoutWorkflowDialog({
-      ...this.source(),
+      ...source,
       state: this.state,
       // Derived from what was actually injected, so the footer advertises only
       // the keys this dialog can service.
@@ -1080,16 +1084,45 @@ export class WorkflowDialog implements Component {
 
   dispose(): void {
     this.closed = true;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
+    this.stopTimer();
+  }
+
+  private shouldAnimate(source: WorkflowDialogSource): boolean {
+    const input: WorkflowDialogInput = { ...source, state: this.state };
+    const view = resolveWorkflowDialog(input);
+    return view.workflowActive && view.visibleAgents.some(
+      agent => displayState(agent, view.workflowActive) === "running",
+    );
+  }
+
+  private syncTimer(source = this.source()): void {
+    if (this.closed || !this.shouldAnimate(source)) {
+      this.stopTimer();
+      return;
     }
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      if (!this.shouldAnimate(this.source())) {
+        this.stopTimer();
+        return;
+      }
+      this.spinnerFrame++;
+      this.tui.requestRender();
+    }, WORKFLOW_DIALOG_SPINNER_MS);
+    this.timer.unref?.();
+  }
+
+  private stopTimer(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = undefined;
   }
 
   private dispatch(action: WorkflowDialogAction): void {
     switch (action.kind) {
       case "cancel":
         this.closed = true;
+        this.stopTimer();
         this.done(undefined);
         return;
       case "kill":

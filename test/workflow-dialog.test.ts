@@ -1,5 +1,5 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SPINNER } from "../src/ui/agent-widget.js";
 import { styleWorkflowCardLines, type WorkflowCardTask } from "../src/ui/workflow-card.js";
 import {
@@ -16,6 +16,7 @@ import {
   subStatusAnnotations,
   UNICODE_DIALOG_GLYPHS,
   WORKFLOW_DIALOG_COPY,
+  WORKFLOW_DIALOG_SPINNER_MS,
   WorkflowDialog,
   type WorkflowDialogInput,
   type WorkflowDialogState,
@@ -156,10 +157,10 @@ describe("dialog glyph mapping", () => {
   ];
 
   it("maps every one of the seven display states to its glyph and colour", () => {
-    expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✔", color: "success" });
-    expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "error" });
-    expect(dialogRowGlyph("skipped", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "dim" });
-    expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "warning" });
+    expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✓", color: "success" });
+    expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "error" });
+    expect(dialogRowGlyph("skipped", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "dim" });
+    expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "warning" });
     expect(dialogRowGlyph("queued", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
     expect(dialogRowGlyph("interrupted", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
     expect(dialogRowGlyph("running", UNICODE_DIALOG_GLYPHS, 3)).toEqual({ text: SPINNER[3], color: "dim" });
@@ -167,10 +168,10 @@ describe("dialog glyph mapping", () => {
 
   it("keys off the derived display state, not the raw entry state", () => {
     const rows = rightRows(dialog({ progress: live }));
-    expect(rows[0]).toContain("✔ done");
-    expect(rows[1]).toContain("✘ failed");
-    expect(rows[2]).toContain("✘ skipped");
-    expect(rows[3]).toContain("✘ blocked");
+    expect(rows[0]).toContain("✓ done");
+    expect(rows[1]).toContain("✗ failed");
+    expect(rows[2]).toContain("✗ skipped");
+    expect(rows[3]).toContain("✗ blocked");
     // All four above are `state: "done" | "error"` inline; only the dialog
     // splits the last three apart, and only it can draw ◌ for the queued row.
     expect(rows[4]).toContain("◌ queued");
@@ -179,10 +180,10 @@ describe("dialog glyph mapping", () => {
 
   it("renders blocked distinctly from skipped despite sharing the cross", () => {
     const lines = styled({ progress: live });
-    expect(lines.find(l => l.includes("skipped"))).toContain("<dim>✘</dim>");
-    expect(lines.find(l => l.includes("blocked"))).toContain("<warning>✘</warning>");
-    expect(lines.find(l => l.includes("failed"))).toContain("<error>✘</error>");
-    expect(lines.find(l => l.includes(">done"))).toContain("<success>✔</success>");
+    expect(lines.find(l => l.includes("skipped"))).toContain("<dim>✗</dim>");
+    expect(lines.find(l => l.includes("blocked"))).toContain("<warning>✗</warning>");
+    expect(lines.find(l => l.includes("failed"))).toContain("<error>✗</error>");
+    expect(lines.find(l => l.includes(">done"))).toContain("<success>✓</success>");
   });
 
   it("does not use the card's ⟳ for a running row — it spins, and queues draw ◌", () => {
@@ -210,7 +211,7 @@ describe("dialog glyph mapping", () => {
       expect(visibleWidth(ASCII_DIALOG_GLYPHS[key]), key).toBe(1);
     }
     const joined = dialog({ progress: live, ascii: true }).join("\n");
-    expect(joined).not.toMatch(/[✔✘◌❯▸]/);
+    expect(joined).not.toMatch(/[✔✘◌❯▸✓✗]/);
     expect(joined).toContain("√ done");
     expect(joined).toContain("o queued");
   });
@@ -233,15 +234,19 @@ describe("phases pane", () => {
     agentEntry({ index: 1, label: "b", phaseIndex: 1, state: "start" }),
   ];
 
-  it("shows a phase's number until it finishes, then its glyph", () => {
+  it("shows a phase's number until it runs, the spinner while running, then its glyph", () => {
     const rows = leftRows(dialog({ progress, meta }));
-    // Review is fully done → tick. Verify is still running → its NUMBER, not a
-    // glyph. Report never started → its number too.
-    expect(rows[0]).toContain("✔ Review");
-    expect(rows[1]).toContain("2 Verify");
+    // Review is fully done → tick. Verify is running → the shared braille
+    // spinner at frame 0. Report never started → its number.
+    expect(rows[0]).toContain("✓ Review");
+    expect(rows[1]).toContain(`${SPINNER[0]} Verify`);
     expect(rows[2]).toContain("3 Report");
-    expect(rows[1]).not.toContain("✔");
-    expect(rows[1]).not.toContain("✘");
+    expect(rows[1]).not.toContain("✓");
+    expect(rows[1]).not.toContain("✗");
+    // The spinner advances with the shared frame index.
+    const later = leftRows(dialog({ progress, meta, spinnerFrame: 4 }));
+    expect(later[1]).toContain(`${SPINNER[4]} Verify`);
+    expect(later[1]).not.toContain(`${SPINNER[0]} Verify`);
   });
 
   it("shows a cross once a phase has a failure", () => {
@@ -253,7 +258,7 @@ describe("phases pane", () => {
         ],
       }),
     );
-    expect(rows[0]).toContain("✘ Review");
+    expect(rows[0]).toContain("✗ Review");
   });
 
   it("points at the selected phase and accents it, leaving the others alone", () => {
@@ -943,7 +948,7 @@ describe("WorkflowDialog component", () => {
       layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86 }).length,
     );
     expect(rendered[0]).toContain("<toolTitle>*wf*</toolTitle>");
-    expect(rendered.join("\n")).toContain("<success>✔</success>");
+    expect(rendered.join("\n")).toContain("<success>✓</success>");
     instance.dispose();
   });
 
@@ -980,6 +985,55 @@ describe("WorkflowDialog component", () => {
     instance.handleInput("\r");
     expect(instance.render(86).some(l => l.includes("Prompt"))).toBe(true);
     instance.dispose();
+  });
+
+  it("does not arm animation for a settled displayed agent", () => {
+    vi.useFakeTimers();
+    const { dialog: instance, calls } = harness();
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(WORKFLOW_DIALOG_SPINNER_MS * 3);
+      expect(calls).toEqual([]);
+    } finally {
+      instance.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("animates a displayed running agent", () => {
+    vi.useFakeTimers();
+    const { dialog: instance, calls } = harness(liveSource);
+    try {
+      const before = stripMarkup(instance.render(86).find(line => line.includes("only")) ?? "");
+      expect(vi.getTimerCount()).toBe(1);
+      vi.advanceTimersByTime(WORKFLOW_DIALOG_SPINNER_MS);
+      const after = stripMarkup(instance.render(86).find(line => line.includes("only")) ?? "");
+      expect(calls).toEqual(["render"]);
+      expect(after).not.toBe(before);
+    } finally {
+      instance.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops animation when a live dialog transitions terminal", () => {
+    vi.useFakeTimers();
+    let status: WorkflowCardTask["status"] = "running";
+    const changingSource = () => ({
+      progress: [agentEntry({ index: 7, label: "only", state: "progress", startedAt: START })],
+      task: { status, workflowName: "wf", startTime: START },
+    });
+    const { dialog: instance, calls } = harness(changingSource);
+    try {
+      expect(vi.getTimerCount()).toBe(1);
+      status = "failed";
+      vi.advanceTimersByTime(WORKFLOW_DIALOG_SPINNER_MS);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(calls).toEqual([]);
+    } finally {
+      instance.dispose();
+      vi.useRealTimers();
+    }
   });
 });
 
