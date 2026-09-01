@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TaskExecutionClaim } from "../../src/tasks/execution-contract.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
 
 describe("TaskStore (in-memory)", () => {
@@ -27,6 +28,39 @@ describe("TaskStore (in-memory)", () => {
 
     expect(t.activeForm).toBe("Running task");
     expect(t.metadata).toEqual({ key: "value" });
+  });
+
+  it("returns clones so callers cannot mutate canonical execution outside CAS", () => {
+    store.create("Protected", "Desc");
+    const claimed = store.claimPending("1", {
+      kind: "agent",
+      taskAttemptId: "task-attempt",
+      attemptId: "agent-attempt",
+    })!;
+    const claim: TaskExecutionClaim = { ...claimed.execution };
+    const mutableClaim = claimed.execution as unknown as {
+      attemptId: string;
+      executorId?: string;
+    };
+    mutableClaim.attemptId = "forged-attempt";
+    mutableClaim.executorId = "forged-agent";
+    claimed.status = "completed";
+    claimed.metadata.result = "forged-result";
+
+    const fromGet = store.get("1")!;
+    fromGet.execution = undefined;
+    const [fromList] = store.list();
+    fromList.status = "pending";
+
+    expect(store.get("1")).toMatchObject({
+      status: "in_progress",
+      execution: {
+        attemptId: "agent-attempt",
+      },
+    });
+    expect(store.get("1")?.execution).not.toHaveProperty("executorId");
+    expect(store.get("1")?.metadata.result).toBeUndefined();
+    expect(store.bindExecution(claim, "real-agent")?.executorId).toBe("real-agent");
   });
 
   it("gets a task by ID", () => {
@@ -496,6 +530,47 @@ describe("TaskStore (absolute path)", () => {
       expect(task.blocks).toEqual([]);
       expect(task.metadata).toEqual({});
       expect(task.subject).toBe("Legacy task"); // existing fields preserved
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a legacy running agent to one stable canonical execution", () => {
+    const dir = join(tmpdir(), `pi-tasks-legacy-execution-${process.pid}-${Date.now()}`);
+    const filePath = join(dir, "tasks.json");
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(filePath, JSON.stringify({
+        nextId: 2,
+        tasks: [{
+          id: "1",
+          subject: "Legacy running task",
+          description: "d",
+          status: "in_progress",
+          metadata: { agentId: "agent-old", taskAttemptId: "attempt-old" },
+          blocks: [],
+          blockedBy: [],
+          createdAt: 1,
+          updatedAt: 2,
+        }],
+      }));
+
+      const first = new TaskStore(filePath).get("1")?.execution;
+      const persisted = JSON.parse(readFileSync(filePath, "utf-8")) as {
+        storeId?: string;
+        tasks: Array<{ execution?: unknown }>;
+      };
+      const second = new TaskStore(filePath).get("1")?.execution;
+
+      expect(persisted.storeId).toBeTruthy();
+      expect(persisted.tasks[0].execution).toEqual(first);
+      expect(second).toEqual(first);
+      expect(first).toMatchObject({
+        kind: "agent",
+        taskAttemptId: "attempt-old",
+        attemptId: "legacy-attempt-old",
+        executorId: "agent-old",
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

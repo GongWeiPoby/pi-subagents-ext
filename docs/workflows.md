@@ -18,7 +18,7 @@ Every `agent()` child returns final text or Markdown. The script may determinist
 
 There is no `/workflows` command. Ask the main model to use `SubagentWorkflow`, provide an inline script, point at a script path, or name a saved `.js` workflow. The model writes the script when the user asks for scripted orchestration; it should not use this tool merely because a Playbook was read.
 
-A direct invocation supplies exactly one of `script`, `scriptPath`, or `name`, except that `resumeFromRunId` may reuse the previous run's source. In a UI, every direct source and exact resume is shown in the current approval preview and requires direct confirmation. Headless direct calls proceed under the automation caller's trust boundary.
+A direct invocation supplies exactly one of `script`, `scriptPath`, or `name`, except that `resumeFromRunId` may reuse the previous run's source. Optional `task_id` binds the workflow controller to one pending structured Todo. It accepts one ID only; the workflow's child agents remain workflow-owned and do not receive that Todo reference. In a UI, every direct source and exact resume is shown in the current approval preview and requires direct confirmation; a requested Todo binding appears in that preview. Headless direct calls proceed under the automation caller's trust boundary.
 
 The approval preview is exact for the statically disclosed behavior. A bordered, larger fixed-height custom dialog keeps `Cancel` and `Approve` visible while the current view scrolls. The summary contains the goal, static call-site tree, runtime branch uncertainty, and repeated gate/worktree impact. Press `d` to switch to the independently scrollable technical appendix with complete prompts and literal options, then `d` again to return. Static `parallel()` and `pipeline()` structure is shown; arbitrary loops and branches are described as potentially changing call count or order rather than being presented as guaranteed execution.
 
@@ -28,7 +28,7 @@ UI-confirmed direct scripts are refused when the preview cannot faithfully discl
 
 ### 2. Read what came back
 
-The tool returns a workflow task ID immediately. The run continues in the background, updates its live card, and sends the normal completion notification when the owning parent session is ready. Use `TaskOutput` with the returned `wf_*` ID to inspect or join it:
+The tool returns a workflow task ID immediately. The run continues in the background, updates its live card, and sends the normal completion notification when the owning parent session is ready. When `task_id` was supplied, the structured Todo is atomically claimed before the controller starts. A Todo already bound to `TaskExecute` or another workflow is refused, so no duplicate run starts. Workflow completion marks the Todo completed; workflow failure or kill returns it to pending with the error. `TaskUpdate` to pending/completed/deleted aborts this controller and waits for it to settle before applying the new status, so a replacement cannot run beside the old workflow. Session changes revoke the old claim and stop the controller before activating the next task store. Use `TaskOutput` with either the returned `wf_*` ID or the bound structured Todo ID to inspect or join the controller:
 
 ```text
 SubagentWorkflow started in the background.
@@ -38,7 +38,7 @@ Script: <session task path>/<run id>.workflow.js
 You will be notified when it finishes — do NOT poll or sleep waiting for it.
 ```
 
-`TaskOutput({ task_id, block: false })` reports current state and counts. `block: true` waits event-first until settlement, timeout, abort, or session change. A timeout or abort does not consume the future notification. Returning settled workflow output consumes its held notification so it is not delivered twice.
+`TaskOutput({ task_id, block: false })` reports current state and counts. For a structured Todo ID it dispatches from the canonical workflow binding (and the protected settled workflow ID afterward), not from stale Agent metadata. `block: true` waits event-first until settlement, timeout, abort, or session change. A timeout or abort does not consume the future notification. Returning settled workflow output consumes its held notification so it is not delivered twice.
 
 The inline script is persisted in the session task directory so the model can edit and re-run it. It is scratch storage and may disappear with a reboot or temp cleanup. A named workflow reports its durable source path instead.
 
@@ -115,11 +115,12 @@ Invoke a saved script by asking the model to run it or by passing `name: "<name>
 | `script` | string | Inline workflow source beginning with `export const meta = { name, description }` |
 | `scriptPath` | string | Absolute or project-relative workflow script path |
 | `name` | string | Saved `<name>.js` workflow from the project, workspace, or global roots |
+| `task_id` | string | Bind this controller to one pending structured Todo; children do not inherit the binding |
 | `args` | JSON-shaped value | Passed verbatim to the script as the `args` global |
 | `resumeFromRunId` | string | Replay the unchanged prefix of a completed run in this session |
 | `title` / `description` | string | Accepted and ignored for Claude Code parity; the script's `meta` names it |
 
-Use exactly one source among `script`, `scriptPath`, and `name`. A resume may omit the source and reuse the previous script path. `args` is optional and may be an object or array; pass actual JSON values rather than a JSON-encoded string.
+Use exactly one source among `script`, `scriptPath`, and `name`. A resume may omit the source and reuse the previous script path. `task_id` is optional and accepts one structured Todo ID, not an array. `args` is optional and may be an object or array; pass actual JSON values rather than a JSON-encoded string.
 
 ### `agent(prompt, opts?)`
 
@@ -248,5 +249,7 @@ return await agent(`Deduplicate and synthesize these reviews:\n${combined}`)
 **The run appears queued.** Default workflow concurrency is two. A pause also prevents new children from starting while active children finish.
 
 **The saved workflow cannot be found.** Check the three saved-workflow roots and ensure the file contains `export const meta = { name, description }`. A Markdown `WORKFLOW.md` is a Playbook and is loaded by `WorkflowPlaybook`, not by the JavaScript name loader.
+
+**The workflow says the Todo is not pending or already has an execution.** The requested `task_id` is already in progress, completed, or bound to a different TaskExecute/workflow attempt. Inspect it with `TaskGet`/`TaskOutput`; reset it deliberately only when the current executor should be stopped. The reset waits for a workflow controller to settle before allowing a replacement claim, and any later stale callback is ignored.
 
 **A direct UI call is refused before approval.** Rewrite injected globals as direct identifier calls and use literal option objects without spreads, computed keys, shorthand properties, methods, or dynamic behavior fields. Headless automation does not use these UI completeness checks.

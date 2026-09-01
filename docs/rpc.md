@@ -6,14 +6,14 @@ The bus is in-process. Requests and replies are synchronous event-bus traffic, a
 
 ## Protocol and envelopes
 
-Protocol v3 uses the same reply envelope for every request:
+Protocol v4 uses the same reply envelope for every request:
 
 ```ts
 { success: true, data?: T }
 { success: false, error: string }
 ```
 
-`subagents:rpc:ping` replies with `{ version: 3 }`. The version covers the envelope and method contracts. `subagents:rpc:consume` remains additive and best-effort; callers should send it when they have presented a result and ignore an unavailable reply on older installations.
+`subagents:rpc:ping` replies with `{ version: 4 }`. The version covers the envelope and method contracts. Version 4 adds attempt-aware structured-task execution refs to the spawn reply and matching lifecycle events. `subagents:rpc:consume` remains additive and best-effort; callers should send it when they have presented a result and ignore an unavailable reply on older installations.
 
 A caller should always provide a unique `requestId`. It is interpolated into the reply channel and is not validated. A missing ID sends the reply to the literal `...:undefined` channel shared by other callers that also omit it.
 
@@ -36,9 +36,10 @@ A caller should always provide a unique `requestId`. It is interpolated into the
 | `cwd` | absolute path | Child tool working directory; the directory must exist |
 | `invocation` | AgentInvocation | Resolved display snapshot |
 | `signal` | AbortSignal | Aborts the child when triggered |
+| `taskExecution` | TaskExecutionClaim | Internal unbound claim used by the bundled `TaskExecute` client; the type and runtime guard both forbid an `executorId`, which the manager stamps from its generated agent ID |
 | `onSpawned`, `onQueued`, `onCompaction`, `onBeforeWorktreeCleanup` | functions | Manager lifecycle callbacks; function values work because the bus is in-process |
 
-Internal fields such as `parentAgentId`, `workflowId`, `depth`, `maxSubagentDepth`, `configCwd`, `rootSessionId`, `resumeSessionFile`, `reclaim`, and `blocking` are stripped. Activity callbacks such as `onToolActivity`, `onTextDelta`, `onTurnEnd`, `onSessionCreated`, and `onAssistantUsage` are replaced by the extension's tracker.
+Internal ownership fields such as `parentAgentId`, `workflowId`, `depth`, `maxSubagentDepth`, `configCwd`, `rootSessionId`, `resumeSessionFile`, `reclaim`, and `blocking` are stripped. `taskExecution` is the narrow exception used by the bundled task client: it contains `{ storeId, taskId, taskAttemptId, attemptId, kind }`; callers cannot supply `executorId`. The manager returns `{ id, taskExecutionRef }`, adding that generated ID as the executor, and carries the same ref on the terminal lifecycle event. The task store still performs the authoritative CAS, so possessing or fabricating a ref does not bypass the current store binding. Activity callbacks such as `onToolActivity`, `onTextDelta`, `onTurnEnd`, `onSessionCreated`, and `onAssistantUsage` are replaced by the extension's tracker.
 
 RPC spawns are detached regardless of the `run_in_background` spelling. `isBackground` controls pool participation; `maxConcurrentForeground` does not apply. A top-level RPC agent appears in the widget and FleetView with the same live activity and turn information as an Agent-tool spawn. Workflow-owned and nested children remain hidden from this surface.
 
@@ -82,6 +83,7 @@ Every failure is returned as `{ success: false, error }`, using the error messag
 | `SpawnOptions.cwd does not exist: "<cwd>"` | Missing working directory |
 | `SpawnOptions.cwd is not a directory: "<cwd>"` | Non-directory working directory |
 | `Cannot run with isolation: "worktree" — not a git repo, no commits yet, or 'git worktree add' failed.` | Strict worktree startup failed |
+| `Invalid task execution binding` | `taskExecution` is malformed or illegally includes a caller-selected `executorId` |
 | `Agent not found` | Stop target does not exist |
 | `Agent is owned by another agent or workflow` | Stop target is not a top-level RPC-owned agent |
 | `Agent is not running` | Stop target already settled |
@@ -110,7 +112,10 @@ const requestId = crypto.randomUUID();
 const unsub = pi.events.on(`subagents:rpc:spawn:reply:${requestId}`, (reply) => {
   unsub();
   if (!reply.success) console.error("Spawn failed:", reply.error);
-  else console.log("Agent ID:", reply.data.id);
+  else {
+    console.log("Agent ID:", reply.data.id);
+    if (reply.data.taskExecutionRef) console.log("Task execution:", reply.data.taskExecutionRef);
+  }
 });
 pi.events.emit("subagents:rpc:spawn", {
   requestId,
@@ -154,8 +159,8 @@ Six agent events are top-level only. `started`, `completed`, `failed`, and `comp
 |---|---|
 | `subagents:created` | Agent registered by the Agent tool's background path or a detached resume; RPC, scheduler, and mention spawns do not emit it |
 | `subagents:started` | Agent began running |
-| `subagents:completed` | Agent completed successfully or with a steered result |
-| `subagents:failed` | Agent stopped, aborted, or failed |
+| `subagents:completed` | Agent completed successfully or with a steered result; a TaskExecute agent also carries its immutable `taskExecutionRef` |
+| `subagents:failed` | Agent stopped, aborted, or failed; a TaskExecute agent carries the same `taskExecutionRef` |
 | `subagents:steered` | A steering message was accepted |
 | `subagents:compacted` | Child session compacted |
 
@@ -189,6 +194,6 @@ The registry has no reply envelope, version, or availability event. Prefer the b
 
 ## Reference implementation
 
-The bundled [`src/tasks/`](../src/tasks/) integration drives `subagents:rpc:spawn` for agent-backed tasks and `subagents:rpc:consume` when `TaskOutput` presents a result. It waits for `subagents:ready`, keeps an id-keyed map, resolves results from completion/failure events, and consumes results in the reporting path.
+The bundled [`src/tasks/`](../src/tasks/) integration drives `subagents:rpc:spawn` for agent-backed tasks and `subagents:rpc:consume` when `TaskOutput` presents a result. It atomically claims a pending Todo, passes the unbound `taskExecution` through spawn, binds the manager-stamped reply, and accepts completion/failure/stop only when the terminal event's store, Todo attempt, child attempt, kind, and executor ID still match. Its in-memory id map supports lookup and reload reconciliation but is not commit authority; a reset, new attempt, or store/session generation change rejects an old event.
 
 For many coordinated agents with deterministic loops or gates, use [`SubagentWorkflow`](workflows.md). Workflow children remain owned by the workflow and do not appear on this RPC surface.

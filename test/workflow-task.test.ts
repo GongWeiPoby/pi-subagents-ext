@@ -39,6 +39,27 @@ function runningTask(): { task: WorkflowTask; control: ReturnType<typeof stubCon
   return { task, control };
 }
 
+describe("Todo execution binding", () => {
+  it("keeps the controller ref on the workflow task", () => {
+    const taskExecutionRef = {
+      storeId: "store-1",
+      taskId: "7",
+      taskAttemptId: "task-attempt-1",
+      attemptId: "workflow-attempt-1",
+      kind: "workflow" as const,
+      executorId: "wf_abc123",
+    };
+
+    const task = createWorkflowTask({
+      id: "wf_abc123",
+      script: "",
+      taskExecutionRef,
+    });
+
+    expect(task.taskExecutionRef).toEqual(taskExecutionRef);
+  });
+});
+
 describe("pausing a run", () => {
   it("tells the run to hold, not just the record", () => {
     // Flipping the status alone would show a paused run in every surface while

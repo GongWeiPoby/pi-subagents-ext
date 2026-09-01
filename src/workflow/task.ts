@@ -15,6 +15,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { TaskExecutionRef } from "../tasks/types.js";
 import { escapeXml } from "../xml.js";
 import { type FleetWorkflowPhase, workflowFleetPhases } from "./fleet.js";
 import type { WorkflowJournalEntry } from "./journal.js";
@@ -40,6 +41,9 @@ export interface WorkflowTask {
   workflowName?: string;
   /** The `tool_use_id` of the call that started this, when one did. */
   toolCallId?: string;
+
+  /** Structured Todo execution owned by this workflow controller. */
+  taskExecutionRef?: TaskExecutionRef;
 
   /**
    * Pause, skip and retry, once the run is up.
@@ -102,6 +106,7 @@ export function createWorkflowTask(init: {
   args?: unknown;
   meta?: WorkflowMeta;
   toolCallId?: string;
+  taskExecutionRef?: TaskExecutionRef;
   startTime?: number;
   journalPath?: string;
   replay?: readonly WorkflowJournalEntry[];
@@ -119,6 +124,7 @@ export function createWorkflowTask(init: {
     meta: init.meta,
     workflowName: init.meta?.name,
     toolCallId: init.toolCallId,
+    taskExecutionRef: init.taskExecutionRef,
     journalPath: init.journalPath,
     replay: init.replay,
     resumedFrom: init.resumedFrom,

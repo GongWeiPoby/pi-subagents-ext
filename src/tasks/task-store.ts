@@ -9,8 +9,27 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import type {
+  TaskExecutionBinding,
+  TaskExecutionClaim,
+  TaskExecutionClaimOptions,
+  TaskExecutionRef,
+  TaskExecutionSettle,
+} from "./execution-contract.js";
+import {
+  isTaskExecutionBinding,
+  isTaskExecutionClaim,
+  isTaskExecutionRef,
+  sameTaskExecutionAttempt,
+} from "./execution-contract.js";
 import { sortTasks, type TaskSortOrder } from "./task-sort.js";
-import type { Task, TaskMetadata, TaskStatus, TaskStoreData } from "./types.js";
+import type {
+  Task,
+  TaskExecutionStopReservation,
+  TaskMetadata,
+  TaskStatus,
+  TaskStoreData,
+} from "./types.js";
 
 const TASKS_DIR = join(homedir(), ".pi", "tasks");
 const LOCK_RETRY_MS = 50;
@@ -82,11 +101,49 @@ function isProcessRunning(pid: number): boolean {
  * would throw. Normalizing at the load boundary lets every consumer trust the
  * shape. Also guards against wrong types in hand-edited files.
  */
-function normalizeTask(t: Task): Task {
+function cloneTask(task: Task): Task {
+  return structuredClone(task);
+}
+
+function normalizeTask(t: Task, storeId: string): Task {
   const now = Date.now();
+  const metadata = t.metadata && typeof t.metadata === "object" && !Array.isArray(t.metadata) ? t.metadata : {};
+  let execution = isTaskExecutionBinding(t.execution, t.id) && t.execution.storeId === storeId
+    ? t.execution
+    : undefined;
+
+  // Current pre-binding stores persisted the same authority in mutable metadata.
+  // Migrate it deterministically from fields already on disk; never mint a new
+  // attempt token on each load.
+  if (t.status === "in_progress" && execution === undefined
+    && typeof metadata.agentId === "string" && metadata.agentId.length > 0) {
+    const taskAttemptId = typeof metadata.taskAttemptId === "string" && metadata.taskAttemptId.length > 0
+      ? metadata.taskAttemptId
+      : `legacy-${t.id}-${typeof t.updatedAt === "number" ? t.updatedAt : 0}-${metadata.agentId}`;
+    execution = {
+      storeId,
+      taskId: t.id,
+      taskAttemptId,
+      attemptId: `legacy-${taskAttemptId}`,
+      kind: "agent",
+      executorId: metadata.agentId,
+    };
+  }
+
+  const executionStop: TaskExecutionStopReservation | undefined = execution !== undefined
+    && t.status !== "in_progress"
+    && t.executionStop !== undefined
+    && typeof t.executionStop.token === "string"
+    && t.executionStop.token.length > 0
+    && (t.executionStop.status === "completed" || t.executionStop.status === "pending")
+    ? t.executionStop
+    : undefined;
+
   return {
     ...t,
-    metadata: t.metadata && typeof t.metadata === "object" && !Array.isArray(t.metadata) ? t.metadata : {},
+    metadata,
+    ...(execution !== undefined ? { execution } : { execution: undefined }),
+    ...(executionStop !== undefined ? { executionStop } : { executionStop: undefined }),
     blocks: Array.isArray(t.blocks) ? t.blocks : [],
     blockedBy: Array.isArray(t.blockedBy) ? t.blockedBy : [],
     createdAt: typeof t.createdAt === "number" ? t.createdAt : now,
@@ -97,6 +154,9 @@ function normalizeTask(t: Task): Task {
 export class TaskStore {
   private filePath: string | undefined;
   private lockPath: string | undefined;
+  /** Stable for this store generation and persisted for file-backed stores. */
+  private storeId: string = randomUUID();
+  private needsMigration = false;
 
   // In-memory state (always kept in sync)
   private nextId = 1;
@@ -111,6 +171,9 @@ export class TaskStore {
     this.filePath = filePath;
     this.lockPath = filePath + ".lock";
     this.load();
+    // Existing stores are migrated under the same lock as every mutation. This
+    // persists the generated store id once, so two future instances agree.
+    if (this.needsMigration) this.withLock(() => {});
   }
 
   /**
@@ -129,8 +192,13 @@ export class TaskStore {
     try {
       const data: unknown = JSON.parse(readFileSync(this.filePath, "utf-8"));
       if (!data || typeof data !== "object") return;
-      const { nextId, tasks } = data as Partial<TaskStoreData>;
+      const { storeId, nextId, tasks } = data as Partial<TaskStoreData>;
       if (!Array.isArray(tasks)) return;
+      if (typeof storeId === "string" && storeId.length > 0) {
+        this.storeId = storeId;
+      } else {
+        this.needsMigration = true;
+      }
 
       // Build the replacement before touching the live state, so a bad record
       // can't leave the store half-loaded.
@@ -138,7 +206,11 @@ export class TaskStore {
       let maxId = 0;
       for (const t of tasks) {
         if (!t || typeof t !== "object" || typeof t.id !== "string") continue;
-        loaded.set(t.id, normalizeTask(t));
+        if (t.status === "in_progress" && typeof t.metadata?.agentId === "string"
+          && !isTaskExecutionBinding(t.execution, t.id)) {
+          this.needsMigration = true;
+        }
+        loaded.set(t.id, normalizeTask(t, this.storeId));
         const numericId = Number(t.id);
         if (Number.isFinite(numericId) && numericId > maxId) maxId = numericId;
       }
@@ -153,6 +225,7 @@ export class TaskStore {
   private save(): void {
     if (!this.filePath) return;
     const data: TaskStoreData = {
+      storeId: this.storeId,
       nextId: this.nextId,
       tasks: Array.from(this.tasks.values()),
     };
@@ -170,6 +243,7 @@ export class TaskStore {
       this.load(); // Re-read latest state
       const result = fn();
       this.save();
+      this.needsMigration = false;
       return result;
     } finally {
       releaseLock(this.lockPath, token);
@@ -186,39 +260,242 @@ export class TaskStore {
         status: "pending",
         activeForm,
         owner: undefined,
-        metadata: metadata ?? {},
+        metadata: structuredClone(metadata ?? {}),
         blocks: [],
         blockedBy: [],
         createdAt: now,
         updatedAt: now,
       };
       this.tasks.set(task.id, task);
-      return task;
+      return cloneTask(task);
     });
   }
 
   get(id: string): Task | undefined {
     if (this.filePath) this.load();
-    return this.tasks.get(id);
+    const task = this.tasks.get(id);
+    return task ? cloneTask(task) : undefined;
   }
 
   /** Atomically move a pending task to in_progress. Returns the claimed task,
-   *  or undefined when it is missing or another session already claimed it. */
-  claimPending(id: string, taskAttemptId?: string): Task | undefined {
+   *  or undefined when it is missing or another session already claimed it.
+   *
+   *  The string overload preserves the historical taskAttemptId argument. */
+  claimPending(
+    id: string,
+    claim?: string | TaskExecutionClaimOptions,
+  ): (Task & { execution: TaskExecutionClaim }) | undefined {
     return this.withLock(() => {
       const task = this.tasks.get(id);
-      if (!task || task.status !== "pending") return undefined;
+      if (!task || task.status !== "pending" || task.execution !== undefined) return undefined;
+      const options = typeof claim === "string" ? { taskAttemptId: claim } : claim ?? {};
+      const taskAttemptId = options.taskAttemptId ?? randomUUID();
       task.status = "in_progress";
-      if (taskAttemptId) task.metadata.taskAttemptId = taskAttemptId;
+      const execution: TaskExecutionClaim = {
+        storeId: this.storeId,
+        taskId: id,
+        taskAttemptId,
+        attemptId: options.attemptId ?? randomUUID(),
+        kind: options.kind ?? "agent",
+      };
+      task.execution = execution;
+      // A new attempt never inherits outcome or executor display data from the
+      // previous one. Mutable metadata remains compatibility/history only.
+      delete task.metadata.result;
+      delete task.metadata.lastError;
+      delete task.metadata.agentId;
+      delete task.metadata.workflowId;
+      task.owner = undefined;
+      // Compatibility read for older clients. It is not used as CAS authority.
+      task.metadata.taskAttemptId = taskAttemptId;
       task.updatedAt = Date.now();
-      return task;
+      const claimed = cloneTask(task);
+      return { ...claimed, execution: { ...execution } };
+    });
+  }
+
+  /** Bind exactly one executor to the current claim. Idempotent for that executor. */
+  bindExecution(claim: TaskExecutionClaim, executorId: string): TaskExecutionRef | undefined {
+    if (!isTaskExecutionClaim(claim) || !executorId) return undefined;
+    return this.withLock(() => {
+      const task = this.tasks.get(claim.taskId);
+      const current = task?.execution;
+      if (!task || task.status !== "in_progress" || !current || !sameTaskExecutionAttempt(current, claim)) return undefined;
+      if (isTaskExecutionRef(current) && current.executorId !== executorId) return undefined;
+      const bound: TaskExecutionRef = { ...claim, executorId };
+      task.execution = bound;
+      task.owner = executorId;
+      if (bound.kind === "agent") {
+        task.metadata.agentId = executorId;
+        delete task.metadata.workflowId;
+      } else {
+        task.metadata.workflowId = executorId;
+        delete task.metadata.agentId;
+      }
+      task.updatedAt = Date.now();
+      return { ...bound };
+    });
+  }
+
+  /**
+   * Reserve a terminal status for an executor that is being stopped. The
+   * binding remains attached until the caller finishes its CAS update, so a
+   * replacement claim cannot enter the gap between stopping the executor and
+   * writing the requested Todo status.
+   */
+  prepareExecutionStop(
+    ref: TaskExecutionRef,
+    status: "completed" | "pending",
+    error?: string,
+  ): string | undefined {
+    if (!isTaskExecutionRef(ref)) return undefined;
+    return this.withLock(() => {
+      const task = this.tasks.get(ref.taskId);
+      if (!task || task.status !== "in_progress" || task.executionStop !== undefined
+        || !sameTaskExecutionAttempt(task.execution, ref)) return undefined;
+      const token = randomUUID();
+      task.status = status;
+      task.executionStop = {
+        token,
+        status,
+        ...(error !== undefined ? { error } : {}),
+      };
+      task.updatedAt = Date.now();
+      return token;
+    });
+  }
+
+  /** Roll back a terminal stop reservation when session teardown invalidates it. */
+  rollbackExecutionStop(ref: TaskExecutionRef, token: string, error?: string): boolean {
+    if (!isTaskExecutionRef(ref) || !token) return false;
+    return this.withLock(() => {
+      const task = this.tasks.get(ref.taskId);
+      if (!task || task.executionStop?.token !== token
+        || !sameTaskExecutionAttempt(task.execution, ref)) return false;
+      task.status = "pending";
+      task.execution = undefined;
+      task.executionStop = undefined;
+      task.owner = undefined;
+      delete task.metadata.result;
+      if (error !== undefined) task.metadata.lastError = error;
+      else delete task.metadata.lastError;
+      task.updatedAt = Date.now();
+      return true;
+    });
+  }
+
+  /** Restore a stop reservation when the executor could not be stopped. */
+  restoreExecution(ref: TaskExecutionRef, token: string): boolean {
+    if (!isTaskExecutionRef(ref) || !token) return false;
+    return this.withLock(() => {
+      const task = this.tasks.get(ref.taskId);
+      if (!task || task.executionStop?.token !== token
+        || !sameTaskExecutionAttempt(task.execution, ref)) return false;
+      task.status = "in_progress";
+      task.executionStop = undefined;
+      task.owner = ref.executorId;
+      task.updatedAt = Date.now();
+      return true;
+    });
+  }
+
+  /** Apply a non-terminal executor mutation while the captured ref is current. */
+  updateExecution(ref: TaskExecutionRef, fields: {
+    status?: TaskStatus | "deleted";
+    subject?: string;
+    description?: string;
+    activeForm?: string;
+    owner?: string;
+    metadata?: Record<string, unknown>;
+    addBlocks?: string[];
+    addBlockedBy?: string[];
+  }): boolean {
+    if (!isTaskExecutionRef(ref) || (fields.status !== undefined && fields.status !== "in_progress")) return false;
+    return this.update(ref.taskId, fields, ref).casMatched === true;
+  }
+
+  /** Finalize exactly the stop reservation returned by prepareExecutionStop. */
+  finalizeExecutionStop(
+    ref: TaskExecutionRef,
+    token: string,
+    fields: {
+      status: "completed" | "pending" | "deleted";
+      subject?: string;
+      description?: string;
+      activeForm?: string;
+      owner?: string;
+      metadata?: Record<string, unknown>;
+      addBlocks?: string[];
+      addBlockedBy?: string[];
+    },
+    retainBinding = false,
+  ): ReturnType<TaskStore["update"]> {
+    return this.update(ref.taskId, fields, ref, token, retainBinding);
+  }
+
+  /** Commit one bound executor's outcome. Stale, malformed, cross-store, or
+   *  duplicate refs are rejected without mutating the task. A terminal task
+   *  may still carry its ref while TaskUpdate finishes a stop reservation; the
+   *  stopped lifecycle event must not clear that authority before the caller's
+   *  final ref-CAS. */
+  settleExecution(ref: TaskExecutionRef, outcome: TaskExecutionSettle): boolean {
+    if (!isTaskExecutionRef(ref) || (outcome.status !== "completed" && outcome.status !== "pending")) return false;
+    return this.withLock(() => {
+      const task = this.tasks.get(ref.taskId);
+      if (!task || !sameTaskExecutionAttempt(task.execution, ref) || task.executionStop !== undefined) return false;
+      if (task.status !== "in_progress") return false;
+      task.status = outcome.status;
+      if (outcome.result !== undefined) task.metadata.result = outcome.result;
+      else delete task.metadata.result;
+      if (outcome.error !== undefined) task.metadata.lastError = outcome.error;
+      else if (outcome.status === "completed") delete task.metadata.lastError;
+      if (outcome.status === "pending") task.owner = undefined;
+      if (!outcome.retainBinding) task.execution = undefined;
+      task.executionStop = undefined;
+      task.updatedAt = Date.now();
+      return true;
+    });
+  }
+
+  /**
+   * Accept partial output emitted after a stop RPC confirmed the same attempt.
+   * This cannot change status or trigger completion side effects. A TaskUpdate
+   * stop reservation can retain the ref until its final update CAS; TaskStop
+   * passes the default and releases it immediately.
+   */
+  recordSettledExecutionResult(ref: TaskExecutionRef, result?: string, retainBinding = false): boolean {
+    if (!isTaskExecutionRef(ref)) return false;
+    return this.withLock(() => {
+      const task = this.tasks.get(ref.taskId);
+      if (!task || task.status !== "completed" || !sameTaskExecutionAttempt(task.execution, ref)) return false;
+      if (result !== undefined && result !== "") task.metadata.result = result;
+      if (task.executionStop === undefined && !retainBinding) task.execution = undefined;
+      task.updatedAt = Date.now();
+      return true;
+    });
+  }
+
+  /** Roll back a claim that failed before (or just after) binding. */
+  rollbackExecution(claim: TaskExecutionBinding, error?: string): boolean {
+    if (!isTaskExecutionBinding(claim)) return false;
+    return this.withLock(() => {
+      const task = this.tasks.get(claim.taskId);
+      if (!task || task.status !== "in_progress" || !sameTaskExecutionAttempt(task.execution, claim)) return false;
+      task.status = "pending";
+      task.execution = undefined;
+      task.executionStop = undefined;
+      task.owner = undefined;
+      delete task.metadata.result;
+      if (error !== undefined) task.metadata.lastError = error;
+      task.updatedAt = Date.now();
+      return true;
     });
   }
 
   /** List all tasks, sorted by the given order (defaults to ID ascending). */
   list(sortOrder: TaskSortOrder = "id"): Task[] {
     if (this.filePath) this.load();
-    return sortTasks(Array.from(this.tasks.values()), sortOrder);
+    return sortTasks(Array.from(this.tasks.values(), cloneTask), sortOrder);
   }
 
   update(id: string, fields: {
@@ -230,10 +507,50 @@ export class TaskStore {
     metadata?: Record<string, unknown>;
     addBlocks?: string[];
     addBlockedBy?: string[];
-  }): { task: Task | undefined; changedFields: string[]; warnings: string[] } {
+  }, expectedExecution?: TaskExecutionBinding, expectedStopToken?: string, retainBinding = false): {
+    task: Task | undefined;
+    changedFields: string[];
+    warnings: string[];
+    casMatched?: boolean;
+  } {
     return this.withLock(() => {
+      const expectsCas = expectedExecution !== undefined || expectedStopToken !== undefined;
       const task = this.tasks.get(id);
-      if (!task) return { task: undefined, changedFields: [], warnings: [] };
+      if (!task) return {
+        task: undefined,
+        changedFields: [],
+        warnings: [],
+        ...(expectsCas ? { casMatched: false } : {}),
+      };
+      const executionMatched = expectedExecution !== undefined
+        && isTaskExecutionBinding(expectedExecution)
+        && isTaskExecutionBinding(task.execution)
+        && sameTaskExecutionAttempt(task.execution, expectedExecution)
+        && (isTaskExecutionRef(expectedExecution) || isTaskExecutionClaim(task.execution));
+      if (expectedExecution !== undefined && !executionMatched) {
+        return { task: cloneTask(task), changedFields: [], warnings: [], casMatched: false };
+      }
+      const stopMatched = expectedStopToken !== undefined
+        && expectedExecution !== undefined
+        && task.executionStop?.token === expectedStopToken;
+      const claimMatched = executionMatched
+        && expectedExecution !== undefined
+        && isTaskExecutionClaim(expectedExecution);
+      if ((expectedStopToken !== undefined && !stopMatched)
+        || (task.executionStop !== undefined && !stopMatched)
+        || (task.execution !== undefined && task.status !== "in_progress" && !stopMatched)
+        || (task.execution !== undefined && task.status === "in_progress"
+          && fields.status !== undefined && fields.status !== "in_progress"
+          && !stopMatched && !claimMatched)) {
+        return { task: cloneTask(task), changedFields: [], warnings: [], casMatched: false };
+      }
+      if (stopMatched) {
+        const reservedStatus = task.executionStop?.status;
+        const requestedStatus = fields.status === "pending" ? "pending" : "completed";
+        if (reservedStatus !== requestedStatus) {
+          return { task: cloneTask(task), changedFields: [], warnings: [], casMatched: false };
+        }
+      }
 
       const changedFields: string[] = [];
       const warnings: string[] = [];
@@ -246,11 +563,30 @@ export class TaskStore {
           t.blocks = t.blocks.filter(bid => bid !== id);
           t.blockedBy = t.blockedBy.filter(bid => bid !== id);
         }
-        return { task: undefined, changedFields: ["deleted"], warnings: [] };
+        return {
+          task: undefined,
+          changedFields: ["deleted"],
+          warnings: [],
+          ...(expectsCas ? { casMatched: true } : {}),
+        };
       }
 
       if (fields.status !== undefined) {
+        const previousStatus = task.status;
+        if (stopMatched) {
+          const reservedError = task.executionStop?.error;
+          if (fields.status === "pending") {
+            delete task.metadata.result;
+            task.owner = undefined;
+          }
+          if (reservedError !== undefined) task.metadata.lastError = reservedError;
+          else delete task.metadata.lastError;
+        }
         task.status = fields.status;
+        if (fields.status !== "in_progress" || previousStatus !== "in_progress") {
+          if (!retainBinding) task.execution = undefined;
+        }
+        if (stopMatched) task.executionStop = undefined;
         changedFields.push("status");
       }
       if (fields.subject !== undefined) {
@@ -276,7 +612,7 @@ export class TaskStore {
           if (value === null) {
             delete task.metadata[key];
           } else {
-            task.metadata[key] = value;
+            task.metadata[key] = structuredClone(value);
           }
         }
         changedFields.push("metadata");
@@ -328,14 +664,20 @@ export class TaskStore {
       }
 
       task.updatedAt = Date.now();
-      return { task, changedFields, warnings };
+      return {
+        task: cloneTask(task),
+        changedFields,
+        warnings,
+        ...(expectsCas ? { casMatched: true } : {}),
+      };
     });
   }
 
   /** Delete a task by ID. Returns true if deleted. */
   delete(id: string): boolean {
     return this.withLock(() => {
-      if (!this.tasks.has(id)) return false;
+      const task = this.tasks.get(id);
+      if (!task || task.execution !== undefined) return false;
       this.tasks.delete(id);
       // Clean up dependency edges
       for (const t of this.tasks.values()) {
@@ -349,8 +691,19 @@ export class TaskStore {
   /** Remove all tasks. */
   clearAll(): number {
     return this.withLock(() => {
-      const count = this.tasks.size;
-      this.tasks.clear();
+      let count = 0;
+      for (const [id, task] of this.tasks) {
+        if (task.execution !== undefined) continue;
+        this.tasks.delete(id);
+        count++;
+      }
+      if (count > 0) {
+        const validIds = new Set(this.tasks.keys());
+        for (const task of this.tasks.values()) {
+          task.blocks = task.blocks.filter(id => validIds.has(id));
+          task.blockedBy = task.blockedBy.filter(id => validIds.has(id));
+        }
+      }
       return count;
     });
   }
@@ -359,6 +712,7 @@ export class TaskStore {
   snapshot(): TaskStoreData {
     if (this.filePath) this.load();
     return {
+      storeId: this.storeId,
       nextId: this.nextId,
       tasks: Array.from(this.tasks.values(), task => structuredClone(task)),
     };
@@ -371,7 +725,21 @@ export class TaskStore {
       if (this.tasks.size > 0) return;
       this.nextId = data.nextId;
       this.tasks.clear();
-      for (const task of data.tasks) this.tasks.set(task.id, structuredClone(task));
+      for (const source of data.tasks) {
+        const task = structuredClone(source);
+        // A fork is a new store generation. It may copy the work list, but it
+        // cannot inherit commit authority held by the parent's executor.
+        if (task.status === "in_progress") {
+          task.status = "pending";
+          task.owner = undefined;
+          delete task.metadata.agentId;
+          delete task.metadata.workflowId;
+          delete task.metadata.taskAttemptId;
+        }
+        task.execution = undefined;
+        task.executionStop = undefined;
+        this.tasks.set(task.id, normalizeTask(task, this.storeId));
+      }
     });
   }
 
@@ -394,7 +762,7 @@ export class TaskStore {
     return this.withLock(() => {
       let count = 0;
       for (const [id, task] of this.tasks) {
-        if (task.status === "completed") {
+        if (task.status === "completed" && task.execution === undefined) {
           this.tasks.delete(id);
           count++;
         }

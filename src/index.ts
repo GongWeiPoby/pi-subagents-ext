@@ -37,6 +37,7 @@ import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { registerTasks, type WorkflowTaskOutputSnapshot } from "./tasks/index.js";
+import type { TaskExecutionRef } from "./tasks/types.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -314,12 +315,13 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
-  registerTasks(pi, {
+  const taskExecutions = registerTasks(pi, {
     workflowOutput: {
       get: workflowTaskOutputSnapshot,
       list: currentWorkflowRunIds,
       wait: waitForWorkflowTaskOutput,
       consume: consumeWorkflowTaskOutput,
+      stop: stopWorkflowTaskOutput,
     },
   });
 
@@ -580,6 +582,7 @@ export default function (pi: ExtensionAPI) {
       durationMs,
       tokens,
       usage,
+      ...(record.taskExecutionRef !== undefined ? { taskExecutionRef: record.taskExecutionRef } : {}),
     };
   }
 
@@ -809,8 +812,18 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    // Some hosts switch sessions without first emitting session_before_switch.
+    // Only treat a different concrete session id as that fallback transition;
+    // repeated starts for the same session must preserve its live workflows.
+    if (activeWorkflowSessionId !== undefined && activeWorkflowSessionId !== sessionId) {
+      await stopWorkflowControllersBeforeSwitch();
+      workflowTasks.clear();
+      workflowTaskSessionIds.clear();
+      scheduler.stop();
+    }
     currentCtx = ctx;
-    activeWorkflowSessionId = ctx.sessionManager.getSessionId();
+    activeWorkflowSessionId = sessionId;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -1110,8 +1123,8 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("session_before_switch", () => {
-    invalidateWorkflowLifecycle();
+  pi.on("session_before_switch", async () => {
+    await stopWorkflowControllersBeforeSwitch();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.clearCompleted(true);
@@ -1130,7 +1143,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
-    invalidateWorkflowLifecycle();
+    await stopWorkflowControllersBeforeSwitch();
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
@@ -2339,6 +2352,7 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
   const workflowTaskSessionIds = new Map<string, string | undefined>();
   const workflowTaskGenerations = new WeakMap<WorkflowTask, number>();
+  const workflowTaskRuns = new WeakMap<WorkflowTask, Promise<void>>();
   const workflowOutputWaiters = new Map<string, Set<() => void>>();
   const heldWorkflowNotifications = new Map<string, WorkflowTask>();
   const consumedWorkflowOutputs = new WeakSet<WorkflowTask>();
@@ -2383,7 +2397,7 @@ Terse command-style prompts produce shallow, generic work.
     for (const runId of [...workflowOutputWaiters.keys()]) finishWorkflowOutputWaiters(runId);
   }
 
-  /** Invalidate detached workflow delivery before aborting its worker threads. */
+  /** Invalidate detached workflow delivery before aborting its workers. */
   function invalidateWorkflowLifecycle(): void {
     workflowSessionGeneration++;
     activeWorkflowSessionId = undefined;
@@ -2391,6 +2405,17 @@ Terse command-style prompts produce shallow, generic work.
     heldWorkflowNotifications.clear();
     finishAllWorkflowOutputWaiters();
     for (const task of workflowTasks.values()) task.abortController.abort();
+  }
+
+  /** Abort every live controller and wait for its worker to terminate. */
+  async function stopWorkflowControllersBeforeSwitch(): Promise<void> {
+    const active = [...workflowTasks.values()].filter(task =>
+      task.status === "running" || task.status === "paused",
+    );
+    invalidateWorkflowLifecycle();
+    await Promise.all(active.map(task => workflowTaskRuns.get(task)).filter(
+      (run): run is Promise<void> => run !== undefined,
+    ));
   }
 
   function waitForWorkflowTaskOutput(
@@ -2435,6 +2460,27 @@ Terse command-style prompts produce shallow, generic work.
     cancelNudge(runId);
   }
 
+  async function stopWorkflowTaskOutput(
+    runId: string,
+    _outcome: { status: "completed" | "pending"; error?: string } = { status: "pending" },
+  ): Promise<boolean> {
+    const task = workflowTasks.get(runId);
+    if (!task || (task.status !== "running" && task.status !== "paused")) return false;
+    // The task adapter reserves the requested Todo status before entering this
+    // controller stop. This layer only aborts and awaits the controller; trying
+    // to prepare again would create a second owner for the same reservation.
+    // A Todo status change is already the caller-visible outcome. Suppress the
+    // controller's separate completion nudge before aborting it, so a
+    // replacement attempt is not followed by an old-workflow notification.
+    consumedWorkflowOutputs.add(task);
+    heldWorkflowNotifications.delete(runId);
+    cancelNudge(runId);
+    task.abortController.abort();
+    const run = workflowTaskRuns.get(task);
+    if (run) await run;
+    return true;
+  }
+
   /**
    * Workflow runs as the fleet list wants them.
    *
@@ -2460,6 +2506,21 @@ Terse command-style prompts produce shallow, generic work.
       tokens: task.totalTokens,
       phases: task.fleetPhases,
     }));
+  }
+
+  function settleWorkflowTaskBinding(task: WorkflowTask): void {
+    const ref = task.taskExecutionRef;
+    if (!ref) return;
+    if (task.status === "completed") {
+      taskExecutions.settle(ref, { status: "completed", result: workflowResultText(task) });
+      return;
+    }
+    if (task.status === "failed" || task.status === "killed") {
+      taskExecutions.settle(ref, {
+        status: "pending",
+        error: task.error ?? `Workflow ${task.status}`,
+      });
+    }
   }
 
   /**
@@ -2500,8 +2561,10 @@ Terse command-style prompts produce shallow, generic work.
         },
       });
       completeWorkflowTask(task, result);
+      settleWorkflowTaskBinding(task);
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
+      settleWorkflowTaskBinding(task);
     }
   }
 
@@ -2599,6 +2662,13 @@ Terse command-style prompts produce shallow, generic work.
             "Name of a saved workflow — `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Mutually exclusive with `script` and `scriptPath`.",
         }),
       ),
+      task_id: Type.Optional(
+        Type.String({
+          minLength: 1,
+          description:
+            "Bind this workflow controller to one pending structured Todo. Workflow children do not inherit the binding.",
+        }),
+      ),
       args: Type.Optional(
         Type.Any({
           description: "Exposed to the script as the global `args`, verbatim. Must be JSON-shaped.",
@@ -2657,6 +2727,11 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      const rawTaskId = (params as Record<string, unknown>).task_id;
+      if (rawTaskId !== undefined && (typeof rawTaskId !== "string" || rawTaskId.trim() === "")) {
+        return textResult("`task_id` must identify one structured task. No run was started.");
+      }
+      const taskId = typeof rawTaskId === "string" ? rawTaskId.trim() : undefined;
       if ((params as Record<string, unknown>).planRef !== undefined) {
         return textResult(
           "`planRef` is no longer supported. Pass `script`, `scriptPath`, or `name` directly; "
@@ -2740,7 +2815,7 @@ Terse command-style prompts produce shallow, generic work.
           meta,
           script: resolved.script,
           source: selectedDirectSource.label,
-        });
+        }) + (taskId !== undefined ? `\n\nTodo binding\n- Task #${taskId}` : "");
         if (approvalText.length > 48_000) {
           return textResult(
             "Workflow behavior summary exceeds 48000 characters. Split or rewrite the workflow before running it.",
@@ -2750,7 +2825,23 @@ Terse command-style prompts produce shallow, generic work.
         if (!approved) return textResult("Workflow was not approved. No run was started.");
       }
 
+      const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
       const runId = workflowRunId();
+      let taskExecutionRef: TaskExecutionRef | undefined;
+      if (taskId !== undefined) {
+        const claim = taskExecutions.claim(taskId, "workflow");
+        if (!claim) {
+          return textResult(
+            `Task #${taskId} is not pending or already has an execution. No workflow was started.`,
+          );
+        }
+        taskExecutionRef = taskExecutions.bind(claim, runId);
+        if (!taskExecutionRef) {
+          taskExecutions.rollback(claim, "workflow controller could not bind its task claim");
+          return textResult(`Task #${taskId} changed before the workflow controller bound. No run was started.`);
+        }
+      }
+
       // Every invocation lands on disk next to the agent transcripts, so
       // iterating is edit-the-file-then-rerun-with-scriptPath rather than
       // re-emitting the whole source. The journal sits beside it under the same
@@ -2768,20 +2859,26 @@ Terse command-style prompts produce shallow, generic work.
         console.warn(`[pi-subagents] could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
-
-      const task = createWorkflowTask({
-        id: runId,
-        script: resolved.script,
-        scriptPath: resolved.scriptPath ?? savedPath,
-        args: params.args,
-        meta,
-        toolCallId,
-        sessionId: ctx.sessionManager.getSessionId(),
-        sessionGeneration: workflowSessionGeneration,
-        ...(journalPath !== undefined ? { journalPath } : {}),
-        ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
-      });
+      let task: WorkflowTask;
+      try {
+        task = createWorkflowTask({
+          id: runId,
+          script: resolved.script,
+          scriptPath: resolved.scriptPath ?? savedPath,
+          args: params.args,
+          meta,
+          toolCallId,
+          taskExecutionRef,
+          sessionId: ctx.sessionManager.getSessionId(),
+          sessionGeneration: workflowSessionGeneration,
+          ...(journalPath !== undefined ? { journalPath } : {}),
+          ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (taskExecutionRef) taskExecutions.settle(taskExecutionRef, { status: "pending", error: message });
+        return textResult(`Workflow could not start: ${message}`);
+      }
       workflowTasks.set(runId, task);
       workflowTaskSessionIds.set(runId, ctx.sessionManager.getSessionId());
       workflowTaskGenerations.set(task, workflowSessionGeneration);
@@ -2794,7 +2891,11 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background, like Claude Code: the id comes back now and the run keeps
       // going without the tool call.
-      void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
+      const run = runWorkflowTask(ctx, task);
+      workflowTaskRuns.set(task, run);
+      void run
+        .then(() => notifyWorkflowFinished(task))
+        .finally(() => workflowTaskRuns.delete(task));
 
       return {
         content: [{
@@ -2961,7 +3062,9 @@ Terse command-style prompts produce shallow, generic work.
 
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    const run = runWorkflowTask(ctx, task);
+    workflowTaskRuns.set(task, run);
+    void run.then(() => {
       if (!isCurrentWorkflowTask(task)) return;
       finishWorkflowOutputWaiters(task.id);
       // No tool call to attach a result card to, so the card becomes a session
@@ -2978,7 +3081,7 @@ Terse command-style prompts produce shallow, generic work.
       });
       widget.update();
       fleet.update();
-    });
+    }).finally(() => workflowTaskRuns.delete(task));
   }
 
   // ---- get_subagent_result tool ----

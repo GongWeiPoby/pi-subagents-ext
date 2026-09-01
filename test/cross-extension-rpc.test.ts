@@ -109,6 +109,86 @@ describe("cross-extension RPC", () => {
       );
     });
 
+    it("returns the manager-stamped task execution ref", async () => {
+      const taskExecution = {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent" as const,
+      };
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({
+        taskExecutionRef: { ...taskExecution, executorId: "agent-42" },
+      });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-binding", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-binding",
+        type: "general-purpose",
+        prompt: "execute task",
+        options: { description: "task", isBackground: true, taskExecution },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: true,
+        data: {
+          id: "agent-42",
+          taskExecutionRef: { ...taskExecution, executorId: "agent-42" },
+        },
+      });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi,
+        ctx,
+        "general-purpose",
+        "execute task",
+        { description: "task", isBackground: true, taskExecution },
+      );
+    });
+
+    it.each([
+      ["missing attempt id", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        kind: "agent",
+      }],
+      ["caller-selected executor", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: "forged",
+      }],
+      ["executor field with undefined", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: undefined,
+      }],
+    ])("rejects an invalid task execution binding: %s", async (_label, taskExecution) => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-invalid-binding", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-invalid-binding",
+        type: "general-purpose",
+        prompt: "execute task",
+        options: { taskExecution },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Invalid task execution binding",
+      });
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
     it("returns error when no active session", async () => {
       ctx = undefined;
       registerRpcHandlers(deps);

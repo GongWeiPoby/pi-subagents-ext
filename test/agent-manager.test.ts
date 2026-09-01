@@ -136,6 +136,45 @@ describe("AgentManager — invocation turn counts", () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  it("stamps its generated id onto a TaskExecute claim", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const taskExecution = {
+      storeId: "store-1",
+      taskId: "7",
+      taskAttemptId: "task-attempt-1",
+      attemptId: "agent-attempt-1",
+      kind: "agent" as const,
+    };
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      taskExecution,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.taskExecutionRef).toEqual({ ...taskExecution, executorId: id });
+    await record.promise;
+  });
+
+  it("rejects a TaskExecute claim whose executor was caller-selected", () => {
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      taskExecution: {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: "forged",
+      },
+    })).toThrow("Invalid task execution binding");
+    expect(manager.listAgents()).toEqual([]);
+  });
+
   it("stores the latest fresh count on completed and error records", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options: any) => {

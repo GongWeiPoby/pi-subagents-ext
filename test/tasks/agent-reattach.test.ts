@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import initExtension from "../../src/tasks/index.js";
+import { TaskStore } from "../../src/tasks/task-store.js";
 import { flush, installSubagentsMock, mockPi, mockSessionCtx } from "./helpers/mock-pi.js";
 
 // Pinned so the developer's own <agentDir>/tasks-config.json cannot change what
@@ -47,8 +48,9 @@ async function sessionWithRunningAgent() {
   initExtension(mock.pi as any);
   await mock.executeTool("TaskCreate", { subject: "Long job", description: "d", agentType: "general-purpose" });
   await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+  const taskExecutionRef = rpc.taskExecutionRef("agent-1")!;
   rpc.unsub();
-  return mock;
+  return { mock, rpc, taskExecutionRef };
 }
 
 /** Boot a fresh extension over the same store and announce the reload. */
@@ -65,10 +67,10 @@ const statusOf = async (mock: ReturnType<typeof mockPi>, id = "1") =>
 
 describe("reattaching subagents after reload", () => {
   it("completes the task when the agent finishes after a reload", async () => {
-    await sessionWithRunningAgent();
-    const { mock } = await reload();
+    const { taskExecutionRef } = await sessionWithRunningAgent();
+    const { mock, rpc } = await reload();
 
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "the answer" });
+    rpc.complete("agent-1", "the answer", taskExecutionRef);
     await flush();
 
     const task = await statusOf(mock);
@@ -77,10 +79,10 @@ describe("reattaching subagents after reload", () => {
   });
 
   it("reverts the task to pending when the agent fails after a reload", async () => {
-    await sessionWithRunningAgent();
-    const { mock } = await reload();
+    const { taskExecutionRef } = await sessionWithRunningAgent();
+    const { mock, rpc } = await reload();
 
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "out of turns", status: "error" });
+    rpc.fail("agent-1", "out of turns", taskExecutionRef);
     await flush();
 
     const task = await statusOf(mock);
@@ -89,10 +91,10 @@ describe("reattaching subagents after reload", () => {
   });
 
   it("keeps the partial result when the agent was stopped before a reload", async () => {
-    await sessionWithRunningAgent();
-    const { mock } = await reload();
+    const { taskExecutionRef } = await sessionWithRunningAgent();
+    const { mock, rpc } = await reload();
 
-    mock.emitEvent("subagents:failed", { id: "agent-1", result: "half done", status: "stopped" });
+    rpc.stop("agent-1", "half done", taskExecutionRef);
     await flush();
 
     const task = await statusOf(mock);
@@ -101,12 +103,12 @@ describe("reattaching subagents after reload", () => {
   });
 
   it("lets a blocking TaskOutput resolve on the reattached agent's event", async () => {
-    await sessionWithRunningAgent();
-    const { mock } = await reload();
+    const { taskExecutionRef } = await sessionWithRunningAgent();
+    const { mock, rpc } = await reload();
 
     const pending = mock.executeTool("TaskOutput", { task_id: "1", block: true, timeout: 5000 });
     await flush();
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done", taskExecutionRef);
 
     expect((await pending).content[0].text).toBe("Task #1 [completed] — subagent agent-1\n\ndone");
   });
@@ -141,10 +143,11 @@ describe("reattaching subagents after reload", () => {
       model: "cascade-model",
       max_turns: 7,
     });
+    const taskExecutionRef = firstRpc.taskExecutionRef("agent-1")!;
     firstRpc.unsub();
 
     const reloaded = await reload();
-    reloaded.mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    reloaded.rpc.complete("agent-1", "done", taskExecutionRef);
     await flush();
 
     expect(reloaded.rpc.spawned).toHaveLength(1);
@@ -158,16 +161,20 @@ describe("reattaching subagents after reload", () => {
   it("does not reattach a task that is no longer in progress", async () => {
     // A failed agent leaves metadata.agentId behind on a task reverted to pending.
     // Reattaching that would let a late event resurrect work the user reset.
-    const first = await sessionWithRunningAgent();
-    first.emitEvent("subagents:failed", { id: "agent-1", error: "boom", status: "error" });
+    const {
+      mock: first,
+      rpc: firstRpc,
+      taskExecutionRef,
+    } = await sessionWithRunningAgent();
+    firstRpc.fail("agent-1", "boom", taskExecutionRef);
     await flush();
     expect(await statusOf(first)).toContain("Status: pending");
 
-    const { mock } = await reload();
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "late" });
+    const reloaded = await reload();
+    reloaded.rpc.complete("agent-1", "late", taskExecutionRef);
     await flush();
 
-    const task = await statusOf(mock);
+    const task = await statusOf(reloaded.mock);
     expect(task).toContain("Status: pending");
     expect(task).not.toContain("late");
   });
@@ -184,7 +191,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
     await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "late" });
+    rpc.complete("agent-1", "late");
     await flush();
 
     const task = await statusOf(mock);
@@ -193,15 +200,96 @@ describe("reattaching subagents after reload", () => {
     rpc.unsub();
   });
 
-  it("ignores a duplicate event after the reattached agent already reported", async () => {
-    await sessionWithRunningAgent();
-    const { mock } = await reload();
+  it("does not inherit an older result when a replacement completes without output", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "No stale result",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "old result" } });
+    await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "first" });
+    rpc.complete("agent-2");
+    await flush();
+
+    const task = await statusOf(mock);
+    expect(task).toContain("Status: completed");
+    expect(task).not.toContain("old result");
+    rpc.unsub();
+  });
+
+  it.each([
+    ["success", (rpc: ReturnType<typeof installSubagentsMock>) => rpc.complete("agent-1", "late success")],
+    ["failure", (rpc: ReturnType<typeof installSubagentsMock>) => rpc.fail("agent-1", "late failure")],
+    ["stopped output", (rpc: ReturnType<typeof installSubagentsMock>) => rpc.stop("agent-1", "late partial")],
+  ])("does not let a late %s event overwrite a replacement attempt", async (_label, emitLate) => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Retry safely",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    emitLate(rpc);
+    await flush();
+    const duringRetry = await statusOf(mock);
+    expect(duringRetry).toContain("Status: in_progress");
+    expect(duringRetry).toContain("Owner: agent-2");
+    expect(duringRetry).not.toMatch(/late success|late failure|late partial/);
+
+    rpc.complete("agent-2", "current result");
+    await flush();
+    const settled = await statusOf(mock);
+    expect(settled).toContain("Status: completed");
+    expect(settled).toContain("current result");
+    rpc.unsub();
+  });
+
+  it("rejects malformed and unauthorized lifecycle execution refs", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Protected event",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    const claim = rpc.spawned[0].options.taskExecution as Record<string, unknown>;
+
+    rpc.complete("agent-1", "missing", "missing");
+    rpc.complete("agent-1", "mismatch", "mismatch");
+    rpc.complete("agent-1", "malformed", { ...claim, executorId: "" });
+    rpc.complete("agent-1", "unauthorized", { ...claim, executorId: "agent-2" });
+    await flush();
+
+    const protectedTask = await statusOf(mock);
+    expect(protectedTask).toContain("Status: in_progress");
+    expect(protectedTask).not.toMatch(/missing|mismatch|malformed|unauthorized/);
+    rpc.complete("agent-1", "authorized");
+    await flush();
+    expect(await statusOf(mock)).toContain("authorized");
+    rpc.unsub();
+  });
+
+  it("ignores a duplicate event after the reattached agent already reported", async () => {
+    const { taskExecutionRef } = await sessionWithRunningAgent();
+    const { mock, rpc } = await reload();
+    rpc.complete("agent-1", "first", taskExecutionRef);
     await flush();
     // A second session_start must not re-map the now-completed task.
     await mock.fireLifecycle("before_agent_start", {}, mockSessionCtx("s1"));
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "late failure", status: "error" });
+    rpc.fail("agent-1", "late failure", taskExecutionRef);
     await flush();
 
     const task = await statusOf(mock);
@@ -227,7 +315,7 @@ describe("reattaching subagents after reload", () => {
     await mock.fireLifecycle("session_start", { reason: "new" }, mockSessionCtx("session-b"));
     await mock.executeTool("TaskCreate", { subject: "B's unrelated task", description: "d" });
 
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "belongs to session A" });
+    rpc.complete("agent-1", "belongs to session A");
     await flush();
 
     const task = await statusOf(mock);
@@ -258,6 +346,166 @@ describe("reattaching subagents after reload", () => {
     rpc.unsub();
   });
 
+  it("stops a just-bound agent when launch metadata loses its CAS race", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as any);
+    await mock.executeTool("TaskCreate", {
+      subject: "CAS launch",
+      description: "d",
+      agentType: "general-purpose",
+      metadata: { keep: "current" },
+    });
+
+    const concurrent = new TaskStore(process.env.PI_TASKS);
+    const originalUpdateExecution = TaskStore.prototype.updateExecution;
+    vi.spyOn(TaskStore.prototype, "updateExecution").mockImplementation(function (this: TaskStore, ref, fields) {
+      if (fields.owner === "agent-1") {
+        concurrent.settleExecution(ref, { status: "completed", result: "stale settled output" });
+        concurrent.update("1", { status: "pending" });
+        const replacement = concurrent.claimPending("1", {
+          kind: "agent",
+          taskAttemptId: "replacement-task-attempt",
+          attemptId: "replacement-agent-attempt",
+        })!.execution!;
+        concurrent.bindExecution(replacement, "replacement-agent");
+      }
+      return originalUpdateExecution.call(this, ref, fields);
+    });
+
+    const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    expect(result.content[0].text).toContain("launch lost the task binding");
+    expect(rpc.stopped).toEqual(["agent-1"]);
+    expect(new TaskStore(process.env.PI_TASKS).get("1")).toMatchObject({
+      status: "in_progress",
+      owner: "replacement-agent",
+      metadata: { keep: "current" },
+    });
+    expect(new TaskStore(process.env.PI_TASKS).get("1")?.metadata.agentId).toBe("replacement-agent");
+    rpc.unsub();
+  });
+
+  it("refuses a TaskUpdate when the captured executor is replaced before stop reservation", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Original subject",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    const concurrent = new TaskStore(process.env.PI_TASKS);
+    const originalUpdate = TaskStore.prototype.update;
+    let taskUpdateExpectedExecution: Parameters<TaskStore["update"]>[2];
+    vi.spyOn(TaskStore.prototype, "update").mockImplementation(function (this: TaskStore, id, fields, expectedExecution, expectedStopToken, retainBinding) {
+      if (id === "1" && fields.subject === "Must not overwrite replacement") {
+        taskUpdateExpectedExecution = expectedExecution;
+      }
+      return originalUpdate.call(this, id, fields, expectedExecution, expectedStopToken, retainBinding);
+    });
+    const originalPrepareExecutionStop = TaskStore.prototype.prepareExecutionStop;
+    vi.spyOn(TaskStore.prototype, "prepareExecutionStop").mockImplementation(function (this: TaskStore, ref, status, error) {
+      if (ref.executorId === "agent-1") {
+        expect(concurrent.settleExecution(ref, { status: "completed", result: "old result" })).toBe(true);
+        concurrent.update("1", { status: "pending" });
+        const replacementClaim = concurrent.claimPending("1", {
+          kind: "agent",
+          taskAttemptId: "replacement-task-attempt",
+          attemptId: "replacement-agent-attempt",
+        })!.execution!;
+        concurrent.bindExecution(replacementClaim, "replacement-agent");
+      }
+      return originalPrepareExecutionStop.call(this, ref, status, error);
+    });
+
+    const result = await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "completed",
+      subject: "Must not overwrite replacement",
+    });
+
+    expect(result.content[0].text).toContain("changed while its previous executor was stopping");
+    expect(taskUpdateExpectedExecution).toMatchObject({
+      taskAttemptId: expect.any(String),
+      attemptId: expect.any(String),
+      executorId: "agent-1",
+    });
+    expect(rpc.stopped).toEqual([]);
+    expect(new TaskStore(process.env.PI_TASKS).get("1")).toMatchObject({
+      status: "in_progress",
+      subject: "Original subject",
+      owner: "replacement-agent",
+      execution: {
+        taskAttemptId: "replacement-task-attempt",
+        attemptId: "replacement-agent-attempt",
+        executorId: "replacement-agent",
+      },
+    });
+    rpc.unsub();
+  });
+
+  it("keeps a TaskUpdate ref reserved when stopped output arrives before its final CAS", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi, { stopReplyDelayMs: 20 });
+    initExtension(mock.pi as any);
+    await mock.executeTool("TaskCreate", {
+      subject: "Original subject",
+      description: "Original description",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    const updating = mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "completed",
+      subject: "Updated subject",
+      description: "Updated description",
+      metadata: { requested: true },
+    });
+    await flush();
+    rpc.stop("agent-1", "partial output");
+
+    const result = await updating;
+    expect(result.content[0].text).toContain("Updated task #1");
+    const task = new TaskStore(process.env.PI_TASKS).get("1");
+    expect(task).toMatchObject({
+      status: "completed",
+      subject: "Updated subject",
+      description: "Updated description",
+      metadata: { requested: true, result: "partial output" },
+      execution: undefined,
+    });
+    rpc.unsub();
+  });
+
+  it("revokes a stale workflow binding on reload so the task can be claimed again", async () => {
+    const taskStore = new TaskStore(process.env.PI_TASKS);
+    taskStore.create("Stale workflow", "d", undefined, { agentType: "general-purpose" });
+    const claim = taskStore.claimPending("1", { kind: "workflow" })!.execution!;
+    const staleRef = taskStore.bindExecution(claim, "wf_stale")!;
+
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("session_start", { reason: "reload" }, mockSessionCtx("s1"));
+
+    expect((await mock.executeTool("TaskOutput", { task_id: "1", block: false })).content[0].text)
+      .toContain("Task #1 [pending] — workflow wf_stale");
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      subject: "Recovered workflow",
+      metadata: { recovered: true },
+    });
+    expect(await statusOf(mock)).toContain("Recovered workflow");
+
+    const retry = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(retry.content[0].text).toContain("Launched 1 agent");
+    expect(taskStore.settleExecution(staleRef, { status: "completed", result: "stale" })).toBe(false);
+    rpc.unsub();
+  });
   it("finishes a delayed TaskUpdate against its original store", async () => {
     delete process.env.PI_TASKS;
     const mock = mockPi();
@@ -282,6 +530,35 @@ describe("reattaching subagents after reload", () => {
     const task = await statusOf(mock);
     expect(task).toContain("B's task");
     expect(task).toContain("Status: pending");
+    rpc.unsub();
+  });
+
+
+  it("does not restore a stop reservation after session rollback", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi, {
+      stopError: "stop refused",
+      stopReplyDelayMs: 20,
+    });
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Session-bound stop",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    const stopping = mock.executeTool("TaskStop", { task_id: "1" });
+    void stopping.catch(() => {});
+    await flush();
+    await mock.fireLifecycle("session_before_switch");
+    await mock.fireLifecycle("session_start", { reason: "new" }, mockSessionCtx("session-b"));
+
+    await expect(stopping).rejects.toThrow("stop refused");
+    const task = await statusOf(mock);
+    expect(task).toContain("Status: pending");
+    expect(task).not.toContain("Status: in_progress");
+    expect(task).not.toContain("Owner: agent-1");
     rpc.unsub();
   });
 
@@ -312,7 +589,7 @@ describe("reattaching subagents after reload", () => {
     await stopping;
 
     expect(await statusOf(mock)).toContain("Owner: agent-2");
-    mock.emitEvent("subagents:completed", { id: "agent-2", result: "B done" });
+    rpc.complete("agent-2", "B done");
     await flush();
     expect(await statusOf(mock)).toContain("Status: completed");
     rpc.unsub();
@@ -338,7 +615,7 @@ describe("reattaching subagents after reload", () => {
 
     await mock.fireLifecycle("session_start", { reason: "new" }, sessionB);
     await mock.executeTool("TaskCreate", { subject: "B's task", description: "d" });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "A's result" });
+    rpc.complete("agent-1", "A's result");
 
     await expect(waiting).rejects.toThrow("Task context changed while waiting for output");
     expect(await statusOf(mock)).toContain("B's task");
@@ -370,7 +647,7 @@ describe("reattaching subagents after reload", () => {
 
     firstRpc.unsub();
     const delayedRpc = installSubagentsMock(mock.pi, { spawnReplyDelayMs: 20 });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    firstRpc.complete("agent-1", "done");
     await mock.fireLifecycle("session_start", { reason: "new" }, sessionB);
     await mock.executeTool("TaskCreate", { subject: "B's task", description: "d" });
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -425,11 +702,12 @@ describe("reattaching subagents after reload", () => {
       await mock.executeTool("TaskCreate", { subject, description: "d", agentType: "general-purpose" });
     }
     await mock.executeTool("TaskExecute", { task_ids: ["1", "2"] });
+    const refs = [rpc.taskExecutionRef("agent-1")!, rpc.taskExecutionRef("agent-2")!];
     rpc.unsub();
 
     const reloaded = await reload();
-    reloaded.mock.emitEvent("subagents:completed", { id: "agent-2", result: "b done" });
-    reloaded.mock.emitEvent("subagents:completed", { id: "agent-1", result: "a done" });
+    reloaded.rpc.complete("agent-2", "b done", refs[1]);
+    reloaded.rpc.complete("agent-1", "a done", refs[0]);
     await flush();
 
     expect(await statusOf(reloaded.mock, "1")).toContain("Status: completed");

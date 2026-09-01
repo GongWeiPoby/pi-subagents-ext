@@ -400,7 +400,12 @@ describe("TaskExecute", () => {
     const managerKey = Symbol.for("pi-subagents:manager");
     const globals = globalThis as unknown as { [key: symbol]: unknown };
     globals[managerKey] = {
-      getRecord: (id: string) => ({ id, status: "completed", result: "fast result" }),
+      getRecord: (id: string) => ({
+        id,
+        status: "completed",
+        result: "fast result",
+        taskExecutionRef: rpc.taskExecutionRef(id),
+      }),
     };
     initExtension(mock.pi as never);
     try {
@@ -550,8 +555,8 @@ describe("Completion listener", () => {
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
-    // Simulate agent completion
-    mock.emitEvent("subagents:completed", { id: "agent-1" });
+    // Simulate agent completion with the runtime's canonical execution ref.
+    rpc.complete("agent-1");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(result.content[0].text).toContain("Status: completed");
@@ -565,8 +570,8 @@ describe("Completion listener", () => {
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
-    // Simulate agent failure
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "Out of turns", status: "error" });
+    // Simulate agent failure with the runtime's canonical execution ref.
+    rpc.fail("agent-1", "Out of turns");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(result.content[0].text).toContain("Status: pending");
@@ -582,7 +587,7 @@ describe("Completion listener", () => {
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
-    mock.emitEvent("subagents:failed", { id: "agent-1", result: "partial work", status: "stopped" });
+    rpc.stop("agent-1", "partial work");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(result.content[0].text).toContain("Status: completed");
@@ -598,7 +603,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "earlier output" } });
 
-    mock.emitEvent("subagents:failed", { id: "agent-1", status: "stopped" });
+    rpc.stop("agent-1");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(result.content[0].text).toContain("Status: completed");
@@ -618,7 +623,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "earlier output" } });
 
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "Out of turns", status: "error" });
+    rpc.fail("agent-1", "Out of turns");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(result.content[0].text).toContain("Status: pending");
@@ -626,7 +631,30 @@ describe("Completion listener", () => {
     expect(result.content[0].text).not.toContain("earlier output");
   });
 
-  it("unsubscribes completion listeners on session shutdown", async () => {
+  it("settles a truly metadata-only legacy agent task without a ref", async () => {
+    await mock.executeTool("TaskCreate", {
+      subject: "Legacy running task",
+      description: "Desc",
+    });
+    // No TaskExecute call: this in-memory compatibility fixture has metadata
+    // identifying an agent but no canonical execution binding.
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "in_progress",
+      metadata: { agentId: "legacy-agent" },
+    });
+
+    mock.emitEvent("subagents:completed", {
+      id: "legacy-agent",
+      result: "legacy result",
+    });
+
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).toContain("Status: completed");
+    expect(result.content[0].text).toContain("legacy result");
+  });
+
+  it("rolls back execution before unsubscribing on session shutdown", async () => {
     await mock.executeTool("TaskCreate", {
       subject: "Shutting down",
       description: "Desc",
@@ -635,10 +663,11 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
     await mock.fireLifecycle("session_shutdown", {});
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "late" });
+    rpc.complete("agent-1", "late");
 
     const result = await mock.executeTool("TaskGet", { taskId: "1" });
-    expect(result.content[0].text).toContain("Status: in_progress");
+    expect(result.content[0].text).toContain("Status: pending");
+    expect(result.content[0].text).toContain("session shut down before execution settled");
     expect(result.content[0].text).not.toContain("late");
   });
 
@@ -690,7 +719,7 @@ describe("Auto-cascade", () => {
     expect(rpc.spawned).toHaveLength(1);
 
     // Complete A
-    mock.emitEvent("subagents:completed", { id: "agent-1" });
+    rpc.complete("agent-1");
 
     // B should NOT have been auto-started
     expect(rpc.spawned).toHaveLength(1);
@@ -714,7 +743,7 @@ describe("Auto-cascade", () => {
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "crashed", status: "error" });
+    rpc.fail("agent-1", "crashed");
 
     // B should not start
     expect(rpc.spawned).toHaveLength(1);
@@ -736,7 +765,7 @@ describe("Auto-cascade", () => {
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    mock.emitEvent("subagents:completed", { id: "agent-1" });
+    rpc.complete("agent-1");
 
     // Manual task should stay pending
     expect(rpc.spawned).toHaveLength(1);
@@ -977,22 +1006,18 @@ describe("RPC protocol correctness", () => {
 
   it("surfaces a stop RPC timeout and keeps the task in progress", async () => {
     const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
-
-    // Mark subagents as available via ready broadcast, but no stop handler installed
-    mock.pi.events.emit("subagents:ready", {});
 
     await mock.executeTool("TaskCreate", {
       subject: "Timeout stop",
       description: "desc",
       agentType: "general-purpose",
     });
-    // Manually set task as in_progress with an agentId (no spawn handler)
-    await mock.executeTool("TaskUpdate", {
-      taskId: "1",
-      status: "in_progress",
-      metadata: { agentType: "general-purpose", agentId: "ghost-agent" },
-    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    // Keep the canonical execution created by TaskExecute, but remove the
+    // runtime handlers before stop so only the RPC timeout path remains.
+    rpc.unsub();
 
     vi.useFakeTimers();
     const stopPromise = mock.executeTool("TaskStop", { task_id: "1" });
@@ -1218,7 +1243,7 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     expect(rpc.spawned).toHaveLength(1);
 
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "The answer is 42" });
+    rpc.complete("agent-1", "The answer is 42");
 
     await vi.waitFor(() => expect(rpc.spawned).toHaveLength(2), { timeout: 1000 });
 
@@ -1244,7 +1269,7 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
     const longResult = "x".repeat(5000);
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: longResult });
+    rpc.complete("agent-1", longResult);
 
     await vi.waitFor(() => expect(rpc.spawned).toHaveLength(2), { timeout: 1000 });
 
@@ -1266,11 +1291,9 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
       agentType: "general-purpose",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
-
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
-    mock.emitEvent("subagents:completed", { id: "agent-1" });
-
+    rpc.complete("agent-1");
     await vi.waitFor(() => expect(rpc.spawned).toHaveLength(2), { timeout: 1000 });
 
     const bPrompt = rpc.spawned[1].prompt;

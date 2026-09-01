@@ -42,7 +42,7 @@ describe("TaskOutput", () => {
 
     const pending = mock.executeTool("TaskOutput", { task_id: "1" });
     await flush();
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
 
     expect((await pending).content[0].text).toBe("Task #1 [completed] — subagent agent-1\n\ndone");
   });
@@ -57,7 +57,7 @@ describe("TaskOutput", () => {
     await launchAgentTask(mock);
     const pending = mock.executeTool("TaskOutput", { task_id: "1", block: true, timeout: 5000 });
     await flush();
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     expect((await pending).content[0].text).toContain("[completed]");
   });
 
@@ -65,7 +65,7 @@ describe("TaskOutput", () => {
     await launchAgentTask(mock);
     const pending = mock.executeTool("TaskOutput", { task_id: "1", block: true, timeout: 5000 });
     await flush();
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "boom", status: "error" });
+    rpc.fail("agent-1", "boom");
     // The failure listener reverts the task to pending so it can be retried.
     expect((await pending).content[0].text).toContain("[pending]");
   });
@@ -113,6 +113,22 @@ describe("TaskOutput", () => {
     // block=true with a long timeout — this must return immediately, not hang.
     const res = await mock.executeTool("TaskOutput", { task_id: "1", block: true, timeout: 30000 });
     expect(res.content[0].text).toContain("[completed]");
+  });
+
+  it("keeps legacy metadata-only agent tasks queryable", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Legacy agent", description: "d" });
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "in_progress",
+      metadata: { agentId: "legacy-agent" },
+    });
+
+    const result = await mock.executeTool("TaskOutput", {
+      task_id: "1",
+      block: false,
+    });
+
+    expect(result.content[0].text).toBe("Task #1 [in_progress] — subagent legacy-agent");
   });
 
   it("throws for an unknown ID", async () => {
@@ -337,7 +353,7 @@ describe("TaskOutput — agent ID lookups", () => {
 
       const pending = mock.executeTool("TaskOutput", { task_id: "agent-1", block: true, timeout: 5000 });
       await flush();
-      mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+      rpc.complete("agent-1", "done");
 
       expect((await pending).content[0].text).toBe("Task #1 [completed] — subagent agent-1\n\ndone");
     } finally {
@@ -427,16 +443,27 @@ describe("TaskStop", () => {
     await launchAgentTask(mock);
     await mock.executeTool("TaskStop", { task_id: "1" });
 
-    mock.emitEvent("subagents:failed", {
-      id: "agent-1",
-      result: "partial output",
-      status: "stopped",
-    });
+    rpc.stop("agent-1", "partial output");
     await flush();
 
     const get = await mock.executeTool("TaskGet", { taskId: "1" });
     expect(get.content[0].text).toContain("Status: completed");
     expect(get.content[0].text).toContain("partial output");
+  });
+
+  it("does not replace an existing partial result with empty stopped output", async () => {
+    await launchAgentTask(mock);
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      metadata: { result: "partial before stop" },
+    });
+    await mock.executeTool("TaskStop", { task_id: "1" });
+
+    rpc.stop("agent-1", "");
+    await flush();
+
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("partial before stop");
   });
 
   it("completes the task when stopped by agent ID", async () => {
@@ -499,7 +526,7 @@ describe("TaskStop", () => {
 
   it("does not re-stop an already completed agent task", async () => {
     await launchAgentTask(mock);
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     await flush();
 
     await expect(mock.executeTool("TaskStop", { task_id: "1" }))

@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Features
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
-- **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, and optional subagent cascade. **[Task guide](docs/tasks.md)**
+- **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, optional subagent cascade, and attempt-aware single-executor binding that prevents duplicate or stale task completion. **[Task guide](docs/tasks.md)**
 - **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator guidance with frontmatter metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` lists and reads the guidance; the main coordinator adapts it to current evidence and dynamically chooses ordinary tools, skills, and one or more `Agent` calls. Reading Markdown does not launch work or require every instruction to run. `WorkflowPlaybookSave` promotes generalized Markdown to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
 - **Workflow execution trees** — each workflow is a controller node in the above-editor Agents widget and in FleetView, with phase and child-agent rows. Live children reuse ordinary-agent stat and activity wording, show bounded streaming output and `↻N` turns, and expose the same conversation viewer; pause/skip/retry/stop remain workflow-owned. Active workflow totals say `agents so far` because later control flow can discover more children.
@@ -101,6 +101,18 @@ Agent({
 The example is read-only (`read`, `grep`, and `find`) and returns severity-ordered findings with file and line references. See [Custom Agents](#custom-agents) for all frontmatter fields.
 
 Agents run in the background by default: the call returns an ID immediately and notifies you on completion, carrying a preview of the result (use `get_subagent_result` for the full text). Pass `run_in_background: false` to block until the agent finishes and get its full output inline.
+
+### Project AGENTS.md policy
+
+For a project that wants adaptive coordination as its default, copy the reusable policy template into the project root:
+
+```bash
+cp examples/project-policy/AGENTS.md /path/to/project/AGENTS.md
+```
+
+The template tells the main Agent that users normally describe only the goal. The coordinator may dynamically create Todo items, call ordinary `Agent` types, read relevant Skills or Playbooks, independently verify important work, and synthesize the result. It also keeps `AGENTS.md` as stable policy rather than a fixed execution graph: the runtime remains responsible for actual state, permissions, concurrency, recovery, and execution evidence.
+
+Use `SubagentWorkflow` only when the user explicitly requests deterministic JavaScript orchestration such as loops, fan-out, pipelines, gates, retries, or resume. This policy does not change runtime behavior and is separate from the reusable Playbook and JavaScript examples below.
 
 ### Adaptive Playbooks
 
@@ -468,7 +480,7 @@ Use tasks for a mutable work list whose status and dependencies evolve during a 
 
 `TaskUpdate.status` accepts `pending`, `in_progress`, `completed`, or `deleted`; `deleted` permanently removes the task and cleans its dependency edges. `addBlocks` and `addBlockedBy` maintain both sides of an edge. Self-edges, cycles, and missing targets are retained with warnings, matching Claude Code's permissive behavior.
 
-`TaskExecute` requires each task to be pending, have `agentType`, and have every blocker completed. It launches through this extension's existing subagent RPC path, so model scoping, concurrency, lifecycle events, result consumption, and stopping use the same contracts as other top-level agents. With `autoCascade` on, a completion starts newly unblocked dependents and injects completed prerequisite results into their prompts. `TaskOutput` is an explicit join/status action for either an agent-backed structured task or the `wf_*` run ID returned by `SubagentWorkflow`; do not poll a running task. `block: false` returns current workflow status and counts immediately. `block: true` waits event-first until the run settles, the timeout expires, the call is aborted, or the session changes. A timeout or abort leaves the future completion notification intact; returning settled workflow output consumes its held notification so the same result is not delivered twice.
+`TaskExecute` requires each task to be pending, have `agentType`, and have every blocker completed. It atomically claims one execution attempt before spawning; a task already claimed by another `TaskExecute` call or by `SubagentWorkflow({ task_id })` is not launched again. The bound agent carries an immutable execution reference through RPC and lifecycle events, and completion/failure/stop commits only while that exact store, Todo attempt, child attempt, executor kind, and executor ID still match. Starting a new attempt clears the prior result even when the new executor completes without output. `TaskUpdate` to pending/completed/deleted stops the bound executor first; an unbound startup claim is cancelled and updated atomically only if that exact claim is still current, otherwise the update is refused without touching its bound or replacement attempt. For workflows it waits until the controller has settled before allowing a replacement, so old and new attempts cannot keep producing side effects concurrently. `/tasks` delete and clear-all warn and refuse while an agent or workflow startup claim is waiting to bind. Session transitions revoke current running and queued claims before switching stores, while claim-time store handles let already-settling callbacks finish against the correct file. It launches through this extension's existing subagent RPC path, so model scoping, concurrency, lifecycle events, result consumption, and stopping use the same contracts as other top-level agents. With `autoCascade` on, a completion starts newly unblocked dependents and injects completed prerequisite results into their prompts. `TaskOutput` dispatches from the canonical execution kind: a structured Todo ID can inspect its bound workflow controller as well as an Agent, including settled workflow output; legacy metadata-only Agent tasks remain readable. Do not poll a running task. `block: false` returns current status immediately. `block: true` waits event-first until settlement, timeout, abort, or session change. A timeout or abort leaves the future completion notification intact; returning settled workflow output consumes its held notification so the same result is not delivered twice.
 
 ### Task storage
 
@@ -561,18 +573,19 @@ After reading a Playbook, the main coordinator inspects the current target and c
 
 ### `SubagentWorkflow`
 
-Run a deterministic script that orchestrates many subagents. Returns a task id immediately; the run continues in the background and notifies on completion. A tool-started completion stays inside this extension while the parent is active, then enters the conversation only after `agent_settled` confirms the owning session is idle; idle is checked again at the actual send point so a newly started turn cannot strand the result in pi's abort-clearable follow-up queue. Use `TaskOutput` with the returned `wf_*` ID for an explicit status/join request; settled output consumes the held notification.
+Run a deterministic script that orchestrates many subagents. Returns a task id immediately; the run continues in the background and notifies on completion. A tool-started completion stays inside this extension while the parent is active, then enters the conversation only after `agent_settled` confirms the owning session is idle; idle is checked again at the actual send point so a newly started turn cannot strand the result in pi's abort-clearable follow-up queue. Use `TaskOutput` with the returned `wf_*` ID for an explicit status/join request; settled output consumes the held notification. Optional `task_id` atomically binds the workflow controller to one pending structured Todo. Workflow children do not inherit that reference: only the controller may complete or release the Todo.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `script` | string | no | The workflow source. Must begin with `export const meta = { name, description }` |
 | `scriptPath` | string | no | Path to a script file; mutually exclusive with `script` and `name` |
 | `name` | string | no | A saved workflow — `<name>.js` in `.pi/workflows/`, `.agents/workflows/` or `<agent dir>/workflows/`, carrying an `export const meta` declaration; mutually exclusive with `script` and `scriptPath` |
+| `task_id` | string | no | Bind this workflow controller to one pending structured Todo; only one Todo may be bound and children do not inherit it |
 | `args` | any | no | Passed through to the script as the `args` global, verbatim |
 | `resumeFromRunId` | string | no | Replay an earlier run in this session — its unchanged leading `agent()` calls return their recorded results instead of spawning |
 | `title` / `description` | string | no | Accepted and ignored, as in Claude Code — a workflow is named by its `meta` block |
 
-Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. Direct UI invocations and resumes use the current fixed-height approval dialog; headless automation proceeds under the caller's trust boundary.
+Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. Direct UI invocations and resumes use the current fixed-height approval dialog; headless automation proceeds under the caller's trust boundary. When `task_id` is present, the Todo must still be pending when the controller starts. Workflow `completed` maps to Todo `completed`; workflow `failed` or `killed` maps to Todo `pending` with the workflow error so it can be claimed again. Every write is attempt-aware, so a workflow that settles after the Todo was reset or reclaimed cannot overwrite the newer execution.
 
 `agent()` returns text/Markdown from every child. The script may parse that text deterministically and return a JSON-shaped object, array, status, or path. The option `schema` is rejected before the child starts with an explicit migration error; request line-oriented text or Markdown instead.
 
@@ -876,7 +889,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 |-------|------|------------|
 | `subagents:created` | `Agent`-tool background spawn, or a detached resume — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started` | `id`, `type`, `description`, `isBackground` (always `true`) |
 | `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
-| `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `description`, `status`, `durationMs`, `tokens` (display total, `{ input, output, total }` — see the note below), `usage` (the run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD; absent when nothing was spent), `toolUses`, `result` |
+| `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `description`, `status`, `durationMs`, `tokens` (display total, `{ input, output, total }` — see the note below), `usage` (the run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD; absent when nothing was spent), `toolUses`, `result`, optional `taskExecutionRef` for `TaskExecute` agents |
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | identical payload to `subagents:completed` — both are built by the same formatter, so `error` and `status` are present on that row too, just empty |
 | `subagents:steered` | Steering message accepted — fires for a *queued* steer as well as a delivered one | `id`, `message` |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
@@ -898,7 +911,7 @@ Other pi extensions can spawn and stop subagents programmatically via the `pi.ev
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
-**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface, every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and the protocol version `3` migration that rejects legacy structured output. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
+**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface, every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and protocol v4. Version 4 adds `taskExecutionRef`: `TaskExecute` spawns receive an attempt-aware ref in the spawn reply and the same ref on terminal lifecycle events, so the task store can reject stale or mismatched completion. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
 
 ### Discovery
 
@@ -1083,6 +1096,7 @@ docs/                 # Long-form guides (shipped to npm; README links out to th
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
+  project-policy/      Copyable project AGENTS.md coordination policy
   playbooks/          # Adaptive WORKFLOW.md examples and prompt resources
   workflows/          # Runnable JavaScript examples, executed by workflow example tests
   agent-tool-description.md
@@ -1134,7 +1148,8 @@ src/
 
   tasks/
     index.ts          # Task tools, /tasks command, lifecycle, reminders and subagent cascade
-    task-store.ts     # CRUD, dependency graph, persistence and file locking
+    execution-contract.ts # Pure claim/ref types, guards and attempt identity comparison
+    task-store.ts     # CRUD, dependencies, persistence, locking and execution-binding CAS
     tasks-config.ts   # Global defaults + project task settings
     task-paths.ts     # Workspace and global session storage paths
     auto-clear.ts     # Turn/run-boundary completed-task cleanup
@@ -1157,7 +1172,7 @@ src/
     runtime.ts        # Worker lifecycle, RPC bridge, semaphore, caps, gate/resume
     progress.ts       # Progress event log and every derived view of it (pure)
     host.ts           # WorkflowHost adapter over AgentManager
-    task.ts           # local_workflow task record and batched progress updates
+    task.ts           # local_workflow record, Todo execution ref and batched progress updates
     tool-description.ts # Model-facing description carrying the orchestration patterns
   ui/
     agent-widget.ts       # Persistent widget: workflow trees, agent activity, statuses, 12-line budget

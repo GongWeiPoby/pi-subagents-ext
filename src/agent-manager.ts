@@ -23,6 +23,8 @@ import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { STRUCTURED_OUTPUT_MIGRATION_ERROR } from "./subagent-contract.js";
+import type { TaskExecutionClaim } from "./tasks/execution-contract.js";
+import { isTaskExecutionClaim } from "./tasks/execution-contract.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -227,6 +229,8 @@ interface SpawnOptions {
    * counting them twice would let one workflow starve the whole session.
    */
   workflowId?: string;
+  /** Internal TaskExecute claim. The manager stamps its generated id as executorId. */
+  taskExecution?: TaskExecutionClaim;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /**
@@ -504,6 +508,10 @@ export class AgentManager {
       );
     }
     assertValidSpawnCwd(options.cwd);
+    if (options.taskExecution !== undefined
+      && !isTaskExecutionClaim(options.taskExecution)) {
+      throw new Error("Invalid task execution binding");
+    }
 
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
@@ -547,6 +555,9 @@ export class AgentManager {
       depth: options.depth ?? 1,
       parentAgentId: options.parentAgentId,
       workflowId: options.workflowId,
+      ...(options.taskExecution !== undefined
+        ? { taskExecutionRef: { ...options.taskExecution, executorId: id } }
+        : {}),
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
     };

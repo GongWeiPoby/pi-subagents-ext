@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { TaskExecutionRef } from "./tasks/types.js";
 import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -246,6 +247,8 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Structured Todo execution owned by this top-level agent, when TaskExecute spawned it. */
+  taskExecutionRef?: TaskExecutionRef;
   /** Nesting depth: top-level subagent = 1. */
   depth?: number;
   /** Parent agent ID for ownership-scoped nested controls. */

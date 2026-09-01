@@ -6,6 +6,8 @@
 import { vi } from "vitest";
 import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../../../src/subagent-contract.js";
 
+export type MockTaskExecutionRefOverride = "missing" | "mismatch" | Record<string, unknown>;
+
 export type MockEventBus = {
   on: (channel: string, handler: (data: unknown) => void) => () => void;
   emit: (channel: string, data: unknown) => void;
@@ -139,6 +141,10 @@ export function installSubagentsMock(
     spawnReplyDelayMs?: number;
     stopError?: string;
     stopReplyDelayMs?: number;
+    /** Omit or alter the canonical ref returned by the spawn RPC. */
+    spawnReplyRef?: "missing" | "mismatch";
+    /** Default override for the canonical ref carried by terminal lifecycle events. */
+    lifecycleRef?: MockTaskExecutionRefOverride;
     version?: number;
     withoutConsume?: boolean;
   },
@@ -148,6 +154,20 @@ export function installSubagentsMock(
   const stopped: string[] = [];
   const consumed: string[] = [];
   const notified: string[] = [];
+
+  function executionRef(
+    claim: Record<string, unknown> | undefined,
+    agentId: string,
+    override: MockTaskExecutionRefOverride | undefined,
+  ): Record<string, unknown> | undefined {
+    if (override === "missing") return undefined;
+    if (override === "mismatch") {
+      return { ...claim, taskId: "mismatched-task", executorId: agentId };
+    }
+    if (override !== undefined) return { ...override };
+    if (!claim) return undefined;
+    return { ...claim, executorId: agentId };
+  }
 
   // Respond to ping — reply on scoped channel
   const unsubPing = pi.events.on("subagents:rpc:ping", (data: unknown) => {
@@ -168,12 +188,29 @@ export function installSubagentsMock(
       return;
     }
     const id = `agent-${++idCounter}`;
+    const taskExecutionRef = executionRef(
+      options?.taskExecution as Record<string, unknown> | undefined,
+      id,
+      opts?.spawnReplyRef,
+    );
+    const lifecycleTaskExecutionRef = executionRef(
+      options?.taskExecution as Record<string, unknown> | undefined,
+      id,
+      opts?.lifecycleRef,
+    );
     spawned.push({ id, type, prompt, options });
     if (opts?.completeBeforeSpawnReply !== undefined) {
-      pi.events.emit("subagents:completed", { id, result: opts.completeBeforeSpawnReply });
+      pi.events.emit("subagents:completed", {
+        id,
+        result: opts.completeBeforeSpawnReply,
+        ...(lifecycleTaskExecutionRef ? { taskExecutionRef: lifecycleTaskExecutionRef } : {}),
+      });
     }
     const reply = () => {
-      pi.events.emit(`subagents:rpc:spawn:reply:${requestId}`, { success: true, data: { id } });
+      pi.events.emit(`subagents:rpc:spawn:reply:${requestId}`, {
+        success: true,
+        data: { id, ...(taskExecutionRef ? { taskExecutionRef } : {}) },
+      });
     };
     if (opts?.spawnReplyDelayMs) setTimeout(reply, opts.spawnReplyDelayMs);
     else reply();
@@ -183,7 +220,12 @@ export function installSubagentsMock(
   const unsubStop = pi.events.on("subagents:rpc:stop", (data: unknown) => {
     const { requestId, agentId } = data as { requestId: string; agentId: string };
     if (opts?.stopError) {
-      pi.events.emit(`subagents:rpc:stop:reply:${requestId}`, { success: false, error: opts.stopError });
+      const sendError = () => pi.events.emit(`subagents:rpc:stop:reply:${requestId}`, {
+        success: false,
+        error: opts.stopError,
+      });
+      if (opts.stopReplyDelayMs) setTimeout(sendError, opts.stopReplyDelayMs);
+      else sendError();
       return;
     }
     const known = spawned.some(s => s.id === agentId);
@@ -219,8 +261,25 @@ export function installSubagentsMock(
   /** Stand-in for pi-subagents' 200 ms NUDGE_HOLD_MS — a real timer, kept short. */
   const NUDGE_HOLD_MS = 20;
 
-  function settle(channel: "subagents:completed" | "subagents:failed", agentId: string, data: Record<string, unknown>) {
-    pi.events.emit(channel, { id: agentId, ...data });
+  function settle(
+    channel: "subagents:completed" | "subagents:failed",
+    agentId: string,
+    data: Record<string, unknown>,
+    refOverride?: MockTaskExecutionRefOverride,
+  ) {
+    const claim = spawned.find(agent => agent.id === agentId)?.options?.taskExecution as
+      | Record<string, unknown>
+      | undefined;
+    const taskExecutionRef = executionRef(
+      claim,
+      agentId,
+      refOverride ?? opts?.lifecycleRef,
+    );
+    pi.events.emit(channel, {
+      id: agentId,
+      ...data,
+      ...(taskExecutionRef ? { taskExecutionRef } : {}),
+    });
     setTimeout(() => { if (!consumed.includes(agentId)) notified.push(agentId); }, NUDGE_HOLD_MS);
   }
 
@@ -229,10 +288,29 @@ export function installSubagentsMock(
     stopped,
     consumed,
     notified,
+    /** Return the manager-style ref for a spawned agent, with optional fault injection. */
+    taskExecutionRef(agentId: string, override?: MockTaskExecutionRefOverride) {
+      const claim = spawned.find(agent => agent.id === agentId)?.options?.taskExecution as
+        | Record<string, unknown>
+        | undefined;
+      return executionRef(claim, agentId, override);
+    },
     /** Agent finished successfully. */
-    complete(agentId: string, result?: string) { settle("subagents:completed", agentId, { result }); },
-    /** Agent failed (or was stopped, with `status: "stopped"`). */
-    fail(agentId: string, error: string, status = "error") { settle("subagents:failed", agentId, { error, status }); },
+    complete(agentId: string, result?: string, refOverride?: MockTaskExecutionRefOverride) {
+      settle("subagents:completed", agentId, { result }, refOverride);
+    },
+    /** Agent failed. */
+    fail(agentId: string, error: string, refOverride?: MockTaskExecutionRefOverride) {
+      settle("subagents:failed", agentId, { error, status: "error" }, refOverride);
+    },
+    /** Agent was intentionally stopped, optionally with partial output. */
+    stop(agentId: string, result?: string, refOverride?: MockTaskExecutionRefOverride) {
+      settle("subagents:failed", agentId, {
+        error: "stopped",
+        status: "stopped",
+        ...(result !== undefined ? { result } : {}),
+      }, refOverride);
+    },
     /** Wait past the notification hold, so `notified` is final. */
     afterNudgeHold() { return new Promise<void>(resolve => setTimeout(resolve, NUDGE_HOLD_MS * 2)); },
     unsub() { unsubPing(); unsubSpawn(); unsubStop(); unsubConsume(); },
