@@ -12,10 +12,19 @@ import {
 } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { assertSafeInternalId } from "./output-file.js";
+import type { TaskExecutionRef } from "./tasks/execution-contract.js";
 import type { ResultArtifactStatus } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
+import {
+  aggregateWorkflowCoverage,
+  createWorkflowChildAttempt,
+  type WorkflowChildAttempt,
+  type WorkflowCoverageAggregate,
+} from "./workflow/attempt.js";
 
 export const RESULT_ARTIFACT_SCHEMA_VERSION = 1;
+export const WORKFLOW_AGGREGATE_ARTIFACT_SCHEMA_VERSION = 1;
+export const WORKFLOW_AGGREGATE_ERROR_DISABLED = "Workflow failed; output persistence disabled.";
 
 const UNSAFE_RESULT_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
 const SAFE_ERROR_MAX_LENGTH = 512;
@@ -55,7 +64,7 @@ function safeErrorCode(error: unknown): string {
   return safe || "unknown";
 }
 
-function safeWriteError(prefix: string, error: unknown): string {
+export function formatArtifactWriteError(prefix: string, error: unknown): string {
   return `${prefix} (${safeErrorCode(error)})`;
 }
 
@@ -128,6 +137,52 @@ export interface WriteResultArtifactInput {
 }
 
 export interface WriteResultArtifactResult {
+  manifestPath: string;
+  bodyPath?: string;
+  status: Exclude<ResultArtifactStatus, "pending" | "skipped">;
+  error?: string;
+}
+
+export interface WorkflowAggregateArtifactManifest {
+  schemaVersion: typeof WORKFLOW_AGGREGATE_ARTIFACT_SCHEMA_VERSION;
+  artifactId: string;
+  workflowId: string;
+  workflowName?: string;
+  status: "completed" | "failed" | "killed";
+  startedAt: string;
+  completedAt: string;
+  coverage: WorkflowCoverageAggregate;
+  /** True when the bounded killed-run child drain did not fully settle. */
+  evidenceIncomplete?: boolean;
+  childAttempts: WorkflowChildAttempt[];
+  resultSummary: string;
+  resultBodyPath?: string;
+  resultDigest?: string;
+  taskBinding?: TaskExecutionRef;
+  artifactStatus: Exclude<ResultArtifactStatus, "pending" | "skipped">;
+  error?: string;
+  artifactError?: string;
+}
+
+export interface WriteWorkflowAggregateArtifactInput {
+  taskDir: string;
+  artifactId: string;
+  workflowId: string;
+  workflowName?: string;
+  status: WorkflowAggregateArtifactManifest["status"];
+  startedAt: number;
+  completedAt: number;
+  coverage: WorkflowCoverageAggregate;
+  childAttempts: readonly WorkflowChildAttempt[];
+  evidenceIncomplete?: boolean;
+  resultSummary: string;
+  result?: string;
+  includeBody: boolean;
+  taskBinding?: TaskExecutionRef;
+  error?: string;
+}
+
+export interface WriteWorkflowAggregateArtifactResult {
   manifestPath: string;
   bodyPath?: string;
   status: Exclude<ResultArtifactStatus, "pending" | "skipped">;
@@ -364,7 +419,7 @@ export function writeResultArtifact(input: WriteResultArtifactInput): WriteResul
       resultDigest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
     } catch (error) {
       artifactStatus = "failed";
-      artifactError = safeWriteError("result body write failed", error);
+      artifactError = formatArtifactWriteError("result body write failed", error);
     }
   }
 
@@ -396,6 +451,220 @@ export function writeResultArtifact(input: WriteResultArtifactInput): WriteResul
     ...(input.error !== undefined
       ? (() => {
           const error = safeErrorSummary(input.error);
+          return error !== undefined ? { error } : {};
+        })()
+      : {}),
+    ...(artifactError !== undefined ? { artifactError } : {}),
+  };
+
+  writeAtomic(manifestPath, canonicalJson(manifest));
+  return {
+    manifestPath,
+    ...(resultBodyPath !== undefined ? { bodyPath } : {}),
+    status: artifactStatus,
+    ...(artifactError !== undefined ? { error: artifactError } : {}),
+  };
+}
+
+function isSafeWorkflowTaskBinding(value: unknown, workflowId: string): value is TaskExecutionRef {
+  if (!isRecord(value)) return false;
+  const required = ["storeId", "taskId", "taskAttemptId", "attemptId", "executorId"] as const;
+  return required.every(field => isSafeInternalIdValue(value[field]))
+    && value.kind === "workflow"
+    && value.executorId === workflowId;
+}
+
+function isWorkflowAggregateStatus(value: unknown): value is WorkflowAggregateArtifactManifest["status"] {
+  return value === "completed" || value === "failed" || value === "killed";
+}
+
+function validateWorkflowAggregateManifest(
+  value: unknown,
+  artifactId: string,
+): value is WorkflowAggregateArtifactManifest {
+  if (!isRecord(value)
+    || value.schemaVersion !== WORKFLOW_AGGREGATE_ARTIFACT_SCHEMA_VERSION
+    || value.artifactId !== artifactId
+    || !isSafeInternalIdValue(value.workflowId)
+    || !isWorkflowAggregateStatus(value.status)
+    || !isIsoTimestamp(value.startedAt)
+    || !isIsoTimestamp(value.completedAt)
+    || (value.workflowName !== undefined
+      && (typeof value.workflowName !== "string" || safeErrorSummary(value.workflowName) !== value.workflowName))
+    || !Array.isArray(value.childAttempts)
+    || !isRecord(value.coverage)
+    || (value.evidenceIncomplete !== undefined && typeof value.evidenceIncomplete !== "boolean")
+    || typeof value.resultSummary !== "string"
+    || safeErrorSummary(value.resultSummary) !== value.resultSummary
+    || (value.taskBinding !== undefined && !isSafeWorkflowTaskBinding(value.taskBinding, value.workflowId))
+    || !isOneOf(ARTIFACT_STATUSES, value.artifactStatus)
+    || (value.error !== undefined && (typeof value.error !== "string" || safeErrorSummary(value.error) !== value.error))
+    || (value.artifactError !== undefined
+      && (typeof value.artifactError !== "string" || safeErrorSummary(value.artifactError) !== value.artifactError))) {
+    return false;
+  }
+
+  try {
+    const attempts = value.childAttempts.map(item => createWorkflowChildAttempt(item as WorkflowChildAttempt));
+    if (canonicalJson(attempts) !== canonicalJson(value.childAttempts)) return false;
+    const coverage = aggregateWorkflowCoverage(attempts);
+    if (canonicalJson(coverage) !== canonicalJson(value.coverage)) return false;
+  } catch {
+    return false;
+  }
+
+  if (value.resultBodyPath !== undefined
+    && value.resultBodyPath !== `${artifactId}.md`) return false;
+  if (value.resultDigest !== undefined
+    && (typeof value.resultDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.resultDigest))) return false;
+  if (value.artifactStatus === "complete"
+    && (value.resultBodyPath === undefined || value.resultDigest === undefined)) return false;
+  if (value.artifactStatus !== "complete"
+    && (value.resultBodyPath !== undefined || value.resultDigest !== undefined)) return false;
+  return true;
+}
+
+function corruptWorkflowAggregate(
+  manifestPath: string,
+  reason: string,
+): WriteWorkflowAggregateArtifactResult {
+  return {
+    manifestPath,
+    status: "failed",
+    error: `workflow aggregate artifact corrupt: ${safeErrorSummary(reason) ?? "invalid manifest"}`,
+  };
+}
+
+function readExistingWorkflowAggregate(
+  manifestPath: string,
+  artifactId: string,
+  bodyPath: string,
+): WriteWorkflowAggregateArtifactResult {
+  try {
+    ensureRegularFile(manifestPath, "workflow aggregate manifest");
+    const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    if (!validateWorkflowAggregateManifest(parsed, artifactId)) {
+      return corruptWorkflowAggregate(manifestPath, "invalid manifest");
+    }
+    const manifest = parsed as WorkflowAggregateArtifactManifest;
+    if (manifest.artifactStatus === "complete") {
+      try {
+        ensureRegularFile(bodyPath, "workflow aggregate body");
+        const digest = `sha256:${createHash("sha256").update(readFileSync(bodyPath)).digest("hex")}`;
+        if (digest !== manifest.resultDigest) {
+          return corruptWorkflowAggregate(manifestPath, "body digest mismatch");
+        }
+      } catch (error) {
+        return corruptWorkflowAggregate(
+          manifestPath,
+          safeErrorCode(error) === "ENOENT" ? "complete body is missing" : "body is unreadable",
+        );
+      }
+      return { manifestPath, bodyPath, status: "complete" };
+    }
+    return {
+      manifestPath,
+      status: manifest.artifactStatus,
+      ...(manifest.artifactError !== undefined ? { error: safeErrorSummary(manifest.artifactError) } : {}),
+    };
+  } catch (error) {
+    return corruptWorkflowAggregate(
+      manifestPath,
+      safeErrorCode(error) === "ENOENT" ? "manifest is missing" : "invalid manifest",
+    );
+  }
+}
+
+/** Persist the final, internal aggregate for one settled workflow run. */
+export function writeWorkflowAggregateArtifact(
+  input: WriteWorkflowAggregateArtifactInput,
+): WriteWorkflowAggregateArtifactResult {
+  assertSafeInternalId(input.artifactId, "workflow aggregate artifact id");
+  assertSafeInternalId(input.workflowId, "workflow id");
+  if (!isWorkflowAggregateStatus(input.status)
+    || !Number.isFinite(input.startedAt)
+    || !Number.isFinite(input.completedAt)
+    || !isSafeTaskDir(input.taskDir)
+    || (input.workflowName !== undefined && typeof input.workflowName !== "string")
+    || (input.taskBinding !== undefined && !isSafeWorkflowTaskBinding(input.taskBinding, input.workflowId))) {
+    throw new Error("invalid workflow aggregate artifact input");
+  }
+
+  const attempts = input.childAttempts.map(attempt => {
+    const safeAttempt = createWorkflowChildAttempt(attempt);
+    if (input.includeBody) return safeAttempt;
+    const { error: _error, ...withoutError } = safeAttempt;
+    return withoutError;
+  });
+  const coverage = aggregateWorkflowCoverage(attempts);
+  if (canonicalJson(coverage) !== canonicalJson(input.coverage)) {
+    throw new Error("invalid workflow aggregate coverage");
+  }
+  const resultSummary = input.includeBody
+    ? safeErrorSummary(input.resultSummary) ?? "No output."
+    : "Output persistence disabled.";
+  const workflowName = input.workflowName === undefined ? undefined : safeErrorSummary(input.workflowName);
+  const taskBinding = input.taskBinding === undefined ? undefined : { ...input.taskBinding };
+
+  ensureExistingDirectory(input.taskDir, "task directory");
+  const resultsDir = join(input.taskDir, "results");
+  try {
+    mkdirSync(resultsDir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  ensureExistingDirectory(resultsDir, "results directory");
+
+  const artifactDir = join(resultsDir, input.artifactId);
+  const manifestPath = join(artifactDir, `${input.artifactId}.json`);
+  const bodyPath = join(artifactDir, `${input.artifactId}.md`);
+  try {
+    mkdirSync(artifactDir, { mode: 0o700 });
+  } catch (error) {
+    ensureExistingDirectory(artifactDir, "workflow aggregate artifact directory");
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return readExistingWorkflowAggregate(manifestPath, input.artifactId, bodyPath);
+  }
+  ensureExistingDirectory(artifactDir, "workflow aggregate artifact directory");
+
+  let artifactStatus: WorkflowAggregateArtifactManifest["artifactStatus"] = "metadata-only";
+  let artifactError: string | undefined;
+  let resultBodyPath: string | undefined;
+  let resultDigest: string | undefined;
+  if (input.includeBody && input.result !== undefined) {
+    const body = `${sanitizeArtifactText(input.result).replace(/\n*$/, "")}\n`;
+    try {
+      writeAtomic(bodyPath, body);
+      artifactStatus = "complete";
+      resultBodyPath = basename(bodyPath);
+      resultDigest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    } catch (error) {
+      artifactStatus = "failed";
+      artifactError = formatArtifactWriteError("workflow aggregate body write failed", error);
+    }
+  }
+
+  const manifest: WorkflowAggregateArtifactManifest = {
+    schemaVersion: WORKFLOW_AGGREGATE_ARTIFACT_SCHEMA_VERSION,
+    artifactId: input.artifactId,
+    workflowId: input.workflowId,
+    ...(workflowName !== undefined ? { workflowName } : {}),
+    status: input.status,
+    startedAt: new Date(input.startedAt).toISOString(),
+    completedAt: new Date(input.completedAt).toISOString(),
+    coverage,
+    childAttempts: attempts,
+    ...(input.evidenceIncomplete ? { evidenceIncomplete: true } : {}),
+    resultSummary,
+    ...(resultBodyPath !== undefined ? { resultBodyPath } : {}),
+    ...(resultDigest !== undefined ? { resultDigest } : {}),
+    ...(taskBinding !== undefined ? { taskBinding } : {}),
+    artifactStatus,
+    ...(input.error !== undefined
+      ? (() => {
+          const error = input.includeBody
+            ? safeErrorSummary(input.error)
+            : WORKFLOW_AGGREGATE_ERROR_DISABLED;
           return error !== undefined ? { error } : {};
         })()
       : {}),

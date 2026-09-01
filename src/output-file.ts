@@ -60,8 +60,8 @@ function ensureDirectory(path: string, label: string): void {
 }
 
 /**
- * Project/global default for writing a subagent's `.output` transcript; a custom
- * agent's `output_transcript` overrides it per agent.
+ * Project/global default for writing subagent `.output` transcripts and optional
+ * Agent/workflow result bodies; custom `output_transcript` overrides Agents only.
  */
 let outputTranscriptDefault = true;
 

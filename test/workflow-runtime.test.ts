@@ -836,6 +836,7 @@ describe("abort", () => {
     expect(result.status).toBe("killed");
     expect(result.error).toBe("Workflow aborted.");
     expect(result.attempts).toEqual([expect.objectContaining({ status: "killed" })]);
+    expect(result.evidenceIncomplete).toBe(true);
     expect(aborted).toEqual(["wf-agent-0"]);
     const killedAt = result.attempts![0].completedAt!;
 
@@ -858,6 +859,43 @@ describe("abort", () => {
     })]));
     expect(latestAttempts(seen)[0].completedAt).toBeGreaterThanOrEqual(killedAt);
     expect(result.status).toBe("killed");
+  });
+
+  it("drains a child settlement within the bounded window before snapshotting", async () => {
+    const controller = new AbortController();
+    let release!: (result: WorkflowSpawnResult) => void;
+    let started!: () => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    const host: WorkflowHost = {
+      spawnAgent() {
+        started();
+        return new Promise(resolve => { release = resolve; });
+      },
+      abortAgent() {
+        release({
+          ok: false,
+          killed: true,
+          error: "child stopped",
+          recordId: "record-drained",
+          artifactId: "artifact-drained",
+          usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 0 } },
+        });
+      },
+    };
+
+    const promise = run('await agent("drain me");', { host, signal: controller.signal });
+    await running;
+    controller.abort();
+    const result = await promise;
+
+    expect(result.status).toBe("killed");
+    expect(result.evidenceIncomplete).toBeUndefined();
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "killed",
+      recordId: "record-drained",
+      artifactId: "artifact-drained",
+      usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 0 }, },
+    })]);
   });
 
   it("marks both running and semaphore-queued attempts killed on abort", async () => {

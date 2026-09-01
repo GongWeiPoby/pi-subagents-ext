@@ -18,9 +18,11 @@ import { randomUUID } from "node:crypto";
 import type { TaskExecutionRef } from "../tasks/types.js";
 import { escapeXml } from "../xml.js";
 import {
+  aggregateWorkflowCoverage,
   cloneWorkflowChildAttempt,
   snapshotWorkflowChildAttempt,
   type WorkflowChildAttempt,
+  type WorkflowCoverageAggregate,
 } from "./attempt.js";
 import { type FleetWorkflowPhase, workflowFleetPhases } from "./fleet.js";
 import type { WorkflowJournalEntry } from "./journal.js";
@@ -72,6 +74,15 @@ export interface WorkflowTask {
 
   /** Physical child invocation snapshots, retained separately from UI progress. */
   workflowAttempts: WorkflowChildAttempt[];
+  /** Captured result-body privacy choice for this workflow run. */
+  resultBodyEnabled: boolean;
+  /** Internal aggregate artifact locator and write status. */
+  aggregateArtifactPath?: string;
+  aggregateArtifactBodyPath?: string;
+  aggregateArtifactStatus?: "complete" | "metadata-only" | "failed" | "skipped";
+  aggregateArtifactError?: string;
+  /** The killed run exceeded its bounded child-evidence drain window. */
+  evidenceIncomplete?: boolean;
   /** The append-only event log, in emission order. */
   workflowProgress: WorkflowEntry[];
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */
@@ -99,6 +110,10 @@ export interface WorkflowTask {
 
   /** Session that owns this run; detached completion must never cross it. */
   sessionId?: string;
+  /** Working directory captured when this workflow was started. */
+  cwd?: string;
+  /** Persisted parent session eligible to own internal result artifacts. */
+  artifactSessionId?: string;
   /** Monotonic activation generation, invalidated before every switch. */
   sessionGeneration: number;
   /** The script's return value, once the run produced one. */
@@ -119,7 +134,10 @@ export function createWorkflowTask(init: {
   replay?: readonly WorkflowJournalEntry[];
   resumedFrom?: string;
   sessionId?: string;
+  cwd?: string;
+  artifactSessionId?: string;
   sessionGeneration?: number;
+  resultBodyEnabled?: boolean;
 }): WorkflowTask {
   return {
     type: "local_workflow",
@@ -136,9 +154,12 @@ export function createWorkflowTask(init: {
     replay: init.replay,
     resumedFrom: init.resumedFrom,
     sessionId: init.sessionId,
+    cwd: init.cwd,
+    artifactSessionId: init.artifactSessionId,
     sessionGeneration: init.sessionGeneration ?? 0,
     replayedCount: 0,
     workflowAttempts: [],
+    resultBodyEnabled: init.resultBodyEnabled ?? true,
     workflowProgress: [],
     progressVersion: 0,
     agentCount: 0,
@@ -253,6 +274,7 @@ export function completeWorkflowTask(
   task.workflowAttempts = (result.attempts ?? []).map(cloneWorkflowChildAttempt);
   task.value = result.value;
   task.error = result.error;
+  task.evidenceIncomplete = result.evidenceIncomplete;
   task.endTime = now;
   task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false, now);
 }
@@ -281,8 +303,15 @@ export function workflowResultText(task: WorkflowTask): string {
   return JSON.stringify(task.value, null, 2);
 }
 
-/**
- * Resolve a `resumeFromRunId` against the runs this session has seen.
+export const WORKFLOW_RESULT_BODY_DISABLED = "Output persistence disabled.";
+
+/** Preview used by model-facing completion details without changing the full notification format. */
+export function workflowNotificationPreview(task: WorkflowTask, maxLength: number): string {
+  const result = task.resultBodyEnabled ? workflowResultText(task) : WORKFLOW_RESULT_BODY_DISABLED;
+  return result.length > maxLength ? `${result.slice(0, maxLength)}…` : result;
+}
+
+/** Resolve a `resumeFromRunId` against the runs this session has seen.
  *
  * Same-session only, and deliberately so: the journal lives beside the
  * session's task files, and a run id from another session would silently find
@@ -334,6 +363,24 @@ export function resolveResumeTarget(
 /** `<task-notification>`, in the same shape a finished background agent sends. */
 export function formatWorkflowNotification(task: WorkflowTask, now = Date.now()): string {
   const totals = stats(task.workflowProgress, task.agentCount);
+  if (!task.resultBodyEnabled) {
+    const coverage = aggregateWorkflowCoverage(task.workflowAttempts);
+    const safeStatus = task.status === "completed" ? "Done" : task.status === "killed" ? "Stopped" : "Error";
+    const coverageText = formatWorkflowCoverage(coverage);
+    const artifactLocator = task.aggregateArtifactPath ?? "unavailable";
+    return [
+      `<task-notification>`,
+      `<task-id>${task.id}</task-id>`,
+      task.toolCallId ? `<tool-use-id>${escapeXml(task.toolCallId)}</tool-use-id>` : null,
+      `<status>${escapeXml(safeStatus)}</status>`,
+      `<summary>Workflow result body omitted because output persistence is disabled.</summary>`,
+      `<coverage>${coverageText}</coverage>`,
+      `<artifact>${escapeXml(artifactLocator)}</artifact>`,
+      `<result>${WORKFLOW_RESULT_BODY_DISABLED}</result>`,
+      `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
+      `</task-notification>`,
+    ].filter(Boolean).join("\n");
+  }
   const status =
     task.status === "completed" ? "Done"
     : task.status === "killed" ? "Stopped"
@@ -352,4 +399,14 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");
+}
+
+function formatWorkflowCoverage(coverage: WorkflowCoverageAggregate): string {
+  return [
+    `logical=${coverage.coveredLogicalChildCount}/${coverage.logicalChildCount}`,
+    `physical=${coverage.physical.completed}/${coverage.physical.total}`,
+    `failed=${coverage.physical.failed}`,
+    `pending=${coverage.pendingLogicalChildCount}`,
+    `status=${coverage.coverage}`,
+  ].join(" ");
 }

@@ -46,6 +46,9 @@ export class WorkflowRuntimeError extends Error {}
 /** Default concurrent agents per workflow run. */
 export const WORKFLOW_DEFAULT_CONCURRENCY = 2;
 
+/** Maximum time a killed run waits for already accepted child handlers to settle. */
+export const WORKFLOW_CHILD_SETTLE_TIMEOUT_MS = 250;
+
 /**
  * Concurrent agents allowed by default.
  *
@@ -355,6 +358,8 @@ export interface WorkflowRunResult {
   replayedCount: number;
   /** Final snapshots of every physical child attempt, including replaced retries. */
   attempts?: WorkflowChildAttempt[];
+  /** True when a killed run could not drain all accepted child settlements in time. */
+  evidenceIncomplete?: boolean;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -652,6 +657,29 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
    * realm, which §2.4 rules out, and reading stack traces, which is brittle.
    */
   const openLaunches = new Map<number, string>();
+  const childSettlements = new Set<Promise<void>>();
+  const trackChildSettlement = (settlement: Promise<void>): void => {
+    childSettlements.add(settlement);
+    void settlement.then(
+      () => childSettlements.delete(settlement),
+      () => childSettlements.delete(settlement),
+    );
+  };
+  const drainChildSettlements = async (timeoutMs: number): Promise<boolean> => {
+    const pending = [...childSettlements];
+    if (pending.length === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    const drained = await Promise.race([
+      Promise.allSettled(pending).then(() => true),
+      timeout,
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    return drained;
+  };
   let agentCount = 0;
   let aborted = false;
   let settled = false;
@@ -820,17 +848,26 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       for (const agentId of inflight) host.abortAgent(agentId);
       inflight.clear();
       semaphore.drain();
-      // Resolve only once the thread is actually down, so a caller that awaits
-      // runWorkflow() is guaranteed not to be leaking one.
-      const settle = () => resolve({
-        ...result,
-        meta,
-        progress,
-        agentCount,
-        replayedCount,
-        attempts: attempts.map(snapshotWorkflowChildAttempt),
-      });
-      void worker.terminate().then(settle, settle);
+      const settle = async () => {
+        // Resolve only once the thread is actually down, so a caller that awaits
+        // runWorkflow() is guaranteed not to be leaking one. A killed run also
+        // gives already accepted child handlers a short, bounded chance to
+        // publish refs and usage before its final snapshot is returned.
+        await worker.terminate().catch(() => undefined);
+        const evidenceIncomplete = result.status === "killed"
+          ? !(await drainChildSettlements(WORKFLOW_CHILD_SETTLE_TIMEOUT_MS))
+          : false;
+        resolve({
+          ...result,
+          meta,
+          progress,
+          agentCount,
+          replayedCount,
+          attempts: attempts.map(snapshotWorkflowChildAttempt),
+          ...(evidenceIncomplete ? { evidenceIncomplete: true } : {}),
+        });
+      };
+      void settle();
     };
 
     function onAbort() {
@@ -1408,7 +1445,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             respond(message.callId, false, undefined, `Unknown workflow host method "${message.method}".`, true);
             break;
           }
-          void handleAgent(message.callId, message.payload as AgentCallPayload);
+          trackChildSettlement(handleAgent(message.callId, message.payload as AgentCallPayload));
           break;
         case "complete": {
           // The script is done, so every launch it made should have been

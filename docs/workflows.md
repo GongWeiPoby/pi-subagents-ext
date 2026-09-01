@@ -42,6 +42,14 @@ You will be notified when it finishes — do NOT poll or sleep waiting for it.
 
 The inline script is persisted in the session task directory so the model can edit and re-run it. It is scratch storage and may disappear with a reboot or temp cleanup. A named workflow reports its durable source path instead.
 
+#### Internal settlement aggregate
+
+When a workflow owned by a persisted parent session settles as completed, failed, or killed, the extension writes an internal schema-v1 aggregate manifest. The manifest records the workflow settle status, aggregate artifact status (`complete`, `metadata-only`, or `failed`), physical-attempt and latest-logical-child coverage, validated child record/artifact IDs, and the structured Todo binding when one exists. A writer failure is recorded on the workflow task but does not change the workflow's completed/failed/killed status or its Todo settlement.
+
+The aggregate's optional Markdown body contains the workflow's final returned/error text and follows the project `outputTranscript` privacy policy captured when that workflow run starts. With body persistence off, the manifest is metadata-only and uses the fixed `Output persistence disabled.` summary instead of retaining result text. A `--subagents-workflow-file` run applies the same captured policy to its custom session entry: privacy-on stores the complete progress snapshot, while privacy-off stores only structural phase/agent status and counters, the fixed summary, and the aggregate manifest locator. Child-derived labels, errors, logs, activity, and prompt/result/stream previews are omitted. Errors are bounded to one sanitized line and replace the parent cwd with `<cwd>`. A killed run waits only for a bounded child-settlement window; if accepted children remain unresolved, `evidenceIncomplete: true` records that limitation and coverage does not claim complete evidence. A workflow without a persisted parent session writes no aggregate. A complete body has a SHA-256 digest for detecting an incomplete or changed body during an idempotent check, but neither the digest nor the manifest makes the artifact immutable or tamper-proof.
+
+This aggregate is internal persistence, not verification evidence and not proof that a Todo, workflow child, test command, or task is complete. There is no `ArtifactRead` tool. The ordinary completion notification reports the workflow's final result, and the default notification/UI surfaces do not automatically expose every child's full result body.
+
 ### 3. Watch the run
 
 The inline workflow card shows the controller, dynamic child total, phases, child statuses, labels, effective model, turns, tool uses, tokens, and bounded current output:

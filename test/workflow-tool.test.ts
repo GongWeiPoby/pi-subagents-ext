@@ -19,11 +19,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentManager } from "../src/agent-manager.js";
+import { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../src/index.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
+import { getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault } from "../src/output-file.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
@@ -1497,6 +1498,34 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(card).toContain("done");
   });
 
+  it("omits a private tool-started workflow result from its notification", async () => {
+    const previous = getOutputTranscriptDefault();
+    setOutputTranscriptDefault(false);
+    try {
+      const privateResult = "private tool workflow result";
+      const result = await tools.get("SubagentWorkflow").execute(
+        "tc-private-tool-notification",
+        { script: `${inlineScript}return ${JSON.stringify(privateResult)};` },
+        undefined,
+        undefined,
+        headlessCtx(),
+      );
+      const taskId = startedTaskId(result);
+      const sent = await awaitNotification(taskId);
+      const content = String(sent[0].content);
+
+      expect(content).not.toContain(privateResult);
+      expect(content).toContain("<status>Done</status>");
+      expect(content).toContain("<coverage>logical=0/0 physical=0/0 failed=0 pending=0 status=unknown</coverage>");
+      expect(content).toContain("<artifact>unavailable</artifact>");
+      expect(content).toContain("<result>Output persistence disabled.</result>");
+      expect(sent[0].details.resultPreview).toBe("Output persistence disabled.");
+      expect(sent[0].details.error).toBeUndefined();
+    } finally {
+      setOutputTranscriptDefault(previous);
+    }
+  });
+
   it("holds a workflow completion while the parent is active and flushes it after agent_settled", async () => {
     let idle = false;
     const context = workflowCtx();
@@ -1792,6 +1821,27 @@ describe("--subagents-workflow-file", () => {
       ...overrides,
     });
 
+  function mockFlagWorkflowChild(result: string, stream: string, failure?: string): void {
+    vi.spyOn(AgentManager.prototype, "spawnAndWait").mockImplementation(async (
+      _pi,
+      _context,
+      _type,
+      _prompt,
+      options,
+      onSpawned,
+    ) => {
+      const child = record({
+        id: "private-child-record",
+        artifactId: "private-child-artifact",
+        result,
+        ...(failure !== undefined ? { status: "error" as const, error: failure } : {}),
+      });
+      onSpawned?.(child.id);
+      options.onTextDelta?.(stream, stream);
+      return { id: child.id, record: child };
+    });
+  }
+
   it("registers the fleet row as soon as a run starts, not when it settles", async () => {
     // The regression this guards: a run's agents are owned by it, so their
     // lifecycle callbacks no longer refresh the fleet — and nothing else did,
@@ -1967,6 +2017,175 @@ describe("--subagents-workflow-file", () => {
 
     expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
     expect(booted.pi.sendMessage.mock.calls.some((call: any[]) => call[0]?.customType === "workflow-result")).toBe(false);
+  });
+
+  it("omits private child content from a privacy-off flag entry and notification", async () => {
+    const previous = getOutputTranscriptDefault();
+    setOutputTranscriptDefault(false);
+    try {
+      const privatePrompt = "private child prompt for startup workflow";
+      const privateResult = "private child result from startup workflow";
+      const privateStream = "private streaming child output";
+      mockFlagWorkflowChild(privateResult, privateStream);
+      const path = join(hermetic.dir, "private-flow.js");
+      writeFileSync(path, [
+        fileScript,
+        `const childText = await agent(${JSON.stringify(privatePrompt)});`,
+        "phase(childText);",
+        "log(childText);",
+        'return "workflow finished";',
+        "",
+      ].join("\n"));
+      const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+      subagentsExtension(booted.pi);
+      const context = uiCtx({
+        sessionManager: {
+          getSessionId: vi.fn(() => "private-flag-session"),
+          getSessionFile: vi.fn(() => join(hermetic.dir, "parent.jsonl")),
+          getBranch: vi.fn(() => []),
+        },
+      });
+
+      await booted.lifecycle.get("session_start")?.({}, context);
+      await vi.waitFor(
+        () => expect(booted.pi.appendEntry).toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything()),
+        { timeout: 10_000 },
+      );
+      const [, entry] = booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)!;
+      const persisted = JSON.stringify(entry);
+      expect(persisted).not.toContain(privatePrompt);
+      expect(persisted).not.toContain(privateResult);
+      expect(persisted).not.toContain(privateStream);
+      expect(persisted).not.toContain("promptPreview");
+      expect(persisted).not.toContain("resultPreview");
+      expect(persisted).not.toContain("outputPreview");
+      expect(entry).toMatchObject({
+        status: "completed",
+        agentCount: 1,
+        resultSummary: "Output persistence disabled.",
+        aggregateArtifactStatus: "metadata-only",
+        aggregateArtifactPath: expect.stringContaining("workflow-"),
+      });
+      expect(entry.progress).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "workflow_agent", index: 0, label: "Agent 1", state: "done" }),
+        { type: "workflow_log", message: "Output persistence disabled." },
+      ]));
+
+      await vi.waitFor(
+        () => expect(booted.pi.sendMessage.mock.calls.some(
+          (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+        )).toBe(true),
+        { timeout: 1_000 },
+      );
+      const sent = booted.pi.sendMessage.mock.calls.find(
+        (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+      );
+      expect(sent).toBeTruthy();
+      expect(String(sent![0].content)).not.toContain(privateResult);
+      expect(String(sent![0].content)).toContain("<result>Output persistence disabled.</result>");
+    } finally {
+      rmSync(sessionTaskDir(hermetic.dir, "private-flag-session"), { recursive: true, force: true });
+      setOutputTranscriptDefault(previous);
+    }
+  });
+
+  it("uses a fixed error marker when a private workflow throws child text", async () => {
+    const previous = getOutputTranscriptDefault();
+    setOutputTranscriptDefault(false);
+    const privateResult = "private child result from failed startup workflow";
+    try {
+      mockFlagWorkflowChild(privateResult, "private child stream", privateResult);
+      const path = join(hermetic.dir, "private-failing-flow.js");
+      writeFileSync(path, [
+        fileScript,
+        `const childText = await agent("private child prompt");`,
+        "throw new Error(childText);",
+        "",
+      ].join("\n"));
+      const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+      subagentsExtension(booted.pi);
+      const sessionId = "private-failing-flag-session";
+      const context = uiCtx({
+        sessionManager: {
+          getSessionId: vi.fn(() => sessionId),
+          getSessionFile: vi.fn(() => join(hermetic.dir, "parent.jsonl")),
+          getBranch: vi.fn(() => []),
+        },
+      });
+
+      await booted.lifecycle.get("session_start")?.({}, context);
+      await vi.waitFor(
+        () => expect(booted.pi.appendEntry).toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything()),
+        { timeout: 10_000 },
+      );
+      const [, entry] = booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)!;
+      expect(JSON.stringify(entry)).not.toContain(privateResult);
+      expect(entry).toMatchObject({
+        status: "failed",
+        resultSummary: "Output persistence disabled.",
+        aggregateArtifactStatus: "metadata-only",
+      });
+
+      const aggregateArtifactPath = entry.aggregateArtifactPath;
+      expect(aggregateArtifactPath).toBeTypeOf("string");
+      if (typeof aggregateArtifactPath !== "string") throw new Error("missing aggregate artifact path");
+      const manifest = JSON.parse(readFileSync(aggregateArtifactPath, "utf-8")) as {
+        error?: string;
+        childAttempts?: Array<{ status?: string; error?: string }>;
+      };
+      expect(manifest.error).toBe("Workflow failed; output persistence disabled.");
+      expect(manifest.childAttempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "failed" }),
+      ]));
+      expect(manifest.childAttempts?.some(attempt => "error" in attempt)).toBe(false);
+      expect(JSON.stringify(manifest)).not.toContain(privateResult);
+
+      await vi.waitFor(
+        () => expect(booted.pi.sendMessage.mock.calls.some(
+          (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+        )).toBe(true),
+        { timeout: 1_000 },
+      );
+      const sent = booted.pi.sendMessage.mock.calls.find(
+        (call: unknown) => callMessageField(call, "customType") === "workflow-result",
+      );
+      expect(sent).toBeTruthy();
+      expect(String(sent![0].content)).not.toContain(privateResult);
+      expect(String(sent![0].content)).toContain("<result>Output persistence disabled.</result>");
+    } finally {
+      rmSync(sessionTaskDir(hermetic.dir, "private-failing-flag-session"), { recursive: true, force: true });
+      setOutputTranscriptDefault(previous);
+    }
+  });
+
+  it("retains child previews and logs in a privacy-on flag entry", async () => {
+    const privatePrompt = "persisted child prompt";
+    const privateResult = "persisted child result";
+    const privateStream = "persisted streaming output";
+    mockFlagWorkflowChild(privateResult, privateStream);
+    const path = join(hermetic.dir, "persisted-flow.js");
+    writeFileSync(path, [
+      fileScript,
+      `const childText = await agent(${JSON.stringify(privatePrompt)});`,
+      "log(childText);",
+      'return "workflow finished";',
+      "",
+    ].join("\n"));
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+
+    await booted.lifecycle.get("session_start")?.({}, uiCtx());
+    await vi.waitFor(
+      () => expect(booted.pi.appendEntry).toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything()),
+      { timeout: 10_000 },
+    );
+
+    const [, entry] = booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)!;
+    const persisted = JSON.stringify(entry);
+    expect(persisted).toContain(privatePrompt);
+    expect(persisted).toContain(privateResult);
+    expect(persisted).toContain(privateStream);
+    expect(entry.progress).toContainEqual({ type: "workflow_log", message: privateResult });
   });
 
   it("renders the finished run as a session entry and hands it to the model as next-turn context", async () => {

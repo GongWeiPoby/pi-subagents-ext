@@ -1,6 +1,9 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault } from "../src/output-file.js";
 import { sessionTaskFile } from "../src/tasks/task-paths.js";
 import { TaskStore } from "../src/tasks/task-store.js";
 import { type Hermetic, hermeticDir } from "./helpers/boot-extension.js";
@@ -117,12 +120,15 @@ const inlineMeta = 'export const meta = { name: "todo-binding", description: "ex
 describe("SubagentWorkflow task_id execution binding", () => {
   let hermetic: Hermetic;
   let previousTasks: string | undefined;
+  let previousOutputTranscriptDefault: boolean;
 
   beforeEach(() => {
     hermetic = hermeticDir({
       settings: { maxConcurrent: 1, schedulingEnabled: false, workflowsEnabled: true },
     });
     previousTasks = process.env.PI_TASKS;
+    previousOutputTranscriptDefault = getOutputTranscriptDefault();
+    setOutputTranscriptDefault(true);
     process.env.PI_TASKS = "off";
     vi.mocked(runAgent).mockReset();
   });
@@ -130,6 +136,7 @@ describe("SubagentWorkflow task_id execution binding", () => {
   afterEach(() => {
     if (previousTasks === undefined) delete process.env.PI_TASKS;
     else process.env.PI_TASKS = previousTasks;
+    setOutputTranscriptDefault(previousOutputTranscriptDefault);
     hermetic.restore();
     vi.restoreAllMocks();
   });
@@ -182,6 +189,130 @@ describe("SubagentWorkflow task_id execution binding", () => {
     });
     expect(textOf(completedOutput)).toContain("Task #1 [completed] — Workflow wf_");
     expect(textOf(completedOutput)).toContain("workflow result");
+    await harness.fire("session_shutdown");
+  });
+
+  it("does not persist a private workflow result in the bound Todo", async () => {
+    delete process.env.PI_TASKS;
+    setOutputTranscriptDefault(false);
+    const harness = integratedHarness(hermetic.dir);
+    await harness.fire("session_start", { reason: "startup" });
+    await createTask(harness);
+
+    const started = await harness.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return "private workflow result";`,
+      task_id: "1",
+    });
+    expect(textOf(started)).toContain("started in the background");
+    await vi.waitFor(async () => expect(await taskText(harness)).toContain("Status: completed"));
+
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    expect(stored.metadata.result).toBeUndefined();
+    expect(JSON.stringify(stored.metadata)).not.toContain("private workflow result");
+
+    const output = await harness.execute("TaskOutput", { task_id: "1", block: false });
+    expect(textOf(output)).toMatch(/Task #1 \[completed\] — Workflow wf_/);
+    expect(textOf(output)).not.toContain("private workflow result");
+    await harness.fire("session_shutdown");
+  });
+
+  it("uses a fixed error marker for private child text in Todo and TaskOutput", async () => {
+    delete process.env.PI_TASKS;
+    setOutputTranscriptDefault(false);
+    const childText = "private child result that must never persist";
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: childText,
+      failure: childText,
+      session: { dispose: vi.fn() },
+      aborted: false,
+      steered: false,
+    } as never);
+    const harness = integratedHarness(hermetic.dir);
+    await harness.fire("session_start", { reason: "startup" });
+    await createTask(harness);
+
+    const started = await harness.execute("SubagentWorkflow", {
+      script: `${inlineMeta}const childText = await agent("private child prompt"); throw new Error(childText);`,
+      task_id: "1",
+    });
+    expect(textOf(started)).toContain("started in the background");
+    await vi.waitFor(async () => expect(await taskText(harness)).toContain("Status: pending"));
+
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    const workflowId = stored.metadata.workflowId;
+    expect(workflowId).toMatch(/^wf_/);
+    expect(stored.metadata.lastError).toBe("Workflow failed; output persistence disabled.");
+    expect(JSON.stringify(stored.metadata)).not.toContain(childText);
+
+    const artifactDir = join(
+      sessionTaskDir(hermetic.dir, "binding-session"),
+      "results",
+      `workflow-${workflowId}`,
+    );
+    const manifest = JSON.parse(readFileSync(join(artifactDir, `workflow-${workflowId}.json`), "utf-8")) as {
+      error?: string;
+      artifactStatus?: string;
+      childAttempts?: Array<{ status?: string; error?: string }>;
+    };
+    expect(manifest).toMatchObject({
+      error: "Workflow failed; output persistence disabled.",
+      artifactStatus: "metadata-only",
+    });
+    expect(JSON.stringify(manifest)).not.toContain(childText);
+    expect(manifest.childAttempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "failed" }),
+    ]));
+    expect(manifest.childAttempts?.some(attempt => "error" in attempt)).toBe(false);
+    expect(existsSync(join(artifactDir, `workflow-${workflowId}.md`))).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(harness.pi.sendMessage.mock.calls.some(call => call[0]?.customType === "subagent-notification")).toBe(true);
+    });
+    const notification = harness.pi.sendMessage.mock.calls.find(call => call[0]?.customType === "subagent-notification");
+    expect(JSON.stringify(notification)).not.toContain(childText);
+
+    const output = await harness.execute("TaskOutput", { task_id: "1", block: false });
+    expect(textOf(output)).toContain("Workflow failed; output persistence disabled.");
+    expect(textOf(output)).not.toContain(childText);
+    await harness.fire("session_shutdown");
+  });
+
+  it("scrubs cwd from a failed workflow aggregate body and bound Todo error", async () => {
+    delete process.env.PI_TASKS;
+    const harness = integratedHarness(hermetic.dir);
+    await harness.fire("session_start", { reason: "startup" });
+    await createTask(harness);
+
+    const errorText = `workflow failed in ${hermetic.dir}\nprivate detail in ${hermetic.dir}`;
+    const started = await harness.execute("SubagentWorkflow", {
+      script: `${inlineMeta}throw new Error(${JSON.stringify(errorText)});`,
+      task_id: "1",
+    });
+    expect(textOf(started)).toContain("started in the background");
+    await vi.waitFor(async () => expect(await taskText(harness)).toContain("Status: pending"));
+
+    const store = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session"));
+    const stored = store.get("1")!;
+    const workflowId = stored.metadata.workflowId;
+    expect(workflowId).toMatch(/^wf_/);
+    expect(stored.metadata.lastError).toBe("workflow failed in <cwd>");
+    expect(JSON.stringify(stored.metadata)).not.toContain(hermetic.dir);
+
+    const artifactDir = join(
+      sessionTaskDir(hermetic.dir, "binding-session"),
+      "results",
+      `workflow-${workflowId}`,
+    );
+    const manifest = JSON.parse(readFileSync(join(artifactDir, `workflow-${workflowId}.json`), "utf-8")) as {
+      error?: string;
+    };
+    const body = readFileSync(join(artifactDir, `workflow-${workflowId}.md`), "utf-8");
+    expect(manifest.error).toBe("workflow failed in <cwd>");
+    expect(body).toBe("workflow failed in <cwd>\nprivate detail in <cwd>\n");
+    expect(body).not.toContain(hermetic.dir);
+
+    const output = await harness.execute("TaskOutput", { task_id: "1", block: false });
+    expect(textOf(output)).toContain(`Task #1 [pending] — Workflow ${workflowId}`);
     await harness.fire("session_shutdown");
   });
 

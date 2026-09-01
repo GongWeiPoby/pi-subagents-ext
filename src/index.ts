@@ -32,6 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { formatArtifactWriteError, sanitizeArtifactText, WORKFLOW_AGGREGATE_ERROR_DISABLED, writeWorkflowAggregateArtifact } from "./result-artifact.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -71,6 +72,7 @@ import {
   hasNestedWorkflowCall,
   validateDirectWorkflowApprovalCompleteness,
 } from "./workflow/approval.js";
+import { aggregateWorkflowCoverage } from "./workflow/attempt.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
 import type { FleetWorkflow } from "./workflow/fleet.js";
@@ -82,7 +84,7 @@ import { registerWorkflowPlaybookTools } from "./workflow/playbook-tools.js";
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowAttempt, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowAttempt, updateWorkflowProgressBatch, type WorkflowTask, workflowNotificationPreview, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -1205,10 +1207,10 @@ export default function (pi: ExtensionAPI) {
   // the steer and resume branches — reads this instead of the mode.
   function isAgentMentionsEnabled(): boolean { return agentMentionMode !== "off"; }
 
-  // Project/global default for writing the subagent .output transcript lives in
-  // output-file.ts (both spawn paths read it). A custom agent's
-  // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
-  // is silent, this default applies. Read live at spawn time.
+  // Project/global default for subagent .output transcripts and optional result
+  // bodies lives in output-file.ts. A custom agent's `output_transcript`
+  // frontmatter overrides it per Agent; workflows capture the project value at
+  // run start. Read live when the owning run starts.
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -2375,6 +2377,47 @@ Terse command-style prompts produce shallow, generic work.
   const heldWorkflowNotifications = new Map<string, WorkflowTask>();
   const consumedWorkflowOutputs = new WeakSet<WorkflowTask>();
 
+  const WORKFLOW_PERSISTED_ERROR_MAX_LENGTH = 512;
+  function workflowPersistenceCwds(task: Pick<WorkflowTask, "cwd"> | undefined, ctx: ExtensionContext): string[] {
+    return [ctx.cwd, task?.cwd]
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+      .filter((cwd, index, all) => all.indexOf(cwd) === index)
+      .sort((left, right) => right.length - left.length);
+  }
+
+  function scrubWorkflowPersistenceText(
+    task: Pick<WorkflowTask, "cwd"> | undefined,
+    ctx: ExtensionContext,
+    value: string,
+  ): string {
+    let scrubbed = value;
+    for (const cwd of workflowPersistenceCwds(task, ctx)) scrubbed = scrubbed.replaceAll(cwd, "<cwd>");
+    return sanitizeArtifactText(scrubbed);
+  }
+
+  function boundedWorkflowPersistenceError(
+    task: Pick<WorkflowTask, "cwd"> | undefined,
+    ctx: ExtensionContext,
+    value: string,
+  ): string | undefined {
+    const summary = scrubWorkflowPersistenceText(task, ctx, value).split("\n", 1)[0].trim();
+    if (!summary) return undefined;
+    return summary.length > WORKFLOW_PERSISTED_ERROR_MAX_LENGTH
+      ? `${summary.slice(0, WORKFLOW_PERSISTED_ERROR_MAX_LENGTH - 3)}...`
+      : summary;
+  }
+
+  function workflowPersistenceError(task: Pick<WorkflowTask, "cwd" | "resultBodyEnabled" | "status" | "error">, ctx: ExtensionContext): string | undefined {
+    if (!task.resultBodyEnabled) {
+      return task.status === "failed" || task.status === "killed"
+        ? WORKFLOW_AGGREGATE_ERROR_DISABLED
+        : undefined;
+    }
+    return task.error === undefined
+      ? undefined
+      : boundedWorkflowPersistenceError(task, ctx, task.error);
+  }
+
   function isCurrentWorkflowTask(task: WorkflowTask): boolean {
     return workflowTasks.get(task.id) === task
       && workflowTaskSessionIds.get(task.id) === task.sessionId
@@ -2396,7 +2439,11 @@ Terse command-style prompts produce shallow, generic work.
       totalTokens: task.totalTokens,
       totalToolCalls: task.totalToolCalls,
       elapsedMs: elapsedMs(task, Date.now()),
-      ...(settled ? { output: workflowResultText(task) } : {}),
+      ...(settled && task.resultBodyEnabled
+        ? { output: workflowResultText(task) }
+        : settled && task.status !== "completed"
+          ? { output: WORKFLOW_AGGREGATE_ERROR_DISABLED }
+          : {}),
       ...(task.scriptPath !== undefined ? { scriptPath: task.scriptPath } : {}),
     };
   }
@@ -2526,18 +2573,70 @@ Terse command-style prompts produce shallow, generic work.
     }));
   }
 
-  function settleWorkflowTaskBinding(task: WorkflowTask): void {
+  function settleWorkflowTaskBinding(task: WorkflowTask, ctx: ExtensionContext): void {
     const ref = task.taskExecutionRef;
     if (!ref) return;
+    const result = task.resultBodyEnabled
+      ? scrubWorkflowPersistenceText(task, ctx, workflowResultText(task))
+      : undefined;
+    const error = workflowPersistenceError(task, ctx);
     if (task.status === "completed") {
-      taskExecutions.settle(ref, { status: "completed", result: workflowResultText(task) });
+      taskExecutions.settle(ref, {
+        status: "completed",
+        ...(result !== undefined ? { result } : {}),
+      });
       return;
     }
     if (task.status === "failed" || task.status === "killed") {
       taskExecutions.settle(ref, {
         status: "pending",
-        error: task.error ?? `Workflow ${task.status}`,
+        error: error ?? `Workflow ${task.status}`,
       });
+    }
+  }
+
+  function persistedWorkflowAttempts(task: WorkflowTask): WorkflowTask["workflowAttempts"] {
+    if (task.resultBodyEnabled) return task.workflowAttempts;
+    return task.workflowAttempts.map(({ error: _error, ...attempt }) => attempt);
+  }
+
+  function writeWorkflowAggregate(task: WorkflowTask, ctx: ExtensionContext): void {
+    const sessionId = task.artifactSessionId;
+    if (sessionId === undefined) {
+      task.aggregateArtifactStatus = "skipped";
+      return;
+    }
+    const result = task.resultBodyEnabled
+      ? scrubWorkflowPersistenceText(task, ctx, workflowResultText(task))
+      : undefined;
+    const persistedResult = result;
+    const error = workflowPersistenceError(task, ctx);
+    const childAttempts = persistedWorkflowAttempts(task);
+    try {
+      const written = writeWorkflowAggregateArtifact({
+        taskDir: sessionTaskDir(ctx.cwd, sessionId),
+        artifactId: `workflow-${task.id}`,
+        workflowId: task.id,
+        workflowName: task.workflowName,
+        status: task.status as "completed" | "failed" | "killed",
+        startedAt: task.startTime,
+        completedAt: task.endTime ?? Date.now(),
+        coverage: aggregateWorkflowCoverage(childAttempts),
+        childAttempts,
+        evidenceIncomplete: task.evidenceIncomplete,
+        resultSummary: task.resultBodyEnabled ? persistedResult ?? "No output." : "Output persistence disabled.",
+        result,
+        includeBody: task.resultBodyEnabled,
+        taskBinding: task.taskExecutionRef,
+        error,
+      });
+      task.aggregateArtifactPath = written.manifestPath;
+      task.aggregateArtifactBodyPath = written.bodyPath;
+      task.aggregateArtifactStatus = written.status;
+      task.aggregateArtifactError = written.error;
+    } catch (error) {
+      task.aggregateArtifactStatus = "failed";
+      task.aggregateArtifactError = formatArtifactWriteError("workflow aggregate artifact write failed", error);
     }
   }
 
@@ -2582,10 +2681,12 @@ Terse command-style prompts produce shallow, generic work.
         },
       });
       completeWorkflowTask(task, result);
-      settleWorkflowTaskBinding(task);
+      writeWorkflowAggregate(task, ctx);
+      settleWorkflowTaskBinding(task, ctx);
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
-      settleWorkflowTaskBinding(task);
+      writeWorkflowAggregate(task, ctx);
+      settleWorkflowTaskBinding(task, ctx);
     }
   }
 
@@ -2606,7 +2707,7 @@ Terse command-style prompts produce shallow, generic work.
       // extension-owned until a later agent_settled instead of handing it to
       // pi-agent-core's abort-clearable followUp queue.
       if (!workflowParentIsIdle()) return;
-      const result = workflowResultText(task);
+      const resultPreview = workflowNotificationPreview(task, 500);
       pi.sendMessage<NotificationDetails>({
         customType: "subagent-notification",
         content: formatWorkflowNotification(task),
@@ -2620,8 +2721,8 @@ Terse command-style prompts produce shallow, generic work.
           turnCount: 0,
           totalTokens: task.totalTokens,
           durationMs: elapsedMs(task, Date.now()),
-          error: task.error,
-          resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
+          error: task.resultBodyEnabled ? task.error : undefined,
+          resultPreview,
         },
       }, { deliverAs: "followUp", triggerTurn: true });
       heldWorkflowNotifications.delete(task.id);
@@ -2848,6 +2949,8 @@ Terse command-style prompts produce shallow, generic work.
 
       const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
       const runId = workflowRunId();
+      const sessionId = ctx.sessionManager.getSessionId();
+      const artifactSessionId = ctx.sessionManager.getSessionFile?.() ? sessionId : undefined;
       let taskExecutionRef: TaskExecutionRef | undefined;
       if (taskId !== undefined) {
         const claim = taskExecutions.claim(taskId, "workflow");
@@ -2870,7 +2973,7 @@ Terse command-style prompts produce shallow, generic work.
       let savedPath: string | undefined;
       let journalPath: string | undefined;
       try {
-        const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
+        const dir = sessionTaskDir(ctx.cwd, sessionId);
         savedPath = join(dir, `${runId}.workflow.js`);
         writeFileSync(savedPath, resolved.script, "utf-8");
         journalPath = join(dir, `${runId}.workflow.jsonl`);
@@ -2890,18 +2993,24 @@ Terse command-style prompts produce shallow, generic work.
           meta,
           toolCallId,
           taskExecutionRef,
-          sessionId: ctx.sessionManager.getSessionId(),
+          sessionId,
+          cwd: ctx.cwd,
+          artifactSessionId,
           sessionGeneration: workflowSessionGeneration,
+          resultBodyEnabled: getOutputTranscriptDefault(),
           ...(journalPath !== undefined ? { journalPath } : {}),
           ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (taskExecutionRef) taskExecutions.settle(taskExecutionRef, { status: "pending", error: message });
+        if (taskExecutionRef) {
+          const safeMessage = boundedWorkflowPersistenceError(undefined, ctx, message) ?? "Workflow could not start.";
+          taskExecutions.settle(taskExecutionRef, { status: "pending", error: safeMessage });
+        }
         return textResult(`Workflow could not start: ${message}`);
       }
       workflowTasks.set(runId, task);
-      workflowTaskSessionIds.set(runId, ctx.sessionManager.getSessionId());
+      workflowTaskSessionIds.set(runId, sessionId);
       workflowTaskGenerations.set(task, workflowSessionGeneration);
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
@@ -3066,13 +3175,17 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
+    const sessionId = ctx.sessionManager.getSessionId();
     const task = createWorkflowTask({
       id: workflowRunId(),
       script,
       scriptPath: path,
       meta,
-      sessionId: ctx.sessionManager.getSessionId(),
+      sessionId,
+      cwd: ctx.cwd,
+      artifactSessionId: ctx.sessionManager.getSessionFile?.() ? sessionId : undefined,
       sessionGeneration: workflowSessionGeneration,
+      resultBodyEnabled: getOutputTranscriptDefault(),
     });
     workflowTasks.set(task.id, task);
     workflowTaskSessionIds.set(task.id, task.sessionId);
@@ -3091,7 +3204,10 @@ Terse command-style prompts produce shallow, generic work.
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout). Hold the model-facing result briefly so a blocking
       // TaskOutput resumed above can consume it before next-turn delivery.
-      pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
+      pi.appendEntry<WorkflowEntryData>(
+        WORKFLOW_ENTRY_TYPE,
+        workflowEntryData(task, task.resultBodyEnabled),
+      );
       scheduleNudge(task.id, () => {
         if (!isCurrentWorkflowTask(task) || consumedWorkflowOutputs.has(task)) return;
         pi.sendMessage({
@@ -3996,7 +4112,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "outputTranscript",
           label: "Output transcript",
-          description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
+          description: "Write subagent .output transcripts and optional Agent/workflow result bodies by default. Agent output_transcript frontmatter overrides Agents.",
           currentValue: getOutputTranscriptDefault() ? "on" : "off",
           values: ["on", "off"],
         },

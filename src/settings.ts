@@ -164,12 +164,13 @@ export interface SubagentsSettings {
    */
   widgetMode?: WidgetMode;
   /**
-   * Project/global default for writing each subagent's `.output` transcript
-   * (a JSON-lines copy of the run, stored under the OS temp dir).
-   * Defaults to `true`. Set `false` to make transcripts opt-in for the whole
-   * project (e.g. a repo that shouldn't leave run transcripts on disk for backup
-   * or DLP tooling to ingest). A custom agent's `output_transcript` frontmatter
-   * overrides this per agent. This governs only the transcript — it does NOT
+   * Project/global default for writing subagent `.output` transcripts and
+   * optional Agent/workflow result bodies under the OS temp directory.
+   * Defaults to `true`. Set `false` to make those content files opt-in for the
+   * whole project (e.g. a repo that shouldn't leave run content on disk for
+   * backup or DLP tooling to ingest). A custom agent's `output_transcript`
+   * frontmatter overrides this per Agent; workflows capture the project value
+   * at run start. Metadata-only result manifests remain enabled. This does NOT
    * affect the persisted pi session (`persist_session`), worktree commits
    * (`isolation: worktree`), or memory files.
    */
