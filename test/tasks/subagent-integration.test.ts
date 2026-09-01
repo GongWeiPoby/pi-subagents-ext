@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../../src/subagent-contract.js";
 import initExtension from "../../src/tasks/index.js";
 import { sessionTaskFile, workspaceSessionTaskFile } from "../../src/tasks/task-paths.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
@@ -870,7 +871,7 @@ describe("RPC protocol correctness", () => {
   it("spawn RPC rejects on timeout when no responder exists", async () => {
     const mock = mockPi();
     // Install ping handler (for version check) but no spawn handler
-    installVersionedMock(mock.pi, 2);
+    installVersionedMock(mock.pi, SUBAGENTS_RPC_PROTOCOL_VERSION);
     initExtension(mock.pi as any);
 
     await mock.executeTool("TaskCreate", {
@@ -1024,7 +1025,7 @@ function installVersionedMock(pi: { events: MockEventBus }, version?: number) {
 describe("Protocol version mismatch", () => {
   it("matching version — no warning", async () => {
     const mock = mockPi();
-    installVersionedMock(mock.pi, 2);
+    installVersionedMock(mock.pi, SUBAGENTS_RPC_PROTOCOL_VERSION);
     initExtension(mock.pi as any);
 
     // No warning on before_agent_start
@@ -1048,26 +1049,26 @@ describe("Protocol version mismatch", () => {
 
   it("handler ahead reports the task integration mismatch", async () => {
     const mock = mockPi();
-    installVersionedMock(mock.pi, 3);
+    installVersionedMock(mock.pi, SUBAGENTS_RPC_PROTOCOL_VERSION + 1);
     initExtension(mock.pi as any);
 
     const ctx = mockCtx();
     await mock.fireLifecycle("before_agent_start", {}, ctx);
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("task integration protocol v2 does not match"),
+      expect.stringContaining(`task integration protocol v${SUBAGENTS_RPC_PROTOCOL_VERSION} does not match`),
       "warning",
     );
   });
 
   it("handler behind reports the subagent runtime mismatch", async () => {
     const mock = mockPi();
-    installVersionedMock(mock.pi, 1);
+    installVersionedMock(mock.pi, SUBAGENTS_RPC_PROTOCOL_VERSION - 1);
     initExtension(mock.pi as any);
 
     const ctx = mockCtx();
     await mock.fireLifecycle("before_agent_start", {}, ctx);
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("subagent runtime protocol v1 does not match"),
+      expect.stringContaining(`subagent runtime protocol v${SUBAGENTS_RPC_PROTOCOL_VERSION - 1} does not match`),
       "warning",
     );
   });

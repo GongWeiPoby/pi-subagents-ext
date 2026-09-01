@@ -4,6 +4,8 @@ import type { WidgetMode } from "../src/types.js";
 import {
   type AgentActivity,
   AgentWidget,
+  executionActivityText,
+  executionStatParts,
   fgPreservingNestedStyles,
   formatCost,
   formatSessionTokens,
@@ -13,6 +15,51 @@ import {
   type UICtx,
 } from "../src/ui/agent-widget.js";
 import type { FleetWorkflow } from "../src/workflow/fleet.js";
+
+describe("shared execution formatters", () => {
+  it("keeps equivalent ordinary and workflow stat snapshots in parity", () => {
+    const ordinary = executionStatParts({
+      modelName: "haiku",
+      thinking: "thinking: high",
+      turnCount: 2,
+      maxTurns: 10,
+      toolUses: 3,
+      tokenText: "1.2k token",
+      costText: "~$0.0042",
+      elapsed: "5.0s",
+    });
+    const workflow = executionStatParts({
+      modelName: "haiku",
+      thinking: "thinking: high",
+      turnCount: 2,
+      maxTurns: 10,
+      toolUses: 3,
+      tokenText: "1.2k token",
+      costText: "~$0.0042",
+      elapsed: "5.0s",
+    });
+
+    expect(workflow).toEqual(ordinary);
+    expect(workflow).toEqual([
+      "haiku",
+      "thinking: high",
+      "↻2≤10",
+      "3 tool uses",
+      "1.2k token",
+      "~$0.0042",
+      "5.0s",
+    ]);
+  });
+
+  it("uses ordinary tool/output activity wording for workflow snapshots", () => {
+    expect(executionActivityText({ activity: "tool: read" })).toBe(
+      executionActivityText({ activeTools: new Map([["call", "read"]]) }),
+    );
+    expect(executionActivityText({ outputPreview: "partial response" })).toBe(
+      executionActivityText({ activeTools: new Map(), responseText: "partial response" }),
+    );
+  });
+});
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -146,7 +193,17 @@ describe("AgentWidget", () => {
         totalCount: 3,
         agents: [
           { index: 0, label: "queued child", state: "queued", agentType: "Explore", tokens: 0 },
-          { index: 1, label: "running child", state: "running", agentType: "Explore", tokens: 500, startedAt: Date.now() - 5000 },
+          {
+            index: 1,
+            label: "running child",
+            state: "running",
+            agentType: "Explore",
+            activity: "responding",
+            outputPreview: "partial response",
+            turnCount: 2,
+            tokens: 500,
+            startedAt: Date.now() - 5000,
+          },
           { index: 2, label: "failed child", state: "failed", agentType: "Explore", tokens: 700, startedAt: Date.now() - 8000, completedAt: Date.now() - 1000 },
         ],
       }],
@@ -266,6 +323,70 @@ describe("AgentWidget", () => {
     expect(lines).not.toContain("more (");
   });
 
+  it("renders equivalent ordinary and workflow records with the same stats and activity wording", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const ordinary = makeRecord("ordinary", { isBackground: true }) as any;
+    const child = makeRecord("child", { isBackground: true, workflowId: "wf_audit" }) as any;
+    for (const record of [ordinary, child]) {
+      record.startedAt = 5_000;
+      record.toolUses = 3;
+      record.turnCount = 2;
+      record.lifetimeUsage = { input: 800, output: 300, cacheRead: 0, cacheWrite: 100 };
+      record.invocation = {
+        modelName: "sonnet 4.6",
+        modelId: "anthropic/claude-sonnet-4-6",
+        thinking: "high",
+        maxTurns: 10,
+      };
+    }
+    const activities = new Map<string, AgentActivity>([[ordinary.id, {
+      activeTools: new Map(),
+      toolUses: 3,
+      responseText: "partial response",
+      turnCount: 2,
+      maxTurns: 10,
+    }]]);
+    const workflow = makeWorkflow({
+      phases: [{
+        id: "phase:inspect",
+        title: "Inspect",
+        doneCount: 0,
+        totalCount: 1,
+        agents: [{
+          index: 0,
+          recordId: child.id,
+          label: "child description",
+          state: "running",
+          agentType: child.type,
+          activity: "responding",
+          outputPreview: "partial response",
+          turnCount: 2,
+          toolUses: 3,
+          tokens: 1_200,
+          startedAt: 5_000,
+        }],
+      }],
+    });
+    const manager = {
+      listAgents: () => [ordinary, child],
+      getRecord: (id: string) => id === child.id ? child : ordinary,
+    };
+    const widget = new AgentWidget(manager as any, activities, () => "all", () => false, () => true);
+    widget.setWorkflowSource(() => [workflow]);
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    widget.update();
+    const rendered = factory({ terminal: { columns: 160 }, requestRender: () => {} }, theme).render().join("\n");
+    const lines = rendered.split("\n");
+    const expected = "sonnet 4.6 · thinking: high · ↻2≤10 · 3 tool uses · 1.2k token · 5.0s";
+
+    expect(lines.find(line => line.includes("ordinary description"))).toContain(expected);
+    expect(lines.find(line => line.includes("child description"))).toContain(expected);
+    expect(lines.filter(line => line.includes("partial response"))).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
   it("renders a workflow root before its phase and child hierarchy", () => {
     const workflow = makeWorkflow();
     const manager = { listAgents: () => [] };
@@ -276,8 +397,35 @@ describe("AgentWidget", () => {
     expect(lines[2]).toContain("Inspect");
     expect(lines[3]).toContain("queued child");
     expect(lines[4]).toContain("running child");
-    expect(lines[5]).toContain("failed child");
-    expect(lines[1]).toMatch(/1\/3 agents/);
+    expect(lines[4]).toContain("running · ↻2");
+    expect(lines[5]).toContain("partial response");
+    expect(lines[6]).toContain("failed child");
+    expect(lines[1]).toMatch(/1\/3 agents so far/);
+    expect(lines[1]).not.toContain("↻");
+    expect(lines[2]).not.toContain("↻");
+  });
+
+  it("marks active workflow totals as discovered so far, but not settled totals", () => {
+    const manager = { listAgents: () => [] };
+    const running = renderLines(manager, "unused", () => "all", false, () => [makeWorkflow()]);
+    const paused = renderLines(
+      manager,
+      "unused",
+      () => "all",
+      false,
+      () => [makeWorkflow({ status: "paused" })],
+    );
+    const settled = renderLines(
+      manager,
+      "unused",
+      () => "all",
+      false,
+      () => [makeWorkflow({ status: "completed", completedAt: Date.now() })],
+    );
+
+    expect(running).toContain("agents so far");
+    expect(paused).toContain("agents so far");
+    expect(settled).not.toContain("so far");
   });
 
   it("renders each workflow root immediately before its own hierarchy", () => {
@@ -292,10 +440,11 @@ describe("AgentWidget", () => {
         agents: Array.from({ length: 5 }, (_, index) => ({
           index,
           label: `A child ${index}`,
-          state: "running" as const,
+          state: "done" as const,
           agentType: "Explore",
           tokens: 0,
           startedAt: Date.now(),
+          completedAt: Date.now(),
         })),
       }],
     });
@@ -453,9 +602,9 @@ describe("AgentWidget", () => {
     const queued = lines.find(line => line.includes("queued child"));
     const interrupted = lines.find(line => line.includes("interrupted child"));
 
-    expect(queued).toMatch(/queued child queued$/);
+    expect(queued).toMatch(/queued child · queued$/);
     expect(queued).not.toContain("queued · queued");
-    expect(interrupted).toMatch(/interrupted child interrupted$/);
+    expect(interrupted).toMatch(/interrupted child · interrupted$/);
     expect(interrupted).not.toContain("interrupted · queued");
   });
 
@@ -470,9 +619,10 @@ describe("AgentWidget", () => {
 
     expect(lines[1]).toContain("└─");
     expect(lines[2]).toContain("└─");
-    expect(lines[3]).toContain("├─");
-    expect(lines[4]).toContain("├─");
-    expect(lines[5]).toContain("└─");
+    const childLines = lines.filter(line => line.includes(" child"));
+    expect(childLines[0]).toContain("├─");
+    expect(childLines[1]).toContain("├─");
+    expect(childLines[2]).toContain("└─");
   });
 
   it("marks a declared phase with no agents as not-started", () => {
@@ -613,7 +763,7 @@ describe("AgentWidget", () => {
     expect(lines.length).toBeLessThanOrEqual(12);
     expect(rendered).toContain("1 queued");
     expect(rendered).not.toContain("ordinary-finished description");
-    expect(rendered).toContain("hidden: 2 workflow nodes, 2 agents");
+    expect(rendered).toContain("hidden: 4 workflow nodes, 2 agents");
   });
 
   it("singularizes mixed workflow and agent hidden counts", () => {
@@ -642,7 +792,7 @@ describe("AgentWidget", () => {
       () => [workflow],
     );
 
-    expect(rendered).toContain("hidden: 1 workflow node, 1 agent");
+    expect(rendered).toContain("hidden: 5 workflow nodes, 1 agent");
   });
 
   it("shows a workflow even when there are no ordinary agents", () => {

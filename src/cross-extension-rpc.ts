@@ -10,12 +10,16 @@
  *
  * @see docs/rpc.md — the caller-facing integration reference: spawn options
  * (including the fields spawnTopLevel strips), every error string, the
- * completion-notification race, and what protocol version 2 does not promise.
+ * completion-notification race, and what protocol version 3 does not promise.
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
+import {
+  STRUCTURED_OUTPUT_MIGRATION_ERROR,
+  SUBAGENTS_RPC_PROTOCOL_VERSION,
+} from "./subagent-contract.js";
 import type { AgentRecord } from "./types.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
@@ -30,7 +34,7 @@ export type RpcReply<T = void> =
   | { success: false; error: string };
 
 /** RPC protocol version — bumped when the envelope or method contracts change. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = SUBAGENTS_RPC_PROTOCOL_VERSION;
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
 export interface SpawnCapable {
@@ -103,6 +107,11 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
 
   const unsubSpawn = handleRpc<{ requestId: string; type: string; prompt: string; options?: any }>(
     events, "subagents:rpc:spawn", async ({ type, prompt, options }) => {
+      if (options !== null && typeof options === "object"
+        && Object.hasOwn(options, "structuredOutput")) {
+        throw new Error(STRUCTURED_OUTPUT_MIGRATION_ERROR);
+      }
+
       const ctx = getCtx();
       if (!ctx) throw new Error("No active session");
 
@@ -187,7 +196,7 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // TaskOutput is the one in practice — says so here, so the completion
   // notification for that same result is not delivered on top of it and does
   // not cost the parent a turn. Deliberately outside the ping version
-  // handshake: an extension built against protocol v2 simply never calls it.
+  // handshake: an extension built against protocol v3 simply never calls it.
   const unsubConsume = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:consume", ({ agentId }) => {
       if (!manager.consumeResult(agentId)) throw new Error("Agent not found or still running");

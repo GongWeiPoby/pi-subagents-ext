@@ -437,6 +437,9 @@ describe("FleetList rendering", () => {
         agentType: "Explore",
         model: "haiku",
         recordId: child.id,
+        activity: "tool: read",
+        outputPreview: "partial response",
+        turnCount: 2,
         tokens: 2048,
         startedAt: child.startedAt,
       }],
@@ -460,6 +463,8 @@ describe("FleetList rendering", () => {
     expect(expanded).toContain("inspect workflow state");
     expect(expanded).toContain("Explore");
     expect(expanded).toContain("haiku");
+    expect(expanded).toContain("reading… · ↻2");
+    expect(expanded).not.toContain("partial response");
     expect(expanded).toContain("unrelated top-level");
 
     h.press(DOWN); // phase row
@@ -469,6 +474,42 @@ describe("FleetList rendering", () => {
     h.overlayComponent()!.handleInput("x");
     h.overlayComponent()!.handleInput("x");
     expect((h.manager.abort as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("keeps child identity visible when a responding output preview is maximal", () => {
+    const child = makeRecord({ id: "streaming-child", type: "Explore", workflowId: "wf_abc123" });
+    const h = harness([child]);
+    h.setWorkflows([makeWorkflow({
+      doneCount: 0,
+      totalCount: 1,
+      phases: [{
+        id: "phase:stream",
+        title: "Stream",
+        doneCount: 0,
+        totalCount: 1,
+        agents: [{
+          index: 0,
+          label: "streaming child",
+          state: "running",
+          agentType: "Explore",
+          recordId: child.id,
+          activity: "responding",
+          outputPreview: "x".repeat(200),
+          tokens: 0,
+          startedAt: child.startedAt,
+        }],
+      }],
+    })]);
+
+    h.press(LEFT);
+    h.press(DOWN);
+    h.press(RIGHT);
+    const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const rendered = h.render(80, plainTheme).join("\n");
+
+    expect(rendered).toContain("streaming child");
+    expect(rendered).toContain("responding");
+    expect(rendered).not.toContain("xxxxxxxxxx");
   });
 
   it("renders exact sibling-aware connectors across two workflow phases", () => {
@@ -524,9 +565,9 @@ describe("FleetList rendering", () => {
       const rows = rendered.filter(row => row.includes("phase") || row.includes("child"));
       expect(rows).toEqual([
         "  ○   ├─ phase  Discover".padEnd(width - "1/1".length) + "1/1",
-        "  ○   │  └─ ✓ Explore  first child".padEnd(width - "1s · ↓ 10 tokens".length) + "1s · ↓ 10 tokens",
+        "  ○   │  └─ ✓ Explore  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
         "  ○   └─ phase  Verify".padEnd(width - "0/1".length) + "0/1",
-        "  ○      └─ ■ Explore  second child".padEnd(width - "3s · ↓ 20 tokens".length) + "3s · ↓ 20 tokens",
+        "  ○      └─ ■ Explore  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
       ]);
       const ordinaryStats = "1s · ↓ 13.1k tokens";
       expect(rendered.find(row => row.includes("ordinary top-level"))).toBe(
@@ -579,8 +620,8 @@ describe("FleetList rendering", () => {
       const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
       const rows = h.render(width, plainTheme).filter(row => row.includes("child"));
       expect(rows).toEqual([
-        "  ○      ├─ ✓ Explore  first child".padEnd(width - "1s · ↓ 10 tokens".length) + "1s · ↓ 10 tokens",
-        "  ○      └─ ✓ Explore  second child".padEnd(width - "3s · ↓ 20 tokens".length) + "3s · ↓ 20 tokens",
+        "  ○      ├─ ✓ Explore  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
+        "  ○      └─ ✓ Explore  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
       ]);
       h.fleet.dispose();
     } finally {
@@ -839,10 +880,19 @@ describe("FleetList workflow rows", () => {
     const run = rows.find(row => row.includes("audit-src"))!;
     const agent = rows.findIndex(row => row.includes("one"));
     expect(run).toContain("workflow");
-    expect(run).toContain("1/3 agents");
+    expect(run).toContain("1/3 agents so far");
     expect(run).toContain("26.4k tokens");
     // A run owns most of the agents under it, so the container comes first.
     expect(rows.findIndex(row => row.includes("audit-src"))).toBeLessThan(agent);
+  });
+
+  it("uses dynamic totals only while a workflow is active", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow({ status: "paused" })]);
+    expect(h.render().map(plain).join("\n")).toContain("agents so far");
+
+    h.setWorkflows([makeWorkflow({ status: "completed", completedAt: Date.now() })]);
+    expect(h.render().map(plain).join("\n")).not.toContain("so far");
   });
 
   it("agrees with itself about a single-agent run", () => {
@@ -945,8 +995,10 @@ describe("FleetList workflow rows", () => {
     ]);
     await h.closeWorkflowDialog();
 
-    expect(h.render().find(l => l.includes("review-changes"))).toContain("●");
-    expect(h.render().find(l => l.includes("started-meanwhile"))).not.toContain("●");
+    const rendered = h.render();
+    const selected = rendered.find(line => line.includes("<accent>●</accent>"));
+    expect(plain(selected ?? "")).toContain("review-chan");
+    expect(plain(selected ?? "")).not.toContain("started-meanwhile");
   });
 
   it("still opens an agent's viewer when the selection is past the runs", () => {

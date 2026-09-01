@@ -66,10 +66,8 @@ import {
 import { SPINNER, type Theme } from "./agent-widget.js";
 import {
   ASCII_GLYPHS,
+  agentStatSegments,
   clampLine,
-  formatCompactTokens,
-  formatModel,
-  formatThinking,
   REPLAYED_ANNOTATION,
   styleWorkflowCardLines,
   UNICODE_GLYPHS,
@@ -77,6 +75,7 @@ import {
   type WorkflowCardLine,
   type WorkflowCardSegment,
   type WorkflowCardTask,
+  workflowActivityText,
 } from "./workflow-card.js";
 
 /** Fallback width when the caller does not know the terminal's. */
@@ -651,20 +650,18 @@ function agentRow(options: {
   // stat tail, and clamping one would just spend columns on a truncated word.
   if (options.compact) return clampLine(head, width);
 
-  const model = formatModel(entry);
-  if (model) head.push({ text: ` ${model}`, color: "dim" });
-  for (const part of [...subStatusAnnotations(entry, display, options.now), ...rowStatSegments(entry)]) {
+  const liveActivity = workflowActivityText(entry);
+  const parts = [
+    ...subStatusAnnotations(entry, display, options.now),
+    ...(liveActivity ? [liveActivity] : []),
+    ...(entry.outputPreview && liveActivity !== entry.outputPreview ? [`⎿ ${entry.outputPreview}`] : []),
+    ...(entry.agentType ? [entry.agentType] : []),
+    ...agentStatSegments(entry),
+  ];
+  for (const part of parts) {
     head.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
   }
-  // The duration sits flush right, so a column of rows reads as a column of
-  // durations rather than as ragged text.
-  const duration = entry.durationMs ? [{ text: `${formatDuration(entry.durationMs)} `, color: "dim" as const }] : [];
-  return duration.length > 0 ? rightAlign(head, duration, width) : clampLine(head, width);
-}
-
-/** The agent row's dot-separated tail. The model is not in it — it leads. */
-function rowStatSegments(entry: WorkflowAgentEntry): string[] {
-  return entry.tokens ? [`${formatCompactTokens(entry.tokens)} tok`] : [];
+  return clampLine(head, width);
 }
 
 /**
@@ -772,32 +769,22 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const detailRows: WorkflowCardLine[] = [];
   if (!inPhases && entry) {
     const display = displayState(entry, view.workflowActive);
-    // Prefers the canonical `provider/model-id` here — two providers can serve
-    // models whose short names read alike, and this pane has the width for it.
-    const model = formatModel(entry, { canonical: true });
     detailRows.push(
       clampLine(
         [
           { text: " " },
           dialogRowGlyph(display, glyphs, spinnerFrame),
           { text: ` ${statusWord(display)}`, color: "muted" },
-          ...(model ? [{ text: " · ", color: "dim" as const }, { text: model, color: "dim" as const }] : []),
         ],
         rightWidth,
       ),
     );
-    // Rebuilt rather than filtered out of `agentStatSegments`: the model and the
-    // agent type are already on the line above, and the token count wants its
-    // unit here exactly as it has one in the row.
-    const stats: string[] = [];
-    // The thinking level lives here rather than on the tight card row: it is
-    // per-agent configuration, which is what someone opening this pane came to
-    // see, and `thinking: medium` on every row of a fan-out would be noise.
-    const thinking = formatThinking(entry);
-    if (thinking) stats.push(thinking);
-    if (entry.tokens) stats.push(`${formatCompactTokens(entry.tokens)} tok`);
-    if (entry.toolCalls) stats.push(`${entry.toolCalls} tool call${entry.toolCalls === 1 ? "" : "s"}`);
-    if (entry.durationMs) stats.push(formatDuration(entry.durationMs));
+    const currentActivity = workflowActivityText(entry);
+    const stats = [
+      ...(currentActivity ? [currentActivity] : []),
+      ...(entry.agentType ? [entry.agentType] : []),
+      ...agentStatSegments(entry, { canonicalModel: true }),
+    ];
     if (stats.length > 0) {
       detailRows.push(clampLine([{ text: ` ${stats.join(" · ")}`, color: "dim" }], rightWidth));
     }
@@ -833,6 +820,14 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
       ),
     );
     detailRows.push(detailBody(activityBody(entry, display), rightWidth));
+
+    if (entry.outputPreview) {
+      detailRows.push([]);
+      detailRows.push(detailHeading("Current output", [], rightWidth));
+      for (const text of wrapTextWithAnsi(entry.outputPreview, Math.max(1, rightWidth - 4))) {
+        detailRows.push(detailBody(text, rightWidth));
+      }
+    }
 
     detailRows.push([]);
     detailRows.push(detailHeading("Outcome", [], rightWidth));

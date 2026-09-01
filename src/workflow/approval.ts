@@ -147,6 +147,16 @@ export function validateDirectWorkflowApprovalCompleteness(
 
   const calls: StaticCall[] = [];
   collectCallsFromAst(ast, source, calls);
+  const unsupportedSchema = calls.some(
+    (call) => call.name === "agent" && call.agentOptions?.unsupportedSchema,
+  );
+  if (unsupportedSchema) {
+    return {
+      ok: false,
+      kind: "options",
+      message: "agent() opts.schema is no longer supported; workflow children return text/Markdown.",
+    };
+  }
   const unresolved = calls
     .filter((call) => call.name === "agent")
     .flatMap((call, index) => (call.agentOptions?.unresolved ?? [])
@@ -228,14 +238,9 @@ type StaticOptionValue =
   | { kind: "static"; value: string }
   | { expression: string; kind: "dynamic" };
 
-type StaticSchemaOption =
-  | { kind: "absent" }
-  | { kind: "configured" }
-  | { expression: string; kind: "dynamic" };
-
 interface StaticAgentOptions {
   fields: Record<BehaviorOptionName, StaticOptionValue>;
-  schema: StaticSchemaOption;
+  unsupportedSchema: boolean;
   unresolved: string[];
 }
 
@@ -288,6 +293,7 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
   const risks = [...new Set(`${input.script}\n${safeJson(input.args)}`.match(RISK_WORDS)?.map((word) => word.toLowerCase()) ?? [])];
 
   const lines = [
+    "Technical details",
     `Workflow: ${safeLine(input.meta.name)}`,
     `Description: ${safeLine(input.meta.description)}`,
     `Source: ${safeLine(input.source)}`,
@@ -321,7 +327,6 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
     lines.push(`  dependency/parallel relation: ${peers}`);
     lines.push(`  isolation: ${safeLine(renderOptionValue(options.fields.isolation, "none"))}`);
     lines.push(`  gate: ${safeLine(renderOptionValue(options.fields.gate, "none"))}`);
-    lines.push(`  structured output: ${safeLine(renderSchemaOption(options.schema))}`);
     lines.push(`  resume: ${safeLine(renderOptionValue(options.fields.resume, "none"))}`);
   }
 
@@ -333,7 +338,65 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
     }
   }
   lines.push("", "Omitted capabilities:", "- not declared by a direct script");
+  lines.push("", "Approval summary", ...directWorkflowOverview(input, calls, risks));
   return lines.join("\n");
+}
+
+function directWorkflowOverview(
+  input: DirectWorkflowApprovalInput,
+  calls: StaticCall[],
+  risks: string[],
+): string[] {
+  const declaredPhases = input.meta.phases ?? [];
+  const technicalMap = workflowMap(calls).slice(2)
+    .filter((line) => line.trim() !== "v")
+    .map((line) => line
+      .replace("parallel() [barrier; parallel branches]", "parallel")
+      .replace("pipeline() [overlapping per-item stages]", "pipeline")
+      .replace("argument evaluation/control order:", "prepare inputs")
+      .replace(/ \[output=(?:text|nested workflow result)\]$/, ""));
+  const hasStaticNodes = calls.some((call) =>
+    call.name === "agent" || call.name === "workflow" || call.name === "parallel" || call.name === "pipeline"
+  );
+  const flow = hasStaticNodes
+    ? ["  Static call sites; runtime branches may skip or reorder them:", ...technicalMap]
+    : ["  Steps are determined at runtime."];
+  const impacts: string[] = [];
+  for (const [index, call] of calls.filter((candidate) => candidate.name === "agent").entries()) {
+    const options = call.agentOptions ?? emptyAgentOptions();
+    const label = safeLine(renderOptionValue(options.fields.label, `agent call ${index + 1}`));
+    if (options.fields.gate.kind !== "absent") {
+      impacts.push(`  - ${label}: gate ${safeLine(renderOptionValue(options.fields.gate, "dynamic/unknown"))}`);
+    }
+    if (options.fields.isolation.kind !== "absent") {
+      impacts.push(`  - ${label}: isolation ${safeLine(renderOptionValue(options.fields.isolation, "dynamic/unknown"))}`);
+    }
+  }
+  if (risks.length > 0) impacts.push(`  - Possible high-impact actions: ${risks.map(safeLine).join(", ")}`);
+  const lines = [
+    "Goal",
+    `  ${safeLine(input.meta.description)}`,
+  ];
+  const phaseLines = declaredPhases.map((phase, index) =>
+    `  ${index + 1}. ${safeLine(phase.title)}${phase.detail ? ` — ${safeLine(phase.detail)}` : ""}`
+  );
+  lines.push(
+    "",
+    "Flow",
+    ...flow,
+    ...(phaseLines.length > 0 ? ["", "Declared phases", ...phaseLines] : []),
+    "",
+    "Result handoff",
+    "  The call-site tree shows static control shape, not guaranteed data flow.",
+    "  Data handoffs are script-defined and not statically proven.",
+    "",
+    "Impact",
+    ...(impacts.length > 0
+      ? impacts
+      : ["  No high-impact keywords, gates, or worktree isolation detected; agents may still act through available tools."]),
+    "  This is a simplified static view. Exact options and runtime uncertainty are available above.",
+  );
+  return lines;
 }
 
 function orchestrationSummary(parallel: number, pipelines: number, nested: number): string {
@@ -466,19 +529,13 @@ function callsInArgumentOrder(call: StaticCall, calls: StaticCall[]): StaticCall
 }
 
 function renderMapNode(node: StaticMapNode): string {
-  const output = node.call.name === "agent"
-    ? node.call.agentOptions?.schema.kind === "absent" ? "text" : "structured (schema)"
-    : "nested workflow result";
-  return `[${safeAsciiLine(node.label)}] ${compactMapText(node.purpose, "dynamic prompt computed at runtime")} [output=${output}]`;
+  const output = node.call.name === "agent" ? "text" : "nested workflow result";
+  return `[${safeLine(node.label)}] ${compactMapText(node.purpose, "dynamic prompt computed at runtime")} [output=${output}]`;
 }
 
 function compactMapText(value: string | undefined, fallback: string): string {
-  const text = safeAsciiLine(value ?? fallback).replace(/\s+/g, " ").trim();
+  const text = safeLine(value ?? fallback).replace(/\s+/g, " ").trim();
   return text.length <= 88 ? text : `${text.slice(0, 85)}...`;
-}
-
-function safeAsciiLine(value: string): string {
-  return safeLine(value).replace(/[^\x20-\x7E]/g, unicodeEscape);
 }
 
 function ambientPhase(call: StaticCall, phases: StaticCall[]): string | undefined {
@@ -521,7 +578,7 @@ function emptyAgentOptions(): StaticAgentOptions {
     fields: Object.fromEntries(
       BEHAVIOR_OPTION_NAMES.map((name) => [name, { kind: "absent" as const }]),
     ) as Record<BehaviorOptionName, StaticOptionValue>,
-    schema: { kind: "absent" },
+    unsupportedSchema: false,
     unresolved: [],
   };
 }
@@ -529,12 +586,6 @@ function emptyAgentOptions(): StaticAgentOptions {
 function renderOptionValue(option: StaticOptionValue, fallback: string): string {
   if (option.kind === "static") return option.value;
   return option.kind === "dynamic" ? "dynamic/unknown" : fallback;
-}
-
-function renderSchemaOption(schema: StaticSchemaOption): string {
-  if (schema.kind === "absent") return "none";
-  if (schema.kind === "configured") return "configured";
-  return `configured (dynamic expression: ${schema.expression})`;
 }
 
 function staticStringFromNode(value: unknown): string | undefined {
@@ -619,12 +670,7 @@ function collectAgentOptions(argumentNodes: unknown[], source: string): StaticAg
       }
       continue;
     }
-    if (key === "schema") {
-      const schema = astRecord(property.value);
-      options.schema = schema?.type === "ObjectExpression"
-        ? { kind: "configured" }
-        : { kind: "dynamic", expression: sourceForNode(property.value, source) };
-    }
+    if (key === "schema") options.unsupportedSchema = true;
   }
   return options;
 }

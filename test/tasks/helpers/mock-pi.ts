@@ -4,6 +4,7 @@
  */
 
 import { vi } from "vitest";
+import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../../../src/subagent-contract.js";
 
 export type MockEventBus = {
   on: (channel: string, handler: (data: unknown) => void) => () => void;
@@ -151,7 +152,10 @@ export function installSubagentsMock(
   // Respond to ping — reply on scoped channel
   const unsubPing = pi.events.on("subagents:rpc:ping", (data: unknown) => {
     const { requestId } = data as { requestId: string };
-    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, { success: true, data: { version: opts?.version ?? 2 } });
+    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, {
+      success: true,
+      data: { version: opts?.version ?? SUBAGENTS_RPC_PROTOCOL_VERSION },
+    });
   });
 
   // Respond to spawn — reply on scoped channel

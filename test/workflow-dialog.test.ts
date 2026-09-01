@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
-import { SPINNER } from "../src/ui/agent-widget.js";
+import { executionActivityText, SPINNER } from "../src/ui/agent-widget.js";
 import { styleWorkflowCardLines, type WorkflowCardTask } from "../src/ui/workflow-card.js";
 import {
   ASCII_DIALOG_GLYPHS,
@@ -395,7 +395,8 @@ describe("sub-status annotations", () => {
     // The agent type and the tool-call count are the detail pane's, not the
     // row's — the row carries why it looks the way it does, then the model and
     // the token count, and nothing that would push those off a narrow pane.
-    expect(rows[0].trim()).toBe("❯ ◌ retry-me · throttled · attempt 2 · waiting 8s");
+    expect(rows[0].trim()).toContain("❯ ◌ retry-me · throttled · attempt 2 · waiting 8s");
+    expect(rows[0].trim()).toMatch(/Expl…$/);
   });
 });
 
@@ -427,6 +428,53 @@ describe("per-agent detail", () => {
       progress: [agentEntry({ index: 0, state: "done", thinking: "low", requestedThinking: "max" })],
     });
     expect(rightRows(rows).map(bare).join("\n")).toContain("thinking: low (asked max)");
+  });
+
+  it("shows live activity and positive turns in wide rows but keeps the compact pane label-only", () => {
+    const progress = [agentEntry({
+      index: 0,
+      label: "resume child",
+      state: "progress",
+      startedAt: START,
+      agentType: "Explore",
+      model: "haiku",
+      activity: "tool: read",
+      outputPreview: "partial response",
+      turnCount: 2,
+      tokens: 1200,
+    })];
+    const overview = rightRows(dialog({ progress, width: 120 })).map(bare).join("\n");
+    expect(overview).toContain(
+      "reading… · ⎿ partial response · Explore · haiku · ↻2 · 1.2k token",
+    );
+
+    const opened = dialog({ progress, width: 120, state: { level: "agent" } });
+    const compact = leftRows(opened).map(bare).join("\n");
+    expect(compact).toContain("resume child");
+    expect(compact).not.toContain("tool: read");
+    expect(compact).not.toContain("↻2");
+
+    const detailText = rightRows(opened).map(bare).join("\n");
+    expect(detailText).toContain("Current output");
+    expect(detailText).toContain("partial response");
+  });
+
+  it.each([
+    ["running", { state: "progress" as const, activity: "waiting for model" }, { status: "running" as const }],
+    ["done", { state: "done" as const }, { status: "completed" as const }],
+    ["error", { state: "error" as const, error: "failed" }, { status: "failed" as const }],
+    ["interrupted", { state: "progress" as const, activity: "tool: read" }, { status: "killed" as const }],
+    ["resume", { state: "progress" as const, activity: "waiting for model" }, { status: "running" as const }],
+  ])("shows activity and turns in %s detail", (_name, entry, task) => {
+    const rows = detail({
+      progress: [agentEntry({ index: 0, startedAt: START, turnCount: 2, ...entry })],
+      task: { ...task, startTime: START },
+    });
+    const rendered = rightRows(rows).map(bare).join("\n");
+    expect(rendered).toContain("↻2");
+    if ("activity" in entry) {
+      expect(rendered).toContain(executionActivityText({ activity: entry.activity }));
+    }
   });
 
   it("collapses a long prompt behind an `expand` affordance and counts its lines", () => {
@@ -899,7 +947,7 @@ describe("header", () => {
     // it — the tool's name is the card's job, not the dialog's.
     expect(lines[0]).toBe(" review-changes");
     expect(lines[1]).toContain("Review changed files");
-    expect(lines[1]).toContain("1/2 agents · 1m12s");
+    expect(lines[1]).toContain("1/2 agents so far · 1m12s");
   });
 });
 

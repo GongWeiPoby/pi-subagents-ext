@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WorkflowJournalEntry } from "../src/workflow/journal.js";
-import { buildPhaseGroups, type WorkflowAgentEntry, type WorkflowEntry } from "../src/workflow/progress.js";
+import {
+  buildPhaseGroups,
+  collapse,
+  displayState,
+  type WorkflowAgentEntry,
+  type WorkflowEntry,
+} from "../src/workflow/progress.js";
 import {
   assertBoundarySafe,
   type RunWorkflowOptions,
@@ -612,6 +618,206 @@ describe("abort", () => {
     expect(aborted).toEqual(["wf-agent-0"]);
   });
 
+  describe("turn count progress", () => {
+    it("bounds and throttles live output, then flushes before terminal settlement", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          let full = "";
+          for (let index = 0; index < 100; index++) {
+            const delta = `${index}\u001b[31m-token \u202e\u009b`;
+            full += delta;
+            request.onTextDelta?.(delta, full);
+          }
+          return { ok: true, text: "final answer" };
+        },
+        abortAgent() {},
+      };
+
+      const result = await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+      const outputRows = rows.filter(row => row.outputPreview !== undefined);
+
+      expect(outputRows).toHaveLength(2);
+      expect(outputRows.at(-1)?.activity).toBe("responding");
+      expect(outputRows.at(-1)?.outputPreview?.length).toBeLessThanOrEqual(200);
+      expect(outputRows.at(-1)?.outputPreview).toMatch(/^…/);
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u001b");
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u202e");
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u009b");
+      expect(rows.length).toBeLessThan(10);
+      expect(result.progress.at(-1)).toMatchObject({ state: "done", resultPreview: "final answer" });
+      expect(result.progress.at(-1)).not.toHaveProperty("outputPreview");
+      expect(result.progress.at(-1)).not.toHaveProperty("activity");
+    });
+
+    it("emits the complete live activity sequence and clears activity on completion", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onSessionReady?.();
+          request.onToolActivity?.({ type: "start", toolName: "read" });
+          request.onToolActivity?.({ type: "end", toolName: "read" });
+          request.onTurnEnd?.(1);
+          return { ok: true, text: "done" };
+        },
+        abortAgent() {},
+      };
+
+      await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+
+      expect(rows.map(row => row.activity)).toEqual([
+        undefined,
+        "starting",
+        "waiting for model",
+        "tool: read",
+        "waiting for model",
+        "waiting for model",
+        undefined,
+      ]);
+      expect(rows.at(-1)).toMatchObject({
+        state: "done",
+        turnCount: 1,
+      });
+      expect(rows.at(-1)).not.toHaveProperty("activity");
+    });
+
+    it("does not let a pending output snapshot overwrite newer tool activity", async () => {
+      vi.useFakeTimers();
+      try {
+        const seen: WorkflowEntry[][] = [];
+        let started!: () => void;
+        const startedPromise = new Promise<void>(resolve => { started = resolve; });
+        let finish!: (result: WorkflowSpawnResult) => void;
+        const host: WorkflowHost = {
+          spawnAgent(request) {
+            request.onTextDelta?.("first ", "first ");
+            request.onTextDelta?.("second", "first second");
+            request.onToolActivity?.({ type: "start", toolName: "read" });
+            started();
+            return new Promise(resolve => { finish = resolve; });
+          },
+          abortAgent() {},
+        };
+        const promise = run('return await agent("go");', {
+          host,
+          onProgress(entries) { seen.push([...entries]); },
+        });
+        await startedPromise;
+        await vi.advanceTimersByTimeAsync(1_000);
+        const live = collapse(seen.flat()).agents[0];
+        expect(live.activity).toBe("tool: read");
+        expect(live.outputPreview).toBe("first second");
+
+        finish({ ok: true, text: "done" });
+        await promise;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["done", { ok: true, text: "done" }],
+      ["error", { ok: false, error: "failed" }],
+    ] as const)("emits live counts and retains the latest count on %s", async (state, reply) => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          return reply;
+        },
+        abortAgent() {},
+      };
+
+      const result = await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+
+      expect(rows.filter(row => row.turnCount !== undefined).map(row => row.turnCount)).toEqual([1, 2, 2]);
+      expect(rows.at(-1)).toMatchObject({ state, turnCount: 2 });
+      expect(result.progress.at(-1)).toMatchObject({ turnCount: 2 });
+    });
+
+    it("retains the latest live count when a running child is interrupted", async () => {
+      const controller = new AbortController();
+      let counted!: () => void;
+      const countSeen = new Promise<void>(resolve => { counted = resolve; });
+      const host: WorkflowHost = {
+        spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          counted();
+          return new Promise<WorkflowSpawnResult>(() => {});
+        },
+        abortAgent() {},
+      };
+
+      const promise = run('return await agent("go");', { host, signal: controller.signal });
+      await countSeen;
+      controller.abort();
+      const result = await promise;
+      const row = collapse(result.progress).agents[0];
+
+      expect(result.status).toBe("killed");
+      expect(row.turnCount).toBe(2);
+      expect(displayState(row, false)).toBe("interrupted");
+    });
+
+    it("passes a fresh callback to resume rows", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          return { ok: true, text: "first" };
+        },
+        async resumeAgent(_id, _prompt, _onResolved, onSessionReady, onTurnEnd, onToolActivity, onTextDelta) {
+          onSessionReady?.();
+          onToolActivity?.({ type: "start", toolName: "read" });
+          onToolActivity?.({ type: "end", toolName: "read" });
+          onTextDelta?.("partial ", "partial ");
+          onTextDelta?.("response", "partial response");
+          onTurnEnd?.(1);
+          return { ok: true, text: "second" };
+        },
+        abortAgent() {},
+      };
+
+      await run(
+        'await agent("go", { label: "impl" });\nreturn await agent("again", { resume: "impl" });',
+        { host, onProgress(entries) { seen.push([...entries]); } },
+      );
+      const resumed = seen.flat().filter(
+        (entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent" && entry.index === 1,
+      );
+
+      expect(resumed.map(row => row.activity)).toEqual([
+        undefined,
+        "starting",
+        "waiting for model",
+        "tool: read",
+        "waiting for model",
+        "responding",
+        "waiting for model",
+        "waiting for model",
+        undefined,
+      ]);
+      expect(resumed.some(row => row.outputPreview === "partial response")).toBe(true);
+      expect(resumed.filter(row => row.turnCount !== undefined).map(row => row.turnCount)).toEqual([1, 1, 1]);
+      expect(resumed.at(-1)).toMatchObject({ state: "done", turnCount: 1 });
+    });
+  });
+
   // #168 in a workflow: a row must name the model the child ACTUALLY ran on, not
   // the string the script asked for. The correction has to land while the agent
   // is still running — waiting for the spawn to resolve would leave an
@@ -1099,125 +1305,58 @@ describe("the budget global", () => {
 });
 
 /* ------------------------------------------------------------------------- *
- * agent({ schema })
+ * unsupported agent({ schema }) migration
  * ------------------------------------------------------------------------- */
 
-describe("structured output", () => {
-  const FINDINGS = {
-    type: "object",
-    properties: { findings: { type: "array", items: { type: "string" } } },
-    required: ["findings"],
-  };
-  const schemaLiteral = JSON.stringify(FINDINGS);
+describe("unsupported structured output", () => {
+  const migrationError = "agent() opts.schema is no longer supported; workflow children return text/Markdown.";
 
-  it("hands the script an object, not a string", async () => {
-    // The whole point of the option. `instanceof` is the assertion that matters:
-    // it only holds if the value was parsed *inside* the script's own realm.
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":["a","b"]}' }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\n`
-        + "return JSON.stringify([typeof r, r instanceof Object, r.findings instanceof Array, r.findings.length]);",
-      { host: stub.host },
-    );
-
-    expect(result.status).toBe("completed");
-    expect(JSON.parse(result.value as string)).toEqual(["object", true, true, 2]);
-  });
-
-  it("passes the compiled schema to the host", async () => {
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":[]}' }));
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, { host: stub.host });
-
-    expect(stub.calls[0].schema).toBeDefined();
-    expect(stub.calls[0].schema?.schema).toEqual(FINDINGS);
-  });
-
-  it("fails the call when the host returns prose instead", async () => {
-    // A host that ignores `schema` must fail loudly. The runtime is the one
-    // place that can promise the script the shape it asked for.
-    const stub = stubHost(() => ({ ok: true, text: "I found two things." }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\nreturn r === null;`,
-      { host: stub.host },
-    );
-
-    expect(result.value).toBe(true);
-    expect(agentEntries(result.progress).at(-1)).toMatchObject({ state: "error" });
-    expect(String(agentEntries(result.progress).at(-1)?.error)).toMatch(/not JSON|did not match/);
-  });
-
-  it("fails the call when the answer parses but does not match", async () => {
-    const stub = stubHost(() => ({ ok: true, text: '{"wrong":1}' }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\nreturn r === null;`,
-      { host: stub.host },
-    );
-
-    expect(result.value).toBe(true);
-    expect(String(agentEntries(result.progress).at(-1)?.error)).toMatch(/findings/);
-  });
-
-  it("rejects a schema that cannot be one, before spending a model call", async () => {
-    for (const bad of ["5", "'x'", "[]", "{ type: 'array' }"]) {
-      const stub = stubHost();
-      const result = await run(`return await agent('go', { schema: ${bad} });`, { host: stub.host });
-      expect(result.status, `schema ${bad}`).toBe("failed");
-      expect(result.error).toMatch(/schema/);
-      expect(stub.calls, `schema ${bad}`).toHaveLength(0);
-    }
-  });
-
-  it("refuses schema together with resume", async () => {
-    // A resumed child re-prompts a session whose tool set was fixed when it
-    // started, so it has no StructuredOutput tool to answer through.
+  it("rejects schema before resume conflicts or host calls", async () => {
     const stub = stubHost();
     const result = await run(
-      "await agent('first', { label: 'a' });\n"
-        + `return await agent('again', { resume: 'a', schema: ${schemaLiteral} });`,
+      "return await agent('go', { resume: 'missing', schema: { type: 'object' } });",
       { host: stub.host },
     );
 
     expect(result.status).toBe("failed");
-    expect(result.error).toMatch(/mutually exclusive/);
+    expect(result.error).toBe(migrationError);
+    expect(stub.calls).toHaveLength(0);
+  });
+});
+
+describe("terminal-safe workflow progress strings", () => {
+  it.each([
+    ["label", 'return await agent("go", { label: "\\x1b[2Jforged" });'],
+    ["phase", 'phase("\\u202eforged"); return "done";'],
+  ])("rejects an unsafe %s before host execution", async (_field, body) => {
+    const stub = stubHost();
+    const result = await run(body, { host: stub.host });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("unsafe terminal control characters");
+    expect(stub.calls).toEqual([]);
   });
 
-  it("gives a schema call its own journal key", async () => {
-    const plain: WorkflowJournalEntry[] = [];
-    await run("return await agent('go');", {
+  it("escapes a derived label decoded from an unsafe prompt", async () => {
+    const result = await run('return await agent("before\\x1b[2Jafter");', {
       host: stubHost().host,
-      journal: { append: entry => plain.push(entry) },
     });
+    const row = collapse(result.progress).agents[0];
 
-    const schemad: WorkflowJournalEntry[] = [];
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, {
-      host: stubHost(() => ({ ok: true, text: '{"findings":[]}' })).host,
-      journal: { append: entry => schemad.push(entry) },
-    });
-
-    // Same prompt, different contract — a resume must not replay one as the other.
-    expect(schemad[0].key).not.toBe(plain[0].key);
+    expect(row.label).toBe("before\\u001b[2Jafter");
+    expect(row.label).not.toContain("\u001b");
   });
 
-  it("declines a replayed answer that no longer matches", async () => {
-    // The key covers a schema that changed; this covers a journal that was
-    // edited, or torn mid-write. Either would hand the script a null from an
-    // entry the journal claims succeeded.
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":["fresh"]}' }));
-    const stale: WorkflowJournalEntry[] = [];
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, {
-      host: stubHost(() => ({ ok: true, text: '{"findings":["old"]}' })).host,
-      journal: { append: entry => stale.push(entry) },
+  it("escapes unsafe log controls before they reach renderers", async () => {
+    const result = await run('log("before\\x1b[2J\\u202eafter"); return "done";', {
+      host: stubHost().host,
     });
-    stale[0] = { ...stale[0], text: "not json at all" };
+    const logs = result.progress.filter(entry => entry.type === "workflow_log");
 
-    const result = await run(`return (await agent('go', { schema: ${schemaLiteral} })).findings[0];`, {
-      host: stub.host,
-      journal: { entries: stale },
-    });
-
-    expect(result.value).toBe("fresh");
-    expect(result.replayedCount).toBe(0);
-    expect(stub.calls).toHaveLength(1);
+    expect(logs).toEqual([{
+      type: "workflow_log",
+      message: "before\\u001b[2J\\u202eafter",
+    }]);
   });
 });
 

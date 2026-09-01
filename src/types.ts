@@ -175,6 +175,12 @@ export interface AgentRecord {
   result?: string;
   error?: string;
   toolUses: number;
+  /**
+   * Number of child session `turn_end` events completed during the current
+   * invocation. Runtime-created records initialize it to 0; optional for
+   * external record-shaped adapters compiled against older releases.
+   */
+  turnCount?: number;
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;
@@ -242,17 +248,6 @@ export interface AgentRecord {
   invocation?: AgentInvocation;
   /** Nesting depth: top-level subagent = 1. */
   depth?: number;
-  /**
-   * The validated `StructuredOutput` payload, as canonical JSON.
-   *
-   * Set only when the spawn asked for a schema. Separate from `result` because
-   * `result` is prose for a reader — previewed in the widget, written to the
-   * transcript, and appended to with the worktree branch note — and JSON that
-   * has been appended to no longer parses.
-   */
-  structuredJson?: string;
-  /** Whether the child needed the extra structured-output prompt. */
-  structuredRetried?: boolean;
   /** Parent agent ID for ownership-scoped nested controls. */
   parentAgentId?: string;
   /**

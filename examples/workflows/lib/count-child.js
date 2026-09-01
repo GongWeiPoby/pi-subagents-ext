@@ -14,14 +14,11 @@ export const meta = {
 
 const root = args?.root ?? 'src/'
 
-const found = await agent(`List every source file under ${root}. One path per line, nothing else.`, {
+const found = await agent(`List every source file under ${root}. Return one path per line, nothing else.`, {
   label: 'scan',
-  schema: {
-    type: 'object',
-    properties: { files: { type: 'array', items: { type: 'string' } } },
-    required: ['files'],
-  },
 })
 
-// A schema call can still return null if the child never complied.
-return found === null ? 0 : found.files.length
+// Keep the handoff deterministic: blank lines do not represent source files.
+return typeof found === 'string'
+  ? found.split('\n').filter(line => line.trim().length > 0).length
+  : 0

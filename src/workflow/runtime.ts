@@ -15,7 +15,6 @@
 
 import { Worker } from "node:worker_threads";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
-import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
 import { extractMeta, type WorkflowMeta } from "./meta.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "./progress.js";
 import { WORKER_SOURCE } from "./worker-source.js";
@@ -99,14 +98,14 @@ export interface WorkflowSpawnRequest {
     requestedThinking?: string;
     requestedModel?: string;
   }): void;
-  /**
-   * Compiled from the script's `agent({ schema })`.
-   *
-   * The host must give the child a `StructuredOutput` tool built from it and
-   * return the validated payload as JSON text. Compiled rather than raw so the
-   * runtime can re-check the answer without re-parsing the schema per call.
-   */
-  schema?: CompiledSchema;
+  /** Called when the child session exists and its model request can begin. */
+  onSessionReady?(): void;
+  /** Called after each child `turn_end`, with this invocation's cumulative count. */
+  onTurnEnd?(turnCount: number): void;
+  /** Called when a child tool starts or ends. */
+  onToolActivity?(activity: { type: "start" | "end"; toolName: string }): void;
+  /** Called with assistant text deltas and the current complete response text. */
+  onTextDelta?(delta: string, fullText: string): void;
   phaseIndex?: number;
   phaseTitle?: string;
   /**
@@ -138,9 +137,9 @@ export interface WorkflowSpawnResult {
    * budget counts output, and a fan-out's re-sent input would swamp it.
    */
   outputTokens?: number;
-  /** Whether the child needed an extra prompt to produce its structured answer. */
-  structuredRetried?: boolean;
   toolCalls?: number;
+  /** Completed child `turn_end` events for this invocation. */
+  turnCount?: number;
   /**
    * Where the child actually ran.
    *
@@ -207,6 +206,10 @@ export interface WorkflowHost {
      * the row above it shows the one that ran.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
+    onSessionReady?: WorkflowSpawnRequest["onSessionReady"],
+    onTurnEnd?: WorkflowSpawnRequest["onTurnEnd"],
+    onToolActivity?: WorkflowSpawnRequest["onToolActivity"],
+    onTextDelta?: WorkflowSpawnRequest["onTextDelta"],
   ): Promise<WorkflowSpawnResult>;
   /**
    * Run a `gate` command and report whether it passed.
@@ -444,8 +447,6 @@ interface AgentCallPayload {
   resume?: string;
   /** Reasoning effort, already validated against pi's thinking levels worker-side. */
   effort?: string;
-  /** Raw JSON Schema from `agent({ schema })`, compiled before anything spawns. */
-  schema?: unknown;
 }
 
 type WorkerMessage =
@@ -457,12 +458,33 @@ type WorkerMessage =
 /** Everything below 0x20 except tab, newline and carriage return, plus DEL. */
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 
-const preview = (text: string) =>
-  text.length <= PREVIEW_LENGTH ? text : `${text.slice(0, PREVIEW_LENGTH - 1)}…`;
+const PROGRESS_UNSAFE = /[\u0000-\u0008\u000B\u000C\u000D\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
+const escapeProgressCharacter = (character: string) =>
+  `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+const safeProgressText = (text: string) => text.replace(PROGRESS_UNSAFE, escapeProgressCharacter);
+const safeProgressLine = (text: string) => safeProgressText(text).replace(/\s+/g, " ").trim();
+
+const preview = (text: string) => {
+  const safe = safeProgressText(text);
+  return safe.length <= PREVIEW_LENGTH ? safe : `${safe.slice(0, PREVIEW_LENGTH - 1)}…`;
+};
+
+/** Live output is a compact, terminal-safe tail rather than an unbounded transcript. */
+const liveOutputPreview = (text: string) => {
+  const safe = text
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return safe.length <= PREVIEW_LENGTH ? safe : `…${safe.slice(-(PREVIEW_LENGTH - 1))}`;
+};
+
+/** Maximum cadence for text-delta progress entries. One-second snapshots keep the append-only log bounded. */
+const OUTPUT_PROGRESS_THROTTLE_MS = 1_000;
 
 /** First line of the prompt, trimmed — the fallback display name for an agent. */
 function derivedLabel(prompt: string): string {
-  const line = prompt.split("\n", 1)[0].trim();
+  const line = safeProgressLine(prompt.split("\n", 1)[0]);
   return line.length <= 60 ? line || "agent" : `${line.slice(0, 59)}…`;
 }
 
@@ -495,35 +517,6 @@ interface CompletedChild {
  * `result.gate`, and this then shapes that outcome rather than running it
  * again.
  */
-/**
- * Hold a schema'd result to its schema, host-side.
- *
- * The child's own tool already validated whatever it passed, so this normally
- * agrees. It exists for the cases where nothing did: a host that ignores
- * `schema` entirely, a replayed journal entry from before the schema changed,
- * or a payload that reached us some other way. The script asked for a shape;
- * exactly one place should be able to promise it.
- */
-function applySchema(result: WorkflowSpawnResult, compiled: CompiledSchema): WorkflowSpawnResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.text ?? "");
-  } catch {
-    return {
-      ...result,
-      ok: false,
-      error: "The agent did not return structured output: its answer was not JSON.",
-    };
-  }
-  const verdict = compiled.check(parsed);
-  if (verdict === true) return result;
-  return {
-    ...result,
-    ok: false,
-    error: `The agent's answer did not match the requested schema: ${verdict}`,
-  };
-}
-
 async function applyGate(
   result: WorkflowSpawnResult,
   command: string,
@@ -825,20 +818,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         }
       }
 
-      // Compiled before anything is scheduled. A schema the runtime cannot use
-      // is a script bug, so it is fatal like a typo'd resume label — folding it
-      // into a null would surface as an agent that mysteriously returned
-      // nothing, and it costs no model call to say so here.
-      let compiledSchema: CompiledSchema | undefined;
-      if (payload.schema !== undefined) {
-        const compilation = compileJsonSchema(payload.schema);
-        if (!compilation.ok) {
-          respond(callId, false, undefined, compilation.message, true);
-          return;
-        }
-        compiledSchema = compilation.compiled;
-      }
-
       if (agentCount >= agentCap) {
         // Fatal, so parallel()/pipeline() rethrow instead of folding it into a
         // null. A cap that silently drops work is worse than no cap.
@@ -877,24 +856,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       // running, so it must not hold a concurrency slot that a live agent
       // could use. The row still appears in the tree — the run reads as the
       // same shape it had the first time, just faster.
-      // The payload's `schema` is the raw object; the key wants it serialized,
-      // so the spread is narrowed rather than passed through.
-      const keyInput: JournalKeyInput = {
-        ...payload,
-        schema: payload.schema !== undefined ? JSON.stringify(payload.schema) : undefined,
-      };
-      let replayed = replayAt(index, journalKey(keyInput));
-      // A replayed answer still has to satisfy the schema. The key covers a
-      // schema that *changed*, but not a journal that was hand-edited, and not
-      // the empty text a torn entry leaves behind — either would hand the
-      // script a null from an entry the journal claims succeeded.
-      if (replayed !== undefined && compiledSchema !== undefined) {
-        const recheck = applySchema({ ok: true, text: replayed.text ?? "" }, compiledSchema);
-        if (!recheck.ok) {
-          prefixIntact = false;
-          replayed = undefined;
-        }
-      }
+      const keyInput: JournalKeyInput = payload;
+      const replayed = replayAt(index, journalKey(keyInput));
       if (replayed !== undefined) {
         replayedCount++;
         const replayedText = replayed.text ?? "";
@@ -982,6 +945,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             attempt > 1 ? { attempt, lastAttemptReason: "user-retry" as const } : {};
 
           const startedAt = Date.now();
+          delete base.turnCount;
+          delete base.outputPreview;
+          base.activity = "starting";
           emit([{ ...base, queuedAt, startedAt, ...attemptMark }]);
 
           // Mutates `base` rather than emitting a standalone patch: every later
@@ -989,6 +955,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // without knowing they were ever corrected. Re-emitting under the
           // same `index` is what the append-only, last-write-wins progress log
           // is for — the row updates in place while the agent is still running.
+          const onSessionReady = () => {
+            base.activity = "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
           const onResolved = (info: {
             recordId?: string;
             modelName?: string;
@@ -998,11 +969,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             requestedModel?: string;
           }) => {
             if (info.recordId !== undefined) base.recordId = info.recordId;
-            if (info.modelName !== undefined) base.model = info.modelName;
-            if (info.modelId !== undefined) base.modelId = info.modelId;
-            if (info.thinking !== undefined) base.thinking = info.thinking;
-            if (info.requestedThinking !== undefined) base.requestedThinking = info.requestedThinking;
-            if (info.requestedModel !== undefined) base.requestedModel = info.requestedModel;
+            if (info.modelName !== undefined) base.model = safeProgressLine(info.modelName);
+            if (info.modelId !== undefined) base.modelId = safeProgressLine(info.modelId);
+            if (info.thinking !== undefined) base.thinking = safeProgressLine(info.thinking);
+            if (info.requestedThinking !== undefined) base.requestedThinking = safeProgressLine(info.requestedThinking);
+            if (info.requestedModel !== undefined) base.requestedModel = safeProgressLine(info.requestedModel);
             // `base.state` is still "start", so emitting after the row reached a
             // terminal state would revert it to running under last-write-wins.
             // Not reachable from this repo's host, which reports during startup
@@ -1011,6 +982,62 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             if (!inflight.has(agentId)) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
+          let latestTurnCount: number | undefined;
+          const onTurnEnd = (turnCount: number) => {
+            latestTurnCount = turnCount;
+            base.turnCount = turnCount;
+            base.activity = "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
+          const onToolActivity = (activity: { type: "start" | "end"; toolName: string }) => {
+            base.activity = activity.type === "start"
+              ? `tool: ${safeProgressLine(activity.toolName)}`
+              : "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
+          let latestOutputPreview: string | undefined;
+          let emittedOutputPreview: string | undefined;
+          let outputPreviewSource = "";
+          let previousFullTextLength = 0;
+          let outputTimer: ReturnType<typeof setTimeout> | undefined;
+          let lastOutputEmitAt = 0;
+          const emitOutputProgress = () => {
+            if (latestOutputPreview === undefined || latestOutputPreview === emittedOutputPreview) return;
+            if (!inflight.has(agentId)) return;
+            base.outputPreview = latestOutputPreview;
+            emittedOutputPreview = latestOutputPreview;
+            lastOutputEmitAt = Date.now();
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: lastOutputEmitAt }]);
+          };
+          const onTextDelta = (delta: string, fullText: string) => {
+            // Process only a bounded raw tail. Re-sanitizing the complete
+            // accumulated response on every token would become quadratic on a
+            // long-running writer, exactly where live progress matters most.
+            if (fullText.length < previousFullTextLength) outputPreviewSource = delta;
+            else outputPreviewSource += delta;
+            previousFullTextLength = fullText.length;
+            outputPreviewSource = outputPreviewSource.slice(-(PREVIEW_LENGTH * 4));
+            latestOutputPreview = liveOutputPreview(outputPreviewSource);
+            base.activity = "responding";
+            const remaining = OUTPUT_PROGRESS_THROTTLE_MS - (Date.now() - lastOutputEmitAt);
+            if (remaining <= 0) {
+              emitOutputProgress();
+              return;
+            }
+            if (outputTimer !== undefined) return;
+            outputTimer = setTimeout(() => {
+              outputTimer = undefined;
+              emitOutputProgress();
+            }, remaining);
+            outputTimer.unref?.();
+          };
+          const flushOutputProgress = () => {
+            if (outputTimer !== undefined) clearTimeout(outputTimer);
+            outputTimer = undefined;
+            emitOutputProgress();
+          };
           live.started = true;
           inflight.add(agentId);
 
@@ -1018,7 +1045,15 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
-                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved)
+                ? await resumeAgent(
+                    resumed.agentId,
+                    payload.prompt,
+                    onResolved,
+                    onSessionReady,
+                    onTurnEnd,
+                    onToolActivity,
+                    onTextDelta,
+                  )
                 : await host.spawnAgent({
                     agentId,
                     index,
@@ -1027,7 +1062,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     agentType,
                     ...(model !== undefined ? { model } : {}),
                     ...(payload.effort !== undefined ? { effort: payload.effort } : {}),
-                    ...(compiledSchema !== undefined ? { schema: compiledSchema } : {}),
                     ...(isolation !== undefined ? { isolation } : {}),
                     ...(payload.phaseIndex !== undefined ? { phaseIndex: payload.phaseIndex } : {}),
                     ...(payload.phaseTitle !== undefined ? { phaseTitle: payload.phaseTitle } : {}),
@@ -1035,6 +1069,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    onSessionReady,
+                    onTurnEnd,
+                    onToolActivity,
+                    onTextDelta,
                   });
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
@@ -1047,16 +1085,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 ...(model !== undefined ? { model } : {}),
                 ...(isolation !== undefined ? { isolation } : {}),
               });
-              // Re-checked here, not just in the child's tool: this is the one
-              // place that decides the script's value matches the schema it
-              // asked for, so a host that ignored `schema` fails loudly instead
-              // of handing the script prose. Before the gate, because a gate
-              // verifies work and there is no work to verify if the shape is
-              // wrong — and the reader should see the schema error, not a gate
-              // error standing in front of it.
-              if (compiledSchema !== undefined && result.ok) {
-                result = applySchema(result, compiledSchema);
-              }
               if (result.ok && payload.gate !== undefined && runGate !== undefined) {
                 result = await applyGate(result, payload.gate, agentId, runGate);
               }
@@ -1064,6 +1092,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           } catch (error) {
             result = { ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
+            flushOutputProgress();
             inflight.delete(agentId);
             live.started = false;
             semaphore.release();
@@ -1096,7 +1125,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             durationMs: finishedAt - startedAt,
             ...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
             ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
+            ...(result.turnCount !== undefined
+              ? { turnCount: result.turnCount }
+              : latestTurnCount !== undefined
+                ? { turnCount: latestTurnCount }
+                : {}),
           };
+          delete common.activity;
+          delete common.outputPreview;
 
           if (result.ok) {
             const text = result.text ?? "";

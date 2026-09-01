@@ -129,6 +129,7 @@ function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
     ...(tokens > 0 ? { tokens } : {}),
     ...(outputTokens > 0 ? { outputTokens } : {}),
     ...(record.toolUses > 0 ? { toolCalls: record.toolUses } : {}),
+    turnCount: record.turnCount,
     ...(cwd !== undefined ? { cwd } : {}),
   };
 
@@ -136,12 +137,7 @@ function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
     return {
       ...common,
       ok: true,
-      // The schema'd payload when there is one: `result` is prose, and for a
-      // worktree child it has had the branch note appended, so it would not
-      // parse. A child asked for a schema that produced none never reaches
-      // here — `runAgent` reports that through `failure`.
-      text: record.structuredJson ?? record.result ?? "",
-      ...(record.structuredRetried ? { structuredRetried: true } : {}),
+      text: record.result ?? "",
     };
   }
   // "stopped" is someone reaching in and stopping this child — /agents, the
@@ -161,6 +157,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
   const { pi, ctx, manager } = deps;
   /** Runtime agent id → the manager record it spawned. Never pruned mid-run. */
   const records = new Map<string, string>();
+  /** Settled records retained by this run so resume can report before awaiting. */
+  const settledRecords = new Map<string, AgentRecord>();
   /**
    * scopeModels warnings already toasted, so a fan-out that pins one
    * out-of-scope agent file raises one notification rather than one per child.
@@ -326,8 +324,14 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             },
             // Fires once the child's session exists, which is where the model
             // and the clamped thinking level first become knowable.
-            onSessionCreated: () => { sessionReady = true; reportResolved(); },
-            ...(request.schema !== undefined ? { structuredOutput: request.schema } : {}),
+            onSessionCreated: () => {
+              sessionReady = true;
+              request.onSessionReady?.();
+              reportResolved();
+            },
+            onTurnEnd: request.onTurnEnd,
+            onToolActivity: request.onToolActivity,
+            onTextDelta: request.onTextDelta,
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
             ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),
@@ -345,6 +349,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             reportResolved();
           },
         );
+        settledRecords.set(request.agentId, record);
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child
@@ -361,26 +366,29 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id !== undefined) manager.abort(id);
     },
 
-    async resumeAgent(agentId, prompt, onResolved) {
+    async resumeAgent(agentId, prompt, onResolved, onSessionReady, onTurnEnd, onToolActivity, onTextDelta) {
       const id = records.get(agentId);
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
-      const record = await manager.resume(id, prompt, deps.signal);
+      const existing = settledRecords.get(agentId);
+      // The resumed row is rebuilt from scratch. Report the retained identity
+      // before awaiting its next turn so status, model, output, and turns remain
+      // live throughout the continuation rather than appearing only at settle.
+      // The manager remains authoritative for session expiry; test/RPC adapters
+      // may not expose a session object even when their resume path is valid.
+      onResolved?.({ recordId: id });
+      const info = resolvedInfo(existing);
+      if (info !== undefined) onResolved?.(info);
+      if (existing?.session !== undefined) onSessionReady?.();
+      const record = await manager.resume(id, prompt, deps.signal, { onTurnEnd, onToolActivity, onTextDelta });
       if (record === undefined) {
         return {
           ok: false,
           error: `Agent ${id} has no session left to resume — records are dropped ten minutes after they finish.`,
         };
       }
-      // The resumed row is built from scratch, so it has to be told the same
-      // thing the first one was — the child's session already exists, so this is
-      // simply read back rather than waited for. The id goes first for the same
-      // reason it does on the spawn path: it is knowable even when the rest is
-      // not.
-      onResolved?.({ recordId: id });
-      const info = resolvedInfo(record);
-      if (info !== undefined) onResolved?.(info);
+      settledRecords.set(agentId, record);
       return toSpawnResult(record);
     },
 

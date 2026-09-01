@@ -174,6 +174,29 @@ describe("cross-extension RPC", () => {
       expect(wrongReply).not.toHaveBeenCalled();
     });
 
+    it("rejects legacy structuredOutput before session/model resolution or manager calls", async () => {
+      const getCtx = vi.fn(() => ctx);
+      deps = { ...deps, getCtx };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s7", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s7", type: "general-purpose", prompt: "x",
+        options: { structuredOutput: { type: "object" }, model: "missing/model" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error:
+          "options.structuredOutput is no longer supported; workflow children return text/Markdown. "
+          + "Migrate structured results to line-oriented text or Markdown.",
+      });
+      expect(getCtx).not.toHaveBeenCalled();
+      expect(manager.spawn).not.toHaveBeenCalled();
+      expect(manager.awaitStartup).not.toHaveBeenCalled();
+    });
+
     it("unsub stops responding to spawns", async () => {
       const { unsubSpawn } = registerRpcHandlers(deps);
       unsubSpawn();

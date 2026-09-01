@@ -235,6 +235,17 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(textOf(resumed)).not.toContain("Unknown or disabled agent type");
   });
 
+  it("rejects legacy structuredOutput through the public manager registry", () => {
+    boot();
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+
+    expect(() => registry.spawn({}, ctx(), "general-purpose", "do it", {
+      description: "rpc",
+      structuredOutput: { type: "object" },
+    })).toThrow(/options\.structuredOutput is no longer supported/);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
   it("applies the same contract to cross-extension spawns", async () => {
     // The registry entry is what RPC callers reach; it must not be a way around
     // the setting. A throw here becomes an error envelope at the RPC boundary.

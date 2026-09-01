@@ -16,6 +16,7 @@ import {
   createWorkflowTask,
   failWorkflowTask,
   pauseWorkflowTask,
+  resolveResumeTarget,
   resumeWorkflowTask,
   updateWorkflowProgressBatch,
   type WorkflowTask,
@@ -90,6 +91,20 @@ describe("pausing a run", () => {
     expect(resumeWorkflowTask(task, 3_000)).toBe(true);
     expect(resumeWorkflowTask(task, 4_000)).toBe(false);
     expect(control.resume).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolving a resume target", () => {
+  it.each(["running", "paused"] as const)("rejects an active %s run", status => {
+    const { task } = runningTask();
+    task.status = status;
+    task.journalPath = "/tmp/run.workflow.jsonl";
+    task.scriptPath = "/tmp/run.workflow.js";
+
+    expect(resolveResumeTarget(task.id, new Map([[task.id, task]]))).toEqual({
+      ok: false,
+      message: `Workflow "${task.id}" is still ${status}. Stop it from /agents → Workflows before resuming it.`,
+    });
   });
 });
 

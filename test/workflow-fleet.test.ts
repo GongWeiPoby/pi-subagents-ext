@@ -19,6 +19,9 @@ describe("workflowFleetPhases", () => {
         startedAt: 1_200,
         lastProgressAt: 2_000,
         tokens: 512,
+        activity: "tool: read",
+        outputPreview: "partial response",
+        turnCount: 1,
         phaseIndex: 0,
         phaseTitle: "Discover",
       },
@@ -35,6 +38,7 @@ describe("workflowFleetPhases", () => {
         startedAt: 1_200,
         lastProgressAt: 3_400,
         tokens: 1_024,
+        turnCount: 3,
         phaseIndex: 0,
         phaseTitle: "Discover",
       },
@@ -51,6 +55,7 @@ describe("workflowFleetPhases", () => {
         lastProgressAt: 4_000,
         phaseIndex: 1,
         phaseTitle: "Verify",
+        turnCount: 2,
         error: "verification failed",
       },
     ];
@@ -74,6 +79,7 @@ describe("workflowFleetPhases", () => {
       startedAt: 1_200,
       completedAt: 3_400,
       tokens: 1_024,
+      turnCount: 3,
     });
     expect(phases[1].agents[0]).toMatchObject({
       label: "verify finding",
@@ -81,6 +87,7 @@ describe("workflowFleetPhases", () => {
       recordId: "agent-record-1",
       startedAt: 2_500,
       completedAt: 4_000,
+      turnCount: 2,
     });
   });
 
@@ -92,6 +99,9 @@ describe("workflowFleetPhases", () => {
       state: "progress",
       startedAt: 2_000,
       lastProgressAt: 4_000,
+      activity: "waiting for model",
+      outputPreview: "partial response",
+      turnCount: 2,
     }];
 
     const withEndTime = workflowFleetPhases(progress, undefined, false, 7_000)[0].agents[0];
@@ -99,6 +109,9 @@ describe("workflowFleetPhases", () => {
       state: "interrupted",
       startedAt: 2_000,
       completedAt: 7_000,
+      activity: "waiting for model",
+      outputPreview: "partial response",
+      turnCount: 2,
     });
 
     const withoutEndTime = workflowFleetPhases(progress, undefined, false)[0].agents[0];

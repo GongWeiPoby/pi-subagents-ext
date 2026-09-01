@@ -164,15 +164,6 @@ function flushProgress() {
  * ------------------------------------------------------------------ */
 
 let realmObjectPrototype = null;
-/**
- * The realm's own \`JSON.parse\`.
- *
- * Module-scope, not local to main(), because \`agent({ schema })\` parses its
- * result here — outside main's closure — and the object has to carry the
- * *script's* Object.prototype, not the worker's, or \`instanceof Object\` fails
- * inside the script it was handed to.
- */
-let realmParse = null;
 
 /**
  * The top-level script's scope.
@@ -301,6 +292,49 @@ function optionalText(value, what) {
   return requireText(value, what);
 }
 
+function isUnsafeDisplayCode(code) {
+  return (code >= 0x00 && code <= 0x08)
+    || (code >= 0x0b && code <= 0x0d)
+    || (code >= 0x0e && code <= 0x1f)
+    || (code >= 0x7f && code <= 0x9f)
+    || code === 0x061c || code === 0x200e || code === 0x200f
+    || (code >= 0x2028 && code <= 0x202e)
+    || (code >= 0x2066 && code <= 0x2069);
+}
+
+function hasUnsafeDisplay(text) {
+  for (let i = 0; i < text.length; i++) {
+    if (isUnsafeDisplayCode(text.charCodeAt(i))) return true;
+  }
+  return false;
+}
+
+function requireDisplayText(value, what) {
+  const text = requireText(value, what);
+  if (hasUnsafeDisplay(text)) {
+    throw new Error(what + " contains unsafe terminal control characters.");
+  }
+  return text;
+}
+
+function optionalDisplayText(value, what) {
+  if (value === undefined || value === null) return undefined;
+  return requireDisplayText(value, what);
+}
+
+function safeDisplayText(value) {
+  const text = String(value);
+  let safe = "";
+  for (let i = 0; i < text.length; i++) {
+    const character = text[i];
+    const code = character.charCodeAt(0);
+    safe += isUnsafeDisplayCode(code)
+      ? "\\\\u" + code.toString(16).padStart(4, "0")
+      : character;
+  }
+  return safe;
+}
+
 /**
  * Reasoning effort a child may be spawned under — pi's \`ThinkingLevel\`.
  *
@@ -314,12 +348,8 @@ const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 /**
  * Every option \`agent()\` understands.
  *
- * Checked rather than ignored, because the alternative is the worst failure a
- * ported script can have. Claude Code's \`agent()\` also takes \`schema\`, and its
- * own canonical example uses it; quietly dropping it hands the script the
- * agent's raw text where it expected a validated object, and the run then dies
- * several lines later reading a field off a string. A typo behaves the same
- * way. Naming the option costs one error message and no model calls.
+ * Checked rather than ignored, because a typo must fail at the call that wrote
+ * it instead of surfacing later as an agent that ran under the wrong contract.
  */
 const AGENT_OPTIONS = [
   "label",
@@ -330,7 +360,6 @@ const AGENT_OPTIONS = [
   "gate",
   "resume",
   "effort",
-  "schema",
 ];
 
 function ownAgentOption(options, key) {
@@ -404,7 +433,7 @@ function definePhaseIn(scope, title) {
 }
 
 function phaseIn(scope, title) {
-  const text = requireText(title, "phase(title)");
+  const text = requireDisplayText(title, "phase(title)");
   scope.ambientPhaseIndex = definePhaseIn(scope, text);
   scope.ambientPhaseTitle = scopedTitle(scope, text);
 }
@@ -431,14 +460,14 @@ function logPrefix(scope) {
 }
 
 function logIn(scope, message) {
-  emit({ type: "workflow_log", message: logPrefix(scope) + describe(message) });
+  emit({ type: "workflow_log", message: safeDisplayText(logPrefix(scope) + describe(message)) });
 }
 
 function makeConsole(scope) {
   const write = function () {
     const parts = [];
     for (let i = 0; i < arguments.length; i++) parts.push(describe(arguments[i]));
-    emit({ type: "workflow_log", message: logPrefix(scope) + parts.join(" ") });
+    emit({ type: "workflow_log", message: safeDisplayText(logPrefix(scope) + parts.join(" ")) });
   };
   return { log: write, info: write, warn: write, error: write, debug: write };
 }
@@ -456,6 +485,10 @@ async function agentIn(scope, prompt, opts) {
         "agent(prompt, opts) expects opts to be a plain object with the workflow realm's Object.prototype or a null prototype."
       );
     }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(options, "schema")) {
+    throw new Error("agent() opts.schema is no longer supported; workflow children return text/Markdown.");
   }
 
   for (let i = 0; i < AGENT_OPTIONS.length; i++) {
@@ -478,8 +511,8 @@ async function agentIn(scope, prompt, opts) {
     );
   }
 
-  const label = optionalText(ownAgentOption(options, "label"), "agent() opts.label");
-  const phaseName = optionalText(ownAgentOption(options, "phase"), "agent() opts.phase");
+  const label = optionalDisplayText(ownAgentOption(options, "label"), "agent() opts.label");
+  const phaseName = optionalDisplayText(ownAgentOption(options, "phase"), "agent() opts.phase");
   const model = optionalText(ownAgentOption(options, "model"), "agent() opts.model");
   const agentType = optionalText(ownAgentOption(options, "agentType"), "agent() opts.agentType");
   const isolation = optionalText(ownAgentOption(options, "isolation"), "agent() opts.isolation");
@@ -489,16 +522,6 @@ async function agentIn(scope, prompt, opts) {
   const gate = optionalText(ownAgentOption(options, "gate"), "agent() opts.gate");
   const resume = optionalText(ownAgentOption(options, "resume"), "agent() opts.resume");
   const effort = optionalText(ownAgentOption(options, "effort"), "agent() opts.effort");
-  const schema = ownAgentOption(options, "schema");
-  if (schema !== undefined) {
-    if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
-      throw new Error("agent() opts.schema must be a JSON Schema object.");
-    }
-    // Structured clone would happily carry a Map or a cycle that neither the
-    // journal key nor the tool's parameters can survive. Same check the return
-    // value gets.
-    checkBoundary(schema, "agent() opts.schema");
-  }
   if (effort !== undefined && EFFORT_LEVELS.indexOf(effort) === -1) {
     throw new Error("agent() opts.effort must be one of: " + EFFORT_LEVELS.join(", ") + ".");
   }
@@ -528,12 +551,6 @@ async function agentIn(scope, prompt, opts) {
         "agent() opts.resume and opts.effort are mutually exclusive: a resumed agent keeps the reasoning effort it was started with."
       );
     }
-    if (schema !== undefined) {
-      throw new Error(
-        "agent() opts.resume and opts.schema are mutually exclusive: a resumed child re-prompts the session it "
-          + "already had, whose tool set was fixed when it started — it has no StructuredOutput tool to answer through."
-      );
-    }
     if (gate !== undefined) {
       throw new Error("agent() opts.gate cannot be combined with opts.resume.");
     }
@@ -556,19 +573,9 @@ async function agentIn(scope, prompt, opts) {
     gate: gate,
     resume: resume,
     effort: effort,
-    schema: schema,
   });
   if (result === undefined || result === null) return null;
-  if (schema === undefined) return result;
-  // Parsed with the realm's own JSON.parse so the script gets an object whose
-  // prototype is its own — \`x instanceof Object\` and \`x.list instanceof Array\`
-  // both hold, and it survives assertBoundary if the script returns it.
-  try {
-    return realmParse(result);
-  } catch (error) {
-    logIn(scope, "agent(): the host returned a structured result that is not JSON");
-    return null;
-  }
+  return result;
 }
 
 /**
@@ -767,7 +774,7 @@ async function main() {
   realmObjectPrototype = vm.runInContext("Object.prototype", context);
   realmNewArray = vm.runInContext("(function () { return []; })", context);
   realmPush = vm.runInContext("(function (array, value) { array.push(value); })", context);
-  realmParse = vm.runInContext("JSON.parse", context);
+  const realmParse = vm.runInContext("JSON.parse", context);
   realmContext = context;
 
   // meta and args are materialised *inside* the realm rather than injected, so

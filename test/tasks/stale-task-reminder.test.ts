@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../../src/subagent-contract.js";
 import initExtension from "../../src/tasks/index.js";
 
 beforeEach(() => { process.env.PI_TASKS = "off"; });
@@ -78,7 +79,10 @@ function mockPi() {
 function installPingResponder(pi: ReturnType<typeof mockPi>["pi"]) {
   return pi.events.on("subagents:rpc:ping", (data: unknown) => {
     const { requestId } = data as { requestId: string };
-    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, { success: true, data: { version: 2 } });
+    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, {
+      success: true,
+      data: { version: SUBAGENTS_RPC_PROTOCOL_VERSION },
+    });
   });
 }
 

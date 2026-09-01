@@ -1,6 +1,6 @@
 # @tintinweb/pi-subagents
 
-A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents, structured tasks, adaptive Markdown Playbooks, and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions, track mutable work with persistent dependency-aware tasks, and let the main model adapt reusable `WORKFLOW.md` guidance into a validated per-run plan. Plans compile to temporary JavaScript for the existing deterministic `SubagentWorkflow` runtime; JavaScript is not the reusable Playbook source.
+A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents, structured tasks, adaptive Markdown Playbooks, and workflow orchestration** to pi. Spawn specialized agents in isolated sessions, track mutable work with persistent dependency-aware tasks, and let the main coordinator adapt reusable `WORKFLOW.md` guidance with ordinary tools, skills, and `Agent` calls. Deterministic JavaScript remains available separately through `SubagentWorkflow` when the user explicitly asks for scripted loops, pipelines, retries, gates, or named composition.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -14,16 +14,16 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, and optional subagent cascade. **[Task guide](docs/tasks.md)**
-- **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator prompts with YAML metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` discovers guidance; `WorkflowPlan` validates an AI-selected DAG, presents a human-readable behavior summary for approval, returns a one-use opaque `planRef`, and keeps generated execution JavaScript internal; `WorkflowPlaybookSave` promotes a generalized result to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
+- **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator guidance with frontmatter metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` lists and reads the guidance; the main coordinator adapts it to current evidence and dynamically chooses ordinary tools, skills, and one or more `Agent` calls. Reading Markdown does not launch work or require every instruction to run. `WorkflowPlaybookSave` promotes generalized Markdown to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
-- **Workflow execution trees** — each workflow is a controller node in the above-editor Agents widget and in FleetView, with phase and child-agent rows. Child agents use the same conversation viewer as ordinary agents in FleetView, while pause/skip/retry/stop remain workflow-owned.
-- **Live widget UI** — persistent above-editor widget with workflow → phase → child hierarchy ahead of ordinary agents, animated spinners, live tool activity, token counts, and colored status icons, all within one 12-line budget. Configurable via `/agents → Settings → Widget`: `all` (every top-level agent plus workflows), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result, but still shows workflows), or `off` (hides both)
+- **Workflow execution trees** — each workflow is a controller node in the above-editor Agents widget and in FleetView, with phase and child-agent rows. Live children reuse ordinary-agent stat and activity wording, show bounded streaming output and `↻N` turns, and expose the same conversation viewer; pause/skip/retry/stop remain workflow-owned. Active workflow totals say `agents so far` because later control flow can discover more children.
+- **Live widget UI** — persistent above-editor widget with workflow → phase → child hierarchy ahead of ordinary agents, animated spinners, live tool/activity output, turn and token counts, and colored status icons, all within one 12-line budget. A live workflow child uses the same two-line header plus `⎿` activity/output shape as an ordinary agent and therefore consumes two budget rows; terminal children consume one. Configurable via `/agents → Settings → Widget`: `all` (every top-level agent plus workflows), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result, but still shows workflows), or `off` (hides both)
 - **FleetView** — Claude Code-style navigable list of `main`, workflow controllers, workflow phases/children, and ordinary subagents rendered below the editor. Workflows start collapsed; `→` expands a workflow into its phase and child-agent tree, `←` collapses it, `Enter` opens the workflow controller or the selected child conversation. Workflow children reuse the ordinary conversation viewer but remain owned by the workflow for stop/skip/retry, notifications, mentions, and concurrency. Finished entries linger briefly. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too. Assistant text renders as Markdown; `m` cycles that between off, assistant-only and everything (see [Viewer markdown](#persistent-settings))
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
 - **Agent mentions** — subagents are first-class: type `@explore also check the RPC path` at the prompt and it goes to that agent instead of the main model, without a word of it entering the chat. One syntax covers the whole lifecycle — message it while it runs, resume it once it has finished, reopen its session from disk long after that, or start it if it never ran. Mentioning an agent that isn't running spawns it through an off-screen clone of the conversation, so it gets Claude Code's context-written prompt and a real `Agent` tool call without a word of it reaching the chat; `direct` mode starts it here from your text instead, with no model call at all. The orchestrator can `name` an agent so you address it as `@auth-audit`, and handles work in `steer_subagent`/`get_subagent_result` too. `@` completes live agents, resumable ones, and startable types alongside pi's file completion; `@main` forces text back to the main model. Toggle via `/agents → Settings → Agent mentions`
-- **Scripted workflows** — a `SubagentWorkflow` tool that runs a deterministic JavaScript script orchestrating many subagents: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()` and `args`, with a pure-literal `meta` block declaring the phases. `pipeline()` has no barrier between stages, so one item can be in a later stage while another is still in the first — unlike `parallel()`, which idles every fast agent until the slowest finishes. Runs in the background with a live card, inspectable via `/agents → Workflows` or by selecting the run in FleetView. `agent()` also takes `gate: "npm test"` to verify a child by running a command (inside its worktree, when isolated) rather than asking another model, and `resume: "<label>"` to continue a child instead of re-paying its context. Scripts run in a `node:vm` sandbox on a worker thread where `Date.now()`, `Math.random()` and `eval` throw. On by default, but it stands down for company: if another extension already provides a `Workflow` or `SubagentWorkflow` tool, this one warns and disables itself for the session rather than offering the model two orchestrators. Pin it either way with `"workflowsEnabled"` in `subagents.json` or `/agents → Settings → Workflows`. A script written for Claude Code's `Workflow` tool runs here unchanged: same globals, `schema` returns a validated object exactly as it does there, `budget` is present and always reports no token target (pi has no such directive) so its `budget.total`-guarded patterns still take the branch they were written for, and nested `workflow()` composes saved workflows one level deep. **[Full guide](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md)**
+- **Scripted workflows** — a `SubagentWorkflow` tool for user-explicit deterministic JavaScript orchestration: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, and `budget`, with a pure-literal `meta` block declaring phases. Trusted headless automation may also compose one level of saved named workflows; interactive approval rejects nested behavior it cannot preview. `pipeline()` has no barrier between stages; `parallel()` waits for all thunks. Runs continue in the background with a live card, fixed-height direct approval dialog, `/agents → Workflows` inspector, FleetView tree, ordinary child activity/live output/turns, journal resume, gates, worktree isolation, budgets, and pause/skip/retry/stop controls. Every child returns text/Markdown; scripts may deterministically return JSON-shaped objects, statuses, or paths. Legacy `agent({ schema })` calls are rejected with an explicit migration error. On by default, but it stands down if another extension already provides `Workflow` or `SubagentWorkflow`; pin it with `workflowsEnabled`. **[Full guide](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md)**
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes detached by default and notifies you on completion, just like a fresh spawn; pass `run_in_background: false` to block and get the result inline
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
@@ -52,7 +52,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **0.84.0 or newer**: the [`SubagentWorkflow`](#subagentworkflow) tool builds on `constrainedSampling` (pi 0.82.0) and pi-tui's `stripTerminalSequences` (0.84.0). The `peerDependencies` range declares it, so npm flags an older pi at install time.
+Requires pi **0.84.0 or newer**: the workflow UI uses pi-tui's `stripTerminalSequences` from 0.84.0. The `peerDependencies` range declares the floor, so npm flags an older pi at install time.
 
 Task tracking is bundled. If `@tintinweb/pi-tasks` is already installed separately, remove it before loading this package to avoid duplicate task tools, `/tasks` commands, widgets, and lifecycle listeners:
 
@@ -111,16 +111,14 @@ mkdir -p .pi/workflows/code-review
 cp -R examples/playbooks/code-review/. .pi/workflows/code-review/
 ```
 
-For a substantive review request, the Planner can:
+For a substantive review request, the main coordinator can:
 
-1. Call `WorkflowPlaybook` to discover and read `code-review` guidance.
-2. Select only the reviewers and verification nodes warranted by the actual change.
-3. Call `WorkflowPlan` to validate dependencies, confidence, omissions, and approval state.
-4. Pass the one-use `planRef` returned by `WorkflowPlan` to `SubagentWorkflow`; the generated JavaScript stays internal to the session.
+1. Call `WorkflowPlaybook` to list or read `code-review` guidance and prompt resources.
+2. Inspect the target and decide which surfaces are actually relevant.
+3. Dynamically choose one or several `Agent` calls, ordinary tools, and skills based on the evidence.
+4. Verify important findings and synthesize the result in the main context.
 
-`WORKFLOW.md` remains the maintained source. The generated JavaScript belongs only to the run and is never saved into the reusable Playbook directory. When a successful shape is worth reusing, ask the model to promote it: `WorkflowPlaybookSave` first generalizes task-specific literals into documented inputs, shows the project/global destination, invocation example, and complete proposed files, then writes only after direct confirmation. Updating an existing Playbook requires the revision returned by `WorkflowPlaybook read`.
-
-`WorkflowPlaybook`, `WorkflowPlaybookSave`, and `WorkflowPlan` are registered with `SubagentWorkflow` whenever workflows are enabled. Set `workflowsEnabled: false` to remove all four tool contracts from the model context; regression tests bound the planning/promotion tool schemas and guidelines.
+`WorkflowPlaybook` reading is guidance, not execution: the model adapts the Markdown and may use only the parts relevant to the request. `WorkflowPlaybookSave` promotes generalized Markdown and optional prompt resources after a direct preview confirmation. Use `SubagentWorkflow` separately only when the user explicitly requests deterministic JavaScript loops, parallel/pipeline control flow, retries, or gates.
 
 ### Scheduling
 
@@ -160,10 +158,11 @@ The extension renders a persistent Agents widget above the editor. Workflows app
 
 ```text
 ● Agents
-├─ ⠹ audit-src  running · 2/4 agents · 8.2s
+├─ ⠹ audit-src  running · 2/4 agents so far · 8.2s
 │  ├─ ⠹ phase Inspect  running · 1/2
-│  │  ├─ ✓ Explore  inventory routes done · 3.1s
-│  │  └─ ⠹ Explore  inspect auth running · 5.0s
+│  │  ├─ ✓ Explore  inventory routes done · ↻2 · 3 tool uses · 8.1k token · 3.1s
+│  │  └─ ⠹ Explore  inspect auth · running · ↻3 · 2 tool uses · 12.4k token · 5.0s
+│  │        ⎿  editing 2 files…
 │  └─ ○ phase Verify  not-started · 0/0
 ├─ ⠹ Agent  Refactor auth module · ↻5≤30 · 5 tool uses · 33.8k token (62%) · 12.3s
 │    ⎿  editing 2 files…
@@ -171,7 +170,7 @@ The extension renders a persistent Agents widget above the editor. Workflows app
 └─ hidden: 2 workflow nodes, 1 agent
 ```
 
-Running workflows and agents use the shared braille animation at 80 ms; paused workflows use the stable `‖` marker and their elapsed time excludes completed pauses. Terminal workflows linger for four seconds. Each workflow root is followed immediately by its own phases and children; under pressure, descendant rows collapse before a later active workflow root is hidden. Workflow trees take priority, then running top-level agents, the queued summary, and finished agents. The heading, body, and explicit `hidden: N workflow node(s), M agent(s)` line share one 12-line cap.
+Running workflows and agents use the shared braille animation at 80 ms; paused workflows use the stable `‖` marker and their elapsed time excludes completed pauses. Workflow runs allow 2 simultaneous children by default. While a workflow is running or paused, controller totals say `agents so far` because deterministic loops and branches can discover later children; settled totals are final and omit the suffix. Live workflow children reuse ordinary-agent stat ordering and activity wording, including positive-only `↻N` turns, current tools, bounded streaming output, context/compaction data when a live record exists, and the same two-line `⎿` shape. Terminal workflows linger for four seconds. The fixed-height direct workflow approval dialog keeps `Cancel`/`Approve` visible while the current summary or technical details pane scrolls; `d` toggles between them. Workflow controls remain `p` pause/resume, `s` skip, `r` retry, and `x` stop. Each workflow root is followed immediately by its own phases and children; under pressure, descendant rows collapse before a later active workflow root is hidden. Workflow trees take priority, then running top-level agents, the queued summary, and finished agents. The heading, body, and explicit `hidden: N workflow node(s), M agent(s)` line share one 12-line cap.
 
 The token field is annotated with two optional signals inside parens:
 - **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
@@ -185,7 +184,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
   esc to interrupt · ← for agents · ↓ to manage
 
   ● main
-  ○ workflow         audit-src                    12/40 agents · 32s · ↓ 26.4k tokens
+  ○ workflow         audit-src             12/40 agents so far · 32s · ↓ 26.4k tokens
   ○ general-purpose  Sleep then report 1                                11s · ↓ 13.1k tokens
   ○ general-purpose  Sleep then report 2                                11s · ↓ 13.1k tokens
                                                                                    ↓ 3 more
@@ -547,7 +546,7 @@ Promote a generalized adaptive workflow to a reusable Markdown Playbook. The too
 | `body` | Markdown string | yes | Generalized coordinator guidance |
 | `example` | string | yes | Reusable natural-language invocation example |
 | `domains` | string[] | no | Searchable domains |
-| `approval` | `adaptive` / `required` / `none` | no | Advisory planning metadata; it never changes mandatory `WorkflowPlan` confirmation |
+| `approval` | `adaptive` / `required` / `none` | no | Advisory metadata for Playbook discovery and authoring; it does not authorize execution or change the direct workflow approval flow |
 | `sideEffects` | string | no | Human-readable impact classification |
 | `inputs` | object | no | Generalized input documentation |
 | `prompts` | object | no | Name-to-Markdown map written as `prompts/<name>.md` |
@@ -556,21 +555,9 @@ Promote a generalized adaptive workflow to a reusable Markdown Playbook. The too
 
 Project saves require a trusted project. Existing names and stale revisions are rejected before confirmation. Read with `source: "project"` or `source: "global"` before overwriting a shadowed name. An owner-only per-target lock under the agent directory, temporary-directory read-back, whole-directory replacement, reader fallback to the last validated backup, and interrupted-write recovery prevent concurrent or partial updates.
 
-### `WorkflowPlan`
+### Adaptive workflow selection
 
-Validate an adaptive structured DAG and compile temporary JavaScript for `SubagentWorkflow`. The plan records objective, inferred personas, confidence/evidence, selected nodes, dependencies, material omissions, side effects, and approvals.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `objective` | string | yes | Outcome this run must achieve |
-| `playbook` | string | no | Playbook that informed the plan |
-| `personas` | object[] | no | Inferred user contexts/roles |
-| `confidence` | number `0..1` | no | Planner interpretation confidence |
-| `evidence` | string[] | no | Facts supporting the interpretation |
-| `nodes` | object[] | yes | Work nodes with prompts, agents, options, and dependencies |
-| `omitted` | object[] | no | Material capabilities omitted with reasons |
-
-The tool rejects duplicate/unsafe IDs, unknown/self dependencies, cycles, invalid confidence, excessive prompt volume, unsupported options, and worktree nodes when project isolation is disabled. Every adaptive Plan is shown for direct confirmation before compilation because selected agents may have broad tools; model-supplied approval/effect metadata is descriptive, not the authorization boundary. The approval view places a compact exact-dependency map near the top, before the full node details: `START` roots, prerequisite-result handoffs, joins, `END` sinks, and a node legend with title, capability, and text/structured output contracts; it also notes that failure or skip can yield `null` while final results retain each node output. The full behavior summary remains below it, including each node's task prompt, model, effort, dependencies, isolation, gate, side effects, and structured-output requirement. Without a UI or approval, no script is produced. A ready result contains an inspectable YAML summary and a one-use opaque `planRef`; pass that reference to `SubagentWorkflow` rather than copying generated source.
+After reading a Playbook, the main coordinator inspects the current target and chooses a proportionate mix of ordinary tools, skills, and `Agent` calls. The model may use one reviewer or several independent perspectives, verify findings, and synthesize the result in the main context. The Playbook is guidance, not an executable plan: it does not impose a DAG, dependency closure, generated JavaScript handoff, or fixed set of calls. Use `SubagentWorkflow` only when the user explicitly requests deterministic JavaScript orchestration.
 
 ### `SubagentWorkflow`
 
@@ -578,7 +565,6 @@ Run a deterministic script that orchestrates many subagents. Returns a task id i
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `planRef` | string | no | One-use opaque reference from an approved `WorkflowPlan`; cannot be combined with `script`, `scriptPath`, `name`, `args`, or `resumeFromRunId` |
 | `script` | string | no | The workflow source. Must begin with `export const meta = { name, description }` |
 | `scriptPath` | string | no | Path to a script file; mutually exclusive with `script` and `name` |
 | `name` | string | no | A saved workflow — `<name>.js` in `.pi/workflows/`, `.agents/workflows/` or `<agent dir>/workflows/`, carrying an `export const meta` declaration; mutually exclusive with `script` and `scriptPath` |
@@ -586,11 +572,13 @@ Run a deterministic script that orchestrates many subagents. Returns a task id i
 | `resumeFromRunId` | string | no | Replay an earlier run in this session — its unchanged leading `agent()` calls return their recorded results instead of spawning |
 | `title` / `description` | string | no | Accepted and ignored, as in Claude Code — a workflow is named by its `meta` block |
 
-Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. `planRef` is the one-use exact Plan handoff and cannot be combined with a direct source, `args`, or `resumeFromRunId`. A valid `planRef` executes directly because it is one-use and bound to the internally retained script-and-arguments digest.
+Use exactly one of `script`, `scriptPath`, or `name`; a resume may omit all three and reuse the prior run's path. Direct UI invocations and resumes use the current fixed-height approval dialog; headless automation proceeds under the caller's trust boundary.
 
-Every non-`planRef` invocation uses the direct policy. When `ctx.hasUI` is true, the tool always previews the selected source's behavior summary and arguments for confirmation, including exact resumes; an ASCII-only static flow map appears near the top before the parameters and per-agent details, showing execution/control order, parallel branches, overlapping pipeline stages, nested workflow sites, and each agent's text or structured output contract. Its arrows are never data-dependency claims: handoffs are script-defined and reported as not statically proven. It also states that runtime fan-out/control flow may differ. The tool refuses UI-confirmed direct scripts when an injected global (`agent`, `parallel`, `pipeline`, `phase`, or `workflow`) is aliased, invoked through `.call`/`.apply`, hidden in a computed/conditional/sequence callee, or shadowed by a local declaration or parameter; rewrite these as direct identifier calls and rename local shadows. It also refuses agent calls whose arguments or option object use spreads, computed keys, methods, shorthand properties, a non-object options value, or dynamic behavior fields, because those forms can hide gates, isolation, resumes, or other previewed behavior. An explicit dynamic schema such as `schema: REPORT_SCHEMA` remains supported and is shown as configured with its expression. User prose, workflow names, and risk keywords never imply authorization. When `ctx.hasUI` is false, these direct-preview completeness checks are skipped because the automation caller is the trust boundary; exact-approved `planRef` runs are unaffected. Direct inline/path scripts that reference the injected `workflow` binding remain refused because nested behavior cannot be approved from the parent summary; detection uses the Babel AST, covers optional/indirect/aliased references, and fails closed on parse errors. Saved named workflows may compose nested workflows through direct `workflow(...)` calls but remain UI-confirmed or headless-allowed.
+`agent()` returns text/Markdown from every child. The script may parse that text deterministically and return a JSON-shaped object, array, status, or path. The option `schema` is rejected before the child starts with an explicit migration error; request line-oriented text or Markdown instead.
 
-The explicit `--subagents-workflow-file=` CLI startup path remains available for automation. Each invocation's script is persisted to the session directory and its path returned, so iterating means editing that file and re-running rather than resending the source. A saved workflow reports its own file instead, so the same loop works on it — project `.pi/workflows/` shadows a same-named global one. Those directories are ordinary folders that may hold other scripts, so only files carrying the `export const meta = { name, description }` declaration are listed or resolved; naming anything else reports that it is not a workflow rather than running it. The check is a regex over the source — nothing in the file is executed to make it, and even a real parse evaluates only the `meta` object literal, in an empty `node:vm` context with a 100ms bound.
+Every direct invocation uses the current approval policy. When `ctx.hasUI` is true, the tool previews the selected source's exact statically disclosed behavior and arguments for confirmation, including resumes. A bordered, larger fixed-height custom dialog keeps `Cancel`/`Approve` visible; `d` switches between the human summary and the independently scrollable complete technical details. The summary shows the goal, static call-site tree, runtime branch uncertainty, labels, and gate/isolation impact. Static `parallel`/`pipeline` structure remains visible, but arbitrary JavaScript branches may skip or reorder call sites, so the preview does not promise a fixed runtime sequence. Long and CJK lines are display-width bounded. The tool refuses UI-confirmed scripts when injected globals are aliased or indirect, local declarations shadow them, or arguments/options hide behavior through spreads, computed or shorthand keys, methods, non-object options, or dynamic behavior fields. Rewrite these as direct calls with literal option objects. User prose, workflow names, and risk keywords never imply authorization. When `ctx.hasUI` is false, direct-preview completeness checks are skipped because the automation caller is the trust boundary. Saved named workflows may compose nested workflows through direct `workflow(...)` calls but remain subject to the same policy.
+
+The explicit `--subagents-workflow-file=` CLI startup path remains available as a trusted, user-selected automation boundary; it starts the named script without opening the tool approval dialog. Each invocation's script is persisted to the session directory and its path returned, so iterating means editing that file and re-running rather than resending the source. A saved workflow reports its own file instead, so the same loop works on it — project `.pi/workflows/` shadows a same-named global one. Those directories are ordinary folders that may hold other scripts, so only files carrying the `export const meta = { name, description }` declaration are listed or resolved; naming anything else reports that it is not a workflow rather than running it. The check is a regex over the source — nothing in the file is executed to make it, and even a real parse evaluates only the `meta` object literal, in an empty `node:vm` context with a 100ms bound.
 
 ```js
 export const meta = {
@@ -648,7 +636,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 ```
  audit-src
- Dynamically discover files under src/ and audit each …                    1/3 agents · 32s
+ Dynamically discover files under src/ and audit each …             1/3 agents so far · 32s
 
  ╭ Phases ──────────┬ Discover · 1 agent ──────────────────────────────────────────────╮
  │ ❯ ✓ Discover 1/1 │ ❯ ✓ discover:src Opus 5 (1M context) · 26.4k tok             25s │
@@ -659,7 +647,7 @@ Send a steering message to a running agent. The message interrupts after the cur
  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
 ```
 
-The overview puts the phases on the left (a phase shows its number until it starts, the shared braille spinner while running, then `✓`/`✗`; ASCII terminals keep `√`/`×`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
+The overview puts the phases on the left (a phase shows its number until it starts, the shared braille spinner while running, then `✓`/`✗`; ASCII terminals keep `√`/`×`) and the selected phase's agents on the right. Live rows distinguish starting, waiting for the model, active tools, and responding output, and show positive-only `↻N` turns; output previews are bounded and terminal-control safe. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity**, **Current output** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
 
 The run itself takes five keys, and the footer offers each only while it can actually do something:
 
@@ -843,11 +831,11 @@ Two rewrites are suppressed outright rather than left to the mode, because they 
 
 Turn `all` on for tools that genuinely emit Markdown, and off again for a diff or a log. `m` in the viewer cycles the three and persists the choice, so the key and this setting are the same value — the footer shows which is in force as `m raw` / `m md` / `m md+`. Code fences are syntax-highlighted using pi's own Markdown theme — which is also why fenced code is the one part of a result *not* dimmed under `all`; result prose still is, so the transcript keeps its hierarchy. Applied live; also settable from `/agents → Settings → Viewer markdown`.
 
-**Workflows** (`workflowsEnabled`, default `true`): the master switch for scripted workflows. Toggle it via `/agents → Settings → Workflows`, or set it in `subagents.json`. Off, the `SubagentWorkflow` tool is never registered — the model is not told the feature exists and cannot call it, so it costs no tool-spec context — the `/agents → Workflows` entry is hidden, and `--subagents-workflow-file` refuses with a pointer to the setting rather than doing nothing. Read at extension load, so it applies on the next pi session; runs already in flight are left alone.
+**Workflows** (`workflowsEnabled`, default `true`): the master switch for deterministic scripted workflows. Toggle it via `/agents → Settings → Workflows`, or set it in `subagents.json`. Off, `SubagentWorkflow` is not registered, `/agents → Workflows` is hidden, and `--subagents-workflow-file` refuses with a pointer to the setting. Markdown `WorkflowPlaybook` and `WorkflowPlaybookSave` remain available because the main coordinator can use that guidance with ordinary tools, skills, and `Agent` even when this JavaScript runtime is disabled.
 
-Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless another extension already provides a workflow tool, in which case this one warns and stands down for the session. Two orchestrators in one tool spec is a worse default than none — the model has to guess which to call and pays for both descriptions to find out — and the extension that was installed on purpose is the one that should survive. Setting `workflowsEnabled` explicitly pins the answer: `true` keeps ours whatever else is loaded, `false` is off regardless.
+Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless another extension already provides a workflow tool, in which case only this deterministic runtime stands down for the session. Setting `workflowsEnabled: true` prevents that automatic stand-down when the foreign tool uses a different name; it cannot reclaim the same `SubagentWorkflow` name if another extension registered first, so that case warns and leaves the first registration in place. `false` disables only this deterministic runtime.
 
-The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start` and nowhere earlier, because `getAllTools` throws during extension loading and load order means a check at registration time could not see an extension that has not loaded yet — so the tool is registered first and withdrawn from the active set through `setActiveTools`, which rebuilds the system prompt before any turn runs. When the other extension took the `SubagentWorkflow` name itself, pi's first-registration-wins rule already dropped ours, so there is nothing to withdraw and only the menu and the CLI flag come down.
+The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start`; on an automatic stand-down it withdraws only this deterministic runtime. Markdown Playbook read/save tools remain active and can guide either coordinator.
 
 **Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` is the rich Claude Code-style prompt (~1,400 tokens with the default agents); `"compact"` is ~75% smaller — one-line agent type list, terse usage notes — for small/local models where tool-spec tokens are expensive. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
 
@@ -910,7 +898,7 @@ Other pi extensions can spawn and stop subagents programmatically via the `pi.ev
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
-**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface (including the fields that are silently stripped), every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and what protocol version `2` does and does not promise. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
+**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface, every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and the protocol version `3` migration that rejects legacy structured output. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
 
 ### Discovery
 
@@ -1128,6 +1116,7 @@ src/
   mention.ts          # `@handle message` grammar: suggestion triggers and send parsing
   mention-clone.ts    # Run a mention's turn in a cloned conversation, off the main chat
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
+  subagent-contract.ts # Shared RPC protocol version and migration errors for runtime/task clients
 
   # Scheduling
   schedule.ts         # SubagentScheduler: cron / +10m / interval / ISO dispatch
@@ -1161,9 +1150,8 @@ src/
     fleet.ts           # Workflow-to-FleetView execution-tree adapter
     playbook.ts       # Safe WORKFLOW.md discovery, parsing, precedence and prompts
     playbook-store.ts # Validated project/global Playbook previews, locks and atomic persistence
-    playbook-tools.ts # WorkflowPlaybook and WorkflowPlan registration/rendering
+    playbook-tools.ts # WorkflowPlaybook registration and Markdown rendering
     playbook-save-tool.ts # Confirmed generalized Playbook promotion
-    plan.ts           # Structured DAG validation and temporary JS compilation
     meta.ts           # Extract and validate a script's pure-literal `meta` block
     worker-source.ts  # The sandbox: vm context, determinism prelude, script globals
     runtime.ts        # Worker lifecycle, RPC bridge, semaphore, caps, gate/resume
@@ -1182,6 +1170,7 @@ src/
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
     workflow-dialog.ts    # /agents → Workflows two-pane inspector
+    workflow-approval-dialog.ts # Fixed-height summary/details approval overlay
 ```
 
 ## License

@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../subagent-contract.js";
 import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
 import {
@@ -376,7 +377,7 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   }
 
   // ── Subagent extension presence & version detection ──
-  const PROTOCOL_VERSION = 2;
+  const PROTOCOL_VERSION = SUBAGENTS_RPC_PROTOCOL_VERSION;
   let subagentsAvailable = false;
   let pendingWarning: string | undefined;
 

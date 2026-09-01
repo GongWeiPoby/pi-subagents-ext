@@ -26,7 +26,6 @@ import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
-import { compileJsonSchema } from "../src/workflow/json-schema.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
@@ -230,29 +229,12 @@ describe("createWorkflowHost — spawn mapping", () => {
     expect(options.bypassQueue).toBeUndefined();
   });
 
-  it("forwards a compiled schema and prefers the structured payload", async () => {
-    // `result` is prose and picks up the worktree branch note on the way out;
-    // the caller asked for a schema and must get the payload, not the prose.
-    const compilation = compileJsonSchema({ type: "object", properties: { a: { type: "string" } } });
-    if (!compilation.ok) throw new Error(compilation.message);
-    const stub = stubManager(() =>
-      record({ result: "here you go", structuredJson: '{"a":"x"}' }),
-    );
-    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
-
-    const result = await host.spawnAgent(request({ schema: compilation.compiled }));
-
-    expect(stub.spawnAndWait.mock.calls[0][4].structuredOutput).toBe(compilation.compiled);
-    expect(result).toMatchObject({ ok: true, text: '{"a":"x"}' });
-  });
-
-  it("falls back to the prose when no schema was asked for", async () => {
+  it("returns the agent text result", async () => {
     const stub = stubManager(() => record({ result: "here you go" }));
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 
     const result = await host.spawnAgent(request({}));
 
-    expect(stub.spawnAndWait.mock.calls[0][4].structuredOutput).toBeUndefined();
     expect(result).toMatchObject({ ok: true, text: "here you go" });
   });
 
@@ -552,8 +534,47 @@ describe("createWorkflowHost — abort, resume and gate", () => {
     await host.spawnAgent(request({ agentId: "wf-agent-0" }));
     const resumed = await host.resumeAgent?.("wf-agent-0", "and now this");
 
-    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined);
+    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined, {
+      onTurnEnd: undefined,
+      onToolActivity: undefined,
+      onTextDelta: undefined,
+    });
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+  });
+
+  it("bridges live resume callbacks before settlement", async () => {
+    const stub = stubManager(() => record({ id: "manager-id-8", session: { dispose: vi.fn() } as never }));
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    stub.resume.mockImplementation(async (_id: string, _prompt: string, _signal: unknown, options: any) => {
+      options.onToolActivity?.({ type: "start", toolName: "read" });
+      options.onTextDelta?.("partial", "partial response");
+      options.onTurnEnd?.(1);
+      await held;
+      return record({ id: "manager-id-8", result: "resumed", session: { dispose: vi.fn() } as never });
+    });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+    await host.spawnAgent(request({ agentId: "wf-agent-0" }));
+
+    const resumedPromise = host.resumeAgent?.(
+      "wf-agent-0",
+      "continue",
+      info => { if (info.recordId) order.push("resolved"); },
+      () => order.push("session"),
+      count => order.push(`turn:${count}`),
+      activity => order.push(`tool:${activity.toolName}`),
+      (_delta, full) => order.push(`text:${full}`),
+    );
+    await vi.waitFor(() => expect(order).toEqual([
+      "resolved",
+      "session",
+      "tool:read",
+      "text:partial response",
+      "turn:1",
+    ]));
+    release();
+    await resumedPromise;
   });
 
   it("refuses to resume an agent the run never spawned", async () => {
@@ -631,13 +652,14 @@ describe("createWorkflowHost — abort, resume and gate", () => {
  * ------------------------------------------------------------------------- */
 
 describe("Workflow tool registration", () => {
-  it("excludes itself from subagents, so a workflow cannot recurse into itself", () => {
-    // The exclusion list is derived from this object; a Workflow tool missing
-    // here is a Workflow tool every spawned child inherits.
+  it("excludes every registered workflow feature from subagents", () => {
+    // The exclusion list is derived from this object; a workflow tool missing
+    // here is a workflow tool every spawned child inherits.
     expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("SubagentWorkflow");
     expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlaybook");
     expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlaybookSave");
-    expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("WorkflowPlan");
+    expect(Object.values(SUBAGENT_TOOL_NAMES)).not.toContain("WorkflowPlan");
+    expect(SUBAGENT_TOOL_NAMES).not.toHaveProperty("PLAN");
     expect(SUBAGENT_TOOL_NAMES.WORKFLOW).toBe("SubagentWorkflow");
   });
 });
@@ -692,6 +714,12 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     };
   };
 
+  it("exposes only direct workflow sources and no Plan entry renderer", () => {
+    expect(JSON.stringify(tools.get("SubagentWorkflow").parameters)).not.toContain("planRef");
+    expect(tools.has("WorkflowPlan")).toBe(false);
+    expect(booted.entryRenderers.has("workflow-plan")).toBe(false);
+  });
+
   it("routes every direct UI source through confirmation and labels the selected source", async () => {
     const path = join(hermetic.dir, "direct.js");
     mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
@@ -715,7 +743,30 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       );
       expect(textOf(result)).toContain("not approved");
       expect(workflowConfirm).toHaveBeenCalledWith("Run workflow?", expect.stringContaining(testCase.source));
+      const approval = workflowConfirm.mock.calls[0]?.[1] ?? "";
+      const approvalMarker = "Approval summary\n";
+      const approvalIndex = approval.indexOf(approvalMarker);
+      expect(approval).toMatch(/^Technical details\n/);
+      expect(approval.slice(0, approvalIndex)).toContain("Omitted capabilities:\n- not declared by a direct script\n");
+      expect(approval.indexOf(approvalMarker)).toBe(approval.lastIndexOf(approvalMarker));
+      expect(approval.slice(approvalIndex)).toContain("Flow\n");
     }
+  });
+
+  it("rejects an oversized direct approval before confirmation", async () => {
+    const calls = Array.from({ length: 180 }, (_, index) =>
+      `agent(${JSON.stringify(`Inspect ${"x".repeat(120)}`)}, { label: ${JSON.stringify(`agent-${index}`)} });`
+    ).join("\n");
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-ui-oversized",
+      { script: `${inlineScript}${calls}` },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("behavior summary exceeds 48000 characters");
+    expect(workflowConfirm).not.toHaveBeenCalled();
   });
 
   it("allows every direct source headlessly without inspecting user prose or risk keywords", async () => {
@@ -808,7 +859,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       workflowCtx(),
     );
 
-    expect(textOf(result)).toContain("unsupported indirection");
+    expect(textOf(result)).toContain("cannot be approved from a top-level preview");
     expect(textOf(result)).not.toContain("started in the background");
     expect(workflowConfirm).not.toHaveBeenCalled();
   });
@@ -871,22 +922,39 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
         undefined,
         headlessCtx(),
       );
-      expect(textOf(result)).toContain("nested workflow behavior cannot be approved");
+      expect(textOf(result)).toContain("nested workflow() behavior are not supported");
       expect(textOf(result)).not.toContain("started in the background");
     }
   });
 
-  it("summarizes actual prompts, options, phases, relationships, schemas, and nested calls", async () => {
+  it("rejects direct schema calls before confirmation", async () => {
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-schema-preflight",
+      {
+        script: `${inlineScript}return await agent("inspect", { schema: { type: "object" } });`,
+      },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain(
+      "agent() opts.schema is no longer supported; workflow children return text/Markdown.",
+    );
+    expect(workflowConfirm).not.toHaveBeenCalled();
+  });
+
+  it("summarizes actual prompts, options, phases, and relationships", async () => {
     workflowConfirm.mockResolvedValue(false);
     const script = [
       'export const meta = { name: "parent", description: "review orchestration", phases: [{ title: "Discover" }, { title: "Verify" }] };',
       'phase("Discover");',
       'await parallel([',
-      '  () => agent("Deploy the auth diff", { label: "auth scan", agentType: "Explore", model: "haiku", effort: "high", schema: { type: "object" } }),',
+      '  () => agent("Deploy the auth diff", { label: "auth scan", agentType: "Explore", model: "haiku", effort: "high" }),',
       '  () => agent("Inspect the tests", { label: "test scan", isolation: "worktree" }),',
       ']);',
       'await pipeline(["finding"], item => agent("Verify " + item, { label: "verify finding", phase: "Verify" }));',
-      'return await workflow("child");',
+      'return "done";',
     ].join("\n");
     mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
     writeFileSync(join(hermetic.dir, ".pi", "workflows", "parent.js"), script);
@@ -907,13 +975,32 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(approval).toContain("phase: Discover");
     expect(approval).toContain("parallel barrier");
     expect(approval).toContain("pipeline stage");
-    expect(approval).toContain("structured output: configured");
     expect(approval).toContain("verify finding");
-    expect(approval).toContain("child");
     expect(approval).toContain("Discover -> Verify");
   });
 
-  it("requires direct approval for a legacy script that did not come from WorkflowPlan", async () => {
+  it("rejects nested behavior in a named interactive workflow before approval", async () => {
+    mkdirSync(join(hermetic.dir, ".pi", "workflows"), { recursive: true });
+    writeFileSync(
+      join(hermetic.dir, ".pi", "workflows", "nested-parent.js"),
+      `${fileScript}return await workflow("payload");`,
+    );
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-named-nested-approval",
+      { name: "nested-parent" },
+      undefined,
+      undefined,
+      workflowCtx(),
+    );
+
+    expect(textOf(result)).toContain("cannot be approved from a top-level preview");
+    expect(textOf(result)).toContain("saved named parents");
+    expect(workflowConfirm).not.toHaveBeenCalled();
+    expect(textOf(result)).not.toContain("Task ID:");
+  });
+
+  it("requires direct approval for every interactive script", async () => {
     workflowConfirm.mockResolvedValue(false);
 
     const result = await tools.get("SubagentWorkflow").execute(
@@ -936,58 +1023,29 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(textOf(result)).not.toContain("Task ID:");
   });
 
-  it("consumes a ready WorkflowPlan script authorization exactly once", async () => {
-    const planned = await tools.get("WorkflowPlan").execute(
-      "tc-plan-authorize",
+  it("rejects legacy planRef before source resolution, confirmation, or execution", async () => {
+    const context = workflowCtx();
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-legacy-plan-ref",
       {
-        objective: "Inspect safely",
-        nodes: [{ id: "inspect", title: "Inspect", capability: "review", prompt: "Inspect the diff" }],
+        planRef: "wfp_0123456789abcdef01234567",
+        scriptPath: join(hermetic.dir, "missing.js"),
+        resumeFromRunId: "wf_missing",
+        args: { hostile: "\u001b[2J" },
       },
       undefined,
       undefined,
-      workflowCtx(),
-    );
-    const planRef = planned.details?.planRef;
-    expect(planRef).toMatch(/^wfp_[a-f0-9]{24}$/);
-    workflowConfirm.mockClear();
-
-    const combinedResume = await tools.get("SubagentWorkflow").execute(
-      "tc-plan-resume-conflict",
-      { planRef, resumeFromRunId: "wf_unrelated" },
-      undefined,
-      undefined,
-      workflowCtx(),
-    );
-    expect(textOf(combinedResume)).toContain("cannot be combined");
-
-    const changedArgs = await tools.get("SubagentWorkflow").execute(
-      "tc-plan-changed-args",
-      { planRef, args: { target: "different" } },
-      undefined,
-      undefined,
-      ctx({ cwd: hermetic.dir }),
-    );
-    const first = await tools.get("SubagentWorkflow").execute(
-      "tc-plan-run",
-      { planRef },
-      undefined,
-      undefined,
-      ctx({ cwd: hermetic.dir }),
-    );
-    const replay = await tools.get("SubagentWorkflow").execute(
-      "tc-plan-replay",
-      { planRef },
-      undefined,
-      undefined,
-      ctx({ cwd: hermetic.dir }),
+      context,
     );
 
-    expect(textOf(changedArgs)).toContain("cannot be combined");
-    expect(textOf(first)).toContain("started in the background");
-    expect(textOf(replay)).toContain("unknown, expired, or already consumed");
+    expect(textOf(result)).toContain("`planRef` is no longer supported");
+    expect(textOf(result)).toContain("No run was started");
+    expect(textOf(result)).not.toContain("Task ID:");
     expect(workflowConfirm).not.toHaveBeenCalled();
+    expect(context.sessionManager.getSessionId).not.toHaveBeenCalled();
+    expect(booted.pi.appendEntry).not.toHaveBeenCalled();
+    expect(booted.pi.sendMessage).not.toHaveBeenCalled();
   });
-
 
   it("runs the inline script when only `script` is given, and persists it", async () => {
     const result = await tools.get("SubagentWorkflow").execute("tc-1", { script: inlineScript }, undefined, undefined, workflowCtx());
@@ -1947,22 +2005,22 @@ describe("workflowsEnabled — the master switch", () => {
     expect(booted.tools.has("Agent")).toBe(true);
   });
 
-  it("stays off when the setting says so explicitly", () => {
-    // Not registered at all: the model is never told the feature exists. The
-    // switch buys zero tool-spec tokens, which a refusing tool would not.
+  it("disables only deterministic JavaScript workflows when the setting is false", () => {
     const booted = boot({ workflowsEnabled: false });
     expect(booted.tools.has("SubagentWorkflow")).toBe(false);
-    expect(booted.tools.has("WorkflowPlaybook")).toBe(false);
-    expect(booted.tools.has("WorkflowPlaybookSave")).toBe(false);
-    expect(booted.tools.has("WorkflowPlan")).toBe(false);
-  });
-
-  it("registers the tool once the setting turns it on", () => {
-    const booted = boot({ workflowsEnabled: true });
-    expect(booted.tools.has("SubagentWorkflow")).toBe(true);
     expect(booted.tools.has("WorkflowPlaybook")).toBe(true);
     expect(booted.tools.has("WorkflowPlaybookSave")).toBe(true);
-    expect(booted.tools.has("WorkflowPlan")).toBe(true);
+  });
+
+  it("registers exactly the three supported workflow features once enabled", () => {
+    const booted = boot({ workflowsEnabled: true });
+    const workflowFeatures = [...booted.tools.keys()].filter(name =>
+      ["SubagentWorkflow", "WorkflowPlaybook", "WorkflowPlaybookSave", "WorkflowPlan"].includes(name)
+    );
+    expect(workflowFeatures.sort()).toEqual(
+      ["SubagentWorkflow", "WorkflowPlaybook", "WorkflowPlaybookSave"].sort(),
+    );
+    expect(booted.entryRenderers.has("workflow-plan")).toBe(false);
   });
 
   it("refuses the startup flag while off, instead of running the script anyway", async () => {
@@ -2016,7 +2074,7 @@ describe("collisions with another extension", () => {
   const warnings = (context: any) =>
     context.ui.notify.mock.calls.filter((c: any[]) => c[1] === "warning").map((c: any[]) => String(c[0]));
 
-  it("warns and withdraws companion tools when another extension owns the runtime name", async () => {
+  it("warns while keeping Markdown Playbooks when another extension owns the runtime name", async () => {
     // Pi keeps the FIRST registration per tool name, across extensions. Ours
     // never reaches the registry, and nothing in pi says so.
     const booted = boot();
@@ -2034,9 +2092,8 @@ describe("collisions with another extension", () => {
     expect(warnings(context).some(m => /already registers a "SubagentWorkflow" tool/.test(m))).toBe(true);
     expect(warnings(context).some(m => /other-ext/.test(m))).toBe(true);
     expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybookSave");
   });
 
   it("stays quiet when the registered tool is our own", async () => {
@@ -2111,9 +2168,8 @@ describe("collisions with another extension", () => {
     // and session_start runs before any turn, so the model never sees it.
     expect(booted.pi.setActiveTools).toHaveBeenCalled();
     expect(booted.pi.getActiveTools()).not.toContain("SubagentWorkflow");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybookSave");
     // Everything else this extension registered stays.
     expect(booted.pi.getActiveTools()).toContain("Agent");
     expect(warnings(context).some(m => /already provides a "Workflow" tool/.test(m))).toBe(true);
@@ -2130,21 +2186,20 @@ describe("collisions with another extension", () => {
     expect(warnings(context).some(m => /workflowsEnabled/.test(m))).toBe(true);
   });
 
-  it("stands down and withdraws companion tools when the foreign tool took our own name", async () => {
+  it("stands down while keeping Markdown Playbooks when the foreign tool took our own name", async () => {
     // First registration wins, so our SubagentWorkflow never reached the registry.
-    // The companion Playbook/Plan tools are ours, though, and must be withdrawn
-    // when the workflow runtime stands down; the foreign SubagentWorkflow stays.
+    // Markdown Playbooks remain useful to either coordinator and are independent
+    // of which deterministic JavaScript runtime owns the conflicting name.
     const booted = bootAuto();
     booted.pi.getAllTools.mockReturnValue([foreign("SubagentWorkflow")]);
     const context = uiContext();
 
     await booted.lifecycle.get("session_start")?.({}, context);
 
-    expect(booted.pi.setActiveTools).toHaveBeenCalled();
+    expect(booted.pi.setActiveTools).not.toHaveBeenCalled();
     expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybook");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlaybookSave");
-    expect(booted.pi.getActiveTools()).not.toContain("WorkflowPlan");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybook");
+    expect(booted.pi.getActiveTools()).toContain("WorkflowPlaybookSave");
     expect(warnings(context).some(m => /already provides a "SubagentWorkflow" tool/.test(m))).toBe(true);
   });
 

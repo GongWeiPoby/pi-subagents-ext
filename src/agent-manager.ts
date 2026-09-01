@@ -22,9 +22,9 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import { STRUCTURED_OUTPUT_MIGRATION_ERROR } from "./subagent-contract.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
-import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
@@ -227,11 +227,6 @@ interface SpawnOptions {
    * counting them twice would let one workflow starve the whole session.
    */
   workflowId?: string;
-  /**
-   * Make the child report through a `StructuredOutput` tool built from this
-   * compiled schema. Set only by the workflow host, for `agent({ schema })`.
-   */
-  structuredOutput?: CompiledSchema;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /**
@@ -314,6 +309,10 @@ interface ResumeOptions {
   isBackground?: boolean;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
+  /** Called at the end of each resumed agentic turn with the cumulative count. */
+  onTurnEnd?: (turnCount: number) => void;
+  /** Called with resumed assistant text deltas and the current response text. */
+  onTextDelta?: (delta: string, fullText: string) => void;
   /** Called once per assistant message_end with that message's usage delta. */
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
@@ -496,6 +495,14 @@ export class AgentManager {
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
+    if (Object.hasOwn(options, "structuredOutput")) {
+      throw new Error(STRUCTURED_OUTPUT_MIGRATION_ERROR);
+    }
+    if (options.isolation === "worktree" && !isWorktreeIsolationEnabled()) {
+      throw new Error(
+        'Cannot run with isolation: "worktree" — worktree isolation is disabled by project settings.',
+      );
+    }
     assertValidSpawnCwd(options.cwd);
 
     const id = randomUUID().slice(0, 17);
@@ -521,6 +528,7 @@ export class AgentManager {
       // since the pool decision needs the finished record.
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
+      turnCount: 0,
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
@@ -766,7 +774,6 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
-      structuredOutput: options.structuredOutput,
       resumeSessionFile: options.resumeSessionFile,
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
@@ -785,7 +792,10 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
-      onTurnEnd: options.onTurnEnd,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+      },
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
@@ -846,7 +856,7 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
+      .then(async ({ responseText, session, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
@@ -862,11 +872,6 @@ export class AgentManager {
           }
         }
         record.result = responseText;
-        // Kept beside `result`, never inside it: `result` is prose meant for a
-        // reader — it is previewed, transcribed, and appended to below — while
-        // this is a machine-readable payload one caller asked for by schema.
-        record.structuredJson = structuredJson;
-        record.structuredRetried = structuredRetried;
         record.session = session;
         record.completedAt ??= Date.now();
 
@@ -894,9 +899,6 @@ export class AgentManager {
             // With a caller-supplied cwd the branch lives in THAT repo, not the
             // parent session's — say so, or the orchestrator merges in the wrong repo.
             const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            // Appended to the prose only. A structured child's caller parses
-            // `structuredJson`, which stays untouched — but `result` is also
-            // what a human reads, so the note still belongs on it.
             record.result = (record.result ?? "") +
               `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
           }
@@ -1168,6 +1170,7 @@ export class AgentManager {
 
     // Foreground resume: run inline and return the settled record.
     record.status = "running";
+    record.turnCount = 0;
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
@@ -1179,6 +1182,11 @@ export class AgentManager {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
         },
+        onTurnEnd: (turnCount) => {
+          record.turnCount = turnCount;
+          options?.onTurnEnd?.(turnCount);
+        },
+        onTextDelta: options?.onTextDelta,
         onAssistantUsage: (usage) => {
           addUsage(record.lifetimeUsage, usage);
           this.onUsage?.(record, usage);
@@ -1227,6 +1235,7 @@ export class AgentManager {
     if (!record.session) return;
 
     record.status = "running";
+    record.turnCount = 0;
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
@@ -1270,6 +1279,11 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+      },
+      onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         this.onUsage?.(record, usage);

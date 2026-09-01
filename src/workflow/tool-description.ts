@@ -14,8 +14,7 @@
  * and the `/config` workflow-size guideline.
  *
  * Clauses that had to deviate, each because Claude Code's is untrue here:
- *   - `schema` is pressure, not force — `toolChoice` is not plumbed through
- *     pi's `AgentSession`, so a child can decline and the call returns null.
+ *   - workflow children return text/Markdown, rather than structured values.
  *   - `budget.total` is always null; pi has no token-target directive.
  *   - `parallel` propagates a fatal run error instead of folding it to null.
  *   - `effort` inherits the agent definition's level, then the parent's.
@@ -40,13 +39,11 @@ export const fullWorkflowToolDescription = `Execute a workflow script that orche
 
 A workflow structures work across many agents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before committing), or to take on scale one context can't hold (migrations, audits, broad sweeps). The script is where you encode that structure: what fans out, what verifies, what synthesizes.
 
-A workflow may be selected explicitly by the user or adaptively by a ready WorkflowPlan. Explicit selection includes asking to run/fan out/orchestrate a workflow, invoking a workflow skill or command, or naming a saved workflow.
+A workflow is selected only when the user explicitly asks to run, fan out, or orchestrate a deterministic workflow; invokes a deterministic workflow skill or command; or names a saved JavaScript workflow. Do not infer permission to author deterministic JavaScript merely from task shape or available evidence. Use WorkflowPlaybook when relevant; its Markdown guides the main coordinator, which dynamically invokes Agent, ordinary tools, and skills without silently becoming a SubagentWorkflow script.
 
-Adaptive selection is allowed only when the Planner has enough project/task evidence to produce a high-confidence, proportionate plan. Before an adaptive run, use WorkflowPlaybook when relevant and WorkflowPlan to record personas, confidence/evidence, selected nodes, dependencies, material omissions, and advisory effect metadata. WorkflowPlan always presents the complete normalized plan for direct user confirmation because selected agents may carry broad tools; model-supplied metadata is never the authorization boundary. A ready plan returns a one-use planRef bound to its exact internally retained script-and-arguments digest; pass that reference to SubagentWorkflow unchanged. It cannot be combined with a direct source, args, or resumeFromRunId. The valid planRef executes directly without a second prompt.
+Direct \`script\`, \`scriptPath\`, and \`name\` are mutually exclusive. In an interactive UI, every direct invocation is previewed for confirmation, including an exact \`resumeFromRunId\`; authorization is never inferred from user prose, workflow names, or risk keywords. Interactive workflows containing nested \`workflow()\` behavior are rejected because a top-level preview cannot disclose the child. Trusted headless automation may compose one level through saved named workflows.
 
-Direct \`script\`, \`scriptPath\`, and \`name\` are mutually exclusive. In an interactive UI, every direct invocation is previewed for confirmation, including an exact \`resumeFromRunId\`; authorization is never inferred from user prose, workflow names, or risk keywords. In a headless session, direct invocations and resumes proceed without UI confirmation because the automation caller is the trust boundary. Direct inline/path scripts that reference the injected \`workflow\` binding are refused because their nested behavior is absent from the parent summary; detection uses the parsed AST and fails closed on parse errors. Saved named workflows may compose nested workflows, but they still follow the same UI-confirmed/headless-allowed direct policy.
-
-Do not use a workflow for conversational, trivial, or single-step work. For low-confidence interpretation, ask one focused question before planning; for broad or expensive work, keep the plan proportionate. An unapproved or headless WorkflowPlan returns no script.
+Do not use a workflow for conversational, trivial, or single-step work. For low-confidence interpretation, ask one focused question before authoring a workflow; for broad or expensive work, keep the orchestration proportionate.
 
 When you do call it, the right move is often **hybrid**: scout inline first (list the files, find the channels, scope the diff) to discover the work-list, then call SubagentWorkflow to pipeline over it. You don't need to know the shape before the *task* — only before the *orchestration step*.
 
@@ -59,7 +56,7 @@ Common single-phase workflows you can chain across turns:
 
 For larger work, run several in sequence — read each result before deciding the next phase. You stay in the loop; each workflow is one well-scoped fan-out.
 
-Pass the script inline via \`script\` — do not Write it to a file first. Every invocation automatically persists its script to a file under the session directory and returns the path in the tool result. To iterate on a workflow, edit that file with Write/Edit and re-invoke SubagentWorkflow with \`{scriptPath: "<path>"}\` instead of resending the full script. Supply exactly one of \`script\`, \`scriptPath\`, or \`name\`. A user-explicit deterministic script you will run more than once belongs in \`.pi/workflows/<name>.js\` (or \`.agents/workflows/\`, or \`<agent dir>/workflows/\` for one that follows the user everywhere); call it with \`name: "<name>"\` instead of re-sending the source. Never save JavaScript generated by WorkflowPlan as the reusable source. If the user asks to promote a successful adaptive run, generalize its task-specific literals into inputs and call WorkflowPlaybookSave so the proposed Markdown and prompt resources are previewed and confirmed.
+Pass the script inline via \`script\` — do not Write it to a file first. Every invocation automatically persists its script to a file under the session directory and returns the path in the tool result. To iterate on a workflow, edit that file with Write/Edit and re-invoke SubagentWorkflow with \`{scriptPath: "<path>"}\` instead of resending the full script. Supply exactly one of \`script\`, \`scriptPath\`, or \`name\`. A deterministic script you will run more than once belongs in \`.pi/workflows/<name>.js\` (or \`.agents/workflows/\`, or \`<agent dir>/workflows/\` for one that follows the user everywhere); call it with \`name: "<name>"\` instead of re-sending the source. If the user asks to promote a successful run, generalize its task-specific literals into inputs and call WorkflowPlaybookSave so the proposed Markdown and prompt resources are previewed and confirmed.
 
 Every script must begin with \`export const meta = {...}\`:
   export const meta = {
@@ -72,13 +69,13 @@ Every script must begin with \`export const meta = {...}\`:
   }
   // script body starts here — use agent()/parallel()/pipeline()/phase()/log()
   phase('Scan')
-  const flaky = await agent('grep CI logs for retry markers', {schema: FLAKY_SCHEMA})
+  const flaky = await agent('grep CI logs for retry markers and return Markdown')
   ...
 
-The \`meta\` object must be a PURE LITERAL — no variables, function calls, spreads, or template interpolation. Required fields: \`name\`, \`description\`. Optional: \`whenToUse\` (shown in the workflow list), \`phases\`. Use the SAME phase titles in meta.phases as in phase() calls — titles are matched exactly; a phase() call with no matching meta entry just gets its own progress group. Add \`model\` to a phase entry when that phase uses a specific model override.
+The \`meta\` object must be a PURE LITERAL — no variables, function calls, spreads, or template interpolation. Required fields: \`name\`, \`description\`. Optional: \`whenToUse\` (shown in the workflow list), \`phases\`. Use the SAME phase titles in meta.phases as in phase() calls — titles are matched exactly; a phase() call with no matching meta entry just gets its own progress group. Add \`model\` to a phase entry when that phase uses a specific model override. The approval dialog builds its readable flow from \`meta.description\`, phase titles/details, and agent labels, so write those user-visible fields in the user's language; keep \`meta.name\` as a stable technical identifier, and optimize executor prompts for the child agents.
 
 Script body hooks:
-- agent(prompt: string, opts?: {label?: string, phase?: string, schema?: object, model?: string, effort?: string, isolation?: 'worktree', agentType?: string, gate?: string, resume?: string}): Promise<any> — spawn a subagent. Without schema, returns its final text as a string. With schema (a JSON Schema), the subagent is given a StructuredOutput tool built from it and agent() returns the validated object — no parsing needed. A payload that does not match is rejected back to the child, which corrects it; a child that never answers through the tool gets one more prompt and then fails, so the call returns null — filter after every schema stage. Returns null if the user skips the agent mid-run or the subagent dies on a terminal API error after retries (filter with .filter(Boolean)). opts.label overrides the display label. opts.phase explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts.model overrides the model for this agent call. Default to omitting it — the agent inherits the main-loop model (the resolved session model), which is almost always correct. Only set it when you're highly confident a different tier fits the task; when unsure, omit. opts.effort overrides the reasoning effort for this agent call ('minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max') — omit to inherit the agent definition's own level, then the parent's; use 'low' for cheap mechanical stages and higher tiers only for the hardest verify/judge stages. opts.isolation: 'worktree' runs the agent in a fresh git worktree — EXPENSIVE (setup time + disk per agent), use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is removed when the agent settles, its changes preserved on a branch. opts.gate: '<command>' runs a shell command after the agent finishes and requires it to pass — a non-zero exit marks the agent failed and the command's output becomes the error; prefer gate: 'npm test' over asking another agent whether the code looks right. opts.resume: '<label>' continues the child that ran under that label instead of starting fresh, so an iterative loop keeps its context — it cannot be combined with agentType, model, effort, isolation, gate or schema. opts.agentType uses a custom subagent type instead of the default workflow subagent — resolved from the same registry as the Agent tool; composes with schema. Available types:
+- agent(prompt: string, opts?: {label?: string, phase?: string, model?: string, effort?: string, isolation?: 'worktree', agentType?: string, gate?: string, resume?: string}): Promise<string|null> — spawn a subagent and return its final text/Markdown. opts.schema is no longer supported and is rejected with a migration error before any model call. Returns null if the user skips the agent mid-run or the subagent dies on a terminal API error after retries (filter with .filter(Boolean)). opts.label overrides the display label. opts.phase explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts.model overrides the model for this agent call. Default to omitting it — the agent inherits the main-loop model (the resolved session model), which is almost always correct. Only set it when you're highly confident a different tier fits the task; when unsure, omit. opts.effort overrides the reasoning effort for this agent call ('minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max') — omit to inherit the agent definition's own level, then the parent's; use 'low' for cheap mechanical stages and higher tiers only for the hardest verify/judge stages. opts.isolation: 'worktree' runs the agent in a fresh git worktree — EXPENSIVE (setup time + disk per agent), use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is removed when the agent settles, its changes preserved on a branch. opts.gate: '<command>' runs a shell command after the agent finishes and requires it to pass — a non-zero exit marks the agent failed and the command's output becomes the error; prefer gate: 'npm test' over asking another agent whether the code looks right. opts.resume: '<label>' continues the child that ran under that label instead of starting fresh, so an iterative loop keeps its context — it cannot be combined with agentType, model, effort, isolation or gate. opts.agentType uses a custom subagent type instead of the default workflow subagent. Available types:
 {{typeList}}
 - pipeline(items, stage1, stage2, ...): Promise<any[]> — run each item through all stages independently, NO barrier between stages. Item A can be in stage 3 while item B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock = slowest single-item chain, not sum-of-slowest-per-stage. Every stage callback receives (prevResult, originalItem, index) — use originalItem/index in later stages to label work without threading context through stage 1's return value. A stage that throws drops that item to \`null\` and skips its remaining stages.
 - parallel(thunks: Array<() => Promise<any>>): Promise<any[]> — run tasks concurrently. This is a BARRIER: awaits all thunks before returning. A thunk that throws (or whose agent errors) resolves to \`null\` in the result array, so \`.filter(Boolean)\` before using the results; only a fatal run error — a cap breach, or a nested workflow that could not load — propagates instead of being folded into a null. Use ONLY when you genuinely need all results together.
@@ -90,7 +87,7 @@ Script body hooks:
 
 Any agent() option not listed above is rejected by name at the call.
 
-Subagents are told their final text IS the return value (not a human-facing message), so they return raw data. For structured output, use the schema option — validation happens at the tool-call layer so the model retries on mismatch.
+Subagents are told their final text or Markdown IS the return value (not a human-facing message), so they return only the script-consumed answer.
 
 Scripts are plain JavaScript, NOT TypeScript — type annotations (\`: string[]\`), interfaces, and generics fail to parse. The script body runs in an async context — use await directly. Standard JS built-ins (JSON, Math, Array, etc.) are available — EXCEPT \`Date.now()\`/\`Math.random()\`/argless \`new Date()\`, which throw (they would break resume); pass timestamps in via \`args\`, stamp results after the workflow returns, and for randomness vary the agent prompt/label by index. \`eval\` and \`Function(...)\` throw. No filesystem or Node.js API access.
 
@@ -117,32 +114,31 @@ Concurrent agent() calls are capped at 2 per workflow by default — excess call
 The canonical multi-stage pattern — pipeline by default, each dimension verifies as soon as its review completes:
   export const meta = {
     name: 'review-changes',
-    description: 'Review changed files across dimensions, verify each finding',
+    description: 'Review changed files across dimensions, then verify each review',
     phases: [{ title: 'Review' }, { title: 'Verify' }],
   }
   const DIMENSIONS = [{key: 'bugs', prompt: '...'}, {key: 'perf', prompt: '...'}]
   const results = await pipeline(
     DIMENSIONS,
-    d => agent(d.prompt, {label: \`review:\${d.key}\`, phase: 'Review', schema: FINDINGS_SCHEMA}),
-    review => parallel(review.findings.map(f => () =>
-      agent(\`Adversarially verify: \${f.title}\`, {label: \`verify:\${f.file}\`, phase: 'Verify', schema: VERDICT_SCHEMA})
-        .then(v => ({...f, verdict: v}))
-    ))
+    d => agent(d.prompt, {label: \`review:\${d.key}\`, phase: 'Review'}),
+    (review, dimension) => agent(
+      \`Adversarially verify this \${dimension.key} review and return Markdown:\n\${review}\`,
+      {label: \`verify:\${dimension.key}\`, phase: 'Verify'},
+    )
   )
-  const confirmed = results.flat().filter(Boolean).filter(f => f.verdict?.isReal)
-  return { confirmed }
-  // Dimension 'bugs' findings verify while dimension 'perf' is still reviewing. No wasted wall-clock.
+  return { reviews: results.filter(Boolean) }
+  // Dimension 'bugs' verifies while dimension 'perf' is still reviewing. No wasted wall-clock.
 
-When a barrier IS correct — dedup across all findings before expensive verification:
-  const all = await parallel(DIMENSIONS.map(d => () => agent(d.prompt, {schema: FINDINGS_SCHEMA})))
-  const deduped = dedupeByFileAndLine(all.filter(Boolean).flatMap(r => r.findings))  // <-- genuinely needs ALL at once
-  const verified = await parallel(deduped.map(f => () => agent(verifyPrompt(f), {schema: VERDICT_SCHEMA})))
+When a barrier IS correct — combine all text reviews before one synthesis step:
+  const all = await parallel(DIMENSIONS.map(d => () => agent(d.prompt)))
+  const combined = all.filter(Boolean).join('\\n\\n---\\n\\n')
+  const synthesis = await agent(\`Deduplicate and synthesize these reviews:\n\${combined}\`)
 
-Loop-until-count pattern — accumulate to a target:
+Loop-until-count pattern — ask for one line per item and count non-empty lines:
   const bugs = []
   while (bugs.length < 10) {
-    const result = await agent("Find bugs in this codebase.", {schema: BUGS_SCHEMA})
-    bugs.push(...result.bugs)
+    const result = await agent("Find more bugs. Return one concise finding per line.")
+    if (result) bugs.push(...result.split('\\n').filter(Boolean))
     log(\`\${bugs.length}/10 found\`)
   }
 
@@ -162,26 +158,24 @@ Gate-and-retry pattern — verify by running, and keep the agent's context acros
 Composing patterns — exhaustive review (find → dedup vs seen → diverse-lens panel → loop-until-dry):
   const seen = new Set(), confirmed = []
   let dry = 0
-  while (dry < 2) {                                              // loop-until-dry
-    const found = (await parallel(FINDERS.map(f => () =>          // barrier: collect all finders this round
-      agent(f.prompt, {phase: 'Find', schema: BUGS})))).filter(Boolean).flatMap(r => r.bugs)
-    const fresh = found.filter(b => !seen.has(key(b)))           // dedup vs ALL seen — plain code, not an agent
+  while (dry < 2) {
+    const reports = (await parallel(FINDERS.map(f => () =>
+      agent(\`\${f.prompt}\nReturn one finding per line.\`, {phase: 'Find'})))).filter(Boolean)
+    const found = reports.flatMap(report => report.split('\\n').filter(Boolean))
+    const fresh = found.filter(finding => !seen.has(finding))
     if (!fresh.length) { dry++; continue }
-    dry = 0; fresh.forEach(b => seen.add(key(b)))
-    const judged = await parallel(fresh.map(b => () =>           // every fresh bug judged concurrently...
-      parallel(['correctness','security','repro'].map(lens => () =>   // ...each by 3 distinct lenses
-        agent(\`Judge "\${b.desc}" via the \${lens} lens — real?\`, {phase: 'Verify', schema: VERDICT})))
-        .then(vs => ({ b, real: vs.filter(Boolean).filter(v => v.real).length >= 2 }))))
-    confirmed.push(...judged.filter(v => v.real).map(v => v.b))
+    dry = 0; fresh.forEach(finding => seen.add(finding))
+    const judged = await parallel(fresh.map(finding => () =>
+      parallel(['correctness','security','repro'].map(lens => () =>
+        agent(\`Try to refute via the \${lens} lens:\n\${finding}\`, {phase: 'Verify'})))
+        .then(votes => ({ finding, votes: votes.filter(Boolean) }))))
+    confirmed.push(...judged.filter(Boolean))
   }
   return confirmed
   // dedup vs \`seen\`, NOT \`confirmed\` — else judge-rejected findings reappear every round and it never converges.
 
 Quality patterns — common shapes; pick by task and compose freely:
-- Adversarial verify: spawn N independent skeptics per finding, each prompted to REFUTE. Kill if ≥majority refute. Prevents plausible-but-wrong findings from surviving.
-    const votes = await parallel(Array.from({length: 3}, () => () =>
-      agent(\`Try to refute: \${claim}. Default to refuted=true if uncertain.\`, {schema: VERDICT})))
-    const survives = votes.filter(Boolean).filter(v => !v.refuted).length >= 2
+- Adversarial verify: spawn N independent skeptics per finding, each prompted to refute it; synthesize their text votes deterministically or with a final text-only agent.
 - Verify by running, not by asking: when a claim is testable, \`gate\` it rather than asking another model whether it holds.
 - Perspective-diverse verify: when a finding can fail in more than one way, give each verifier a distinct lens (correctness, security, perf, does-it-reproduce) instead of N identical refuters — diversity catches failure modes redundancy can't.
 - Judge panel: generate N independent attempts from different angles (e.g. MVP-first, risk-first, user-first), score with parallel judges, synthesize from the winner while grafting the best ideas from runners-up. Beats one-attempt-iterated when the solution space is wide.

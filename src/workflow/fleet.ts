@@ -8,6 +8,10 @@ export interface FleetWorkflowAgent {
   agentType: string;
   model?: string;
   recordId?: string;
+  activity?: string;
+  outputPreview?: string;
+  turnCount?: number;
+  toolUses?: number;
   tokens: number;
   startedAt?: number;
   completedAt?: number;
@@ -68,6 +72,10 @@ export function workflowFleetPhases(
         agentType: agent.agentType ?? "general-purpose",
         ...(agent.model !== undefined ? { model: agent.model } : {}),
         ...(agent.recordId !== undefined ? { recordId: agent.recordId } : {}),
+        ...(agent.activity !== undefined ? { activity: agent.activity } : {}),
+        ...(agent.outputPreview !== undefined ? { outputPreview: agent.outputPreview } : {}),
+        ...(agent.turnCount !== undefined ? { turnCount: agent.turnCount } : {}),
+        ...(agent.toolCalls !== undefined ? { toolUses: agent.toolCalls } : {}),
         tokens: agent.tokens ?? 0,
         ...(agent.startedAt !== undefined ? { startedAt: agent.startedAt } : {}),
         ...(completedAt !== undefined ? { completedAt } : {}),

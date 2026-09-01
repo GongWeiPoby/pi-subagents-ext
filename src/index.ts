@@ -10,7 +10,6 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -62,6 +61,7 @@ import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./ui/conversation-viewe
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
+import { confirmWorkflowApproval } from "./ui/workflow-approval-dialog.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -91,11 +91,6 @@ import { escapeXml } from "./xml.js";
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
-}
-
-function workflowAuthorizationDigest(script: string, args: unknown): string {
-  const canonicalArgs = args === undefined ? "undefined" : JSON.stringify(args);
-  return createHash("sha256").update(script).update("\0").update(canonicalArgs).digest("hex");
 }
 
 export function renderRunningAgentStatus(
@@ -874,9 +869,6 @@ export default function (pi: ExtensionAPI) {
     // Last, and only here: CLI flag values are applied by the host AFTER every
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
-    // A ready WorkflowPlan authorizes its exact one-use planRef only. Session
-    // changes must not carry that capability into a different conversation.
-    plannedWorkflowScripts.clear();
     resolveWorkflowCollisions(ctx);
     runWorkflowFlag(ctx);
   });
@@ -1125,7 +1117,6 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted(true);
     workflowTasks.clear();
     workflowTaskSessionIds.clear();
-    plannedWorkflowScripts.clear();
     widget.update();
     fleet.update();
     scheduler.stop();
@@ -2576,19 +2567,6 @@ Terse command-style prompts produce shallow, generic work.
     for (const task of heldWorkflowNotifications.values()) scheduleWorkflowNotification(task);
   });
 
-  const plannedWorkflowScripts = new Map<string, { digest: string; script: string }>();
-  const authorizePlannedWorkflowScript = (script: string): string => {
-    const digest = workflowAuthorizationDigest(script, undefined);
-    const reference = `wfp_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
-    plannedWorkflowScripts.set(reference, { digest, script });
-    while (plannedWorkflowScripts.size > 128) {
-      const oldest = plannedWorkflowScripts.keys().next().value;
-      if (oldest === undefined) break;
-      plannedWorkflowScripts.delete(oldest);
-    }
-    return reference;
-  };
-
   // Defined unconditionally, registered only when the feature is on — the same
   // shape the Agent tool uses. Keeping the definition out of the `if` means the
   // switch changes exactly one thing: whether pi is ever told about the tool.
@@ -2598,18 +2576,11 @@ Terse command-style prompts produce shallow, generic work.
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
-      "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
+      "Use SubagentWorkflow only after the user explicitly asks for deterministic workflow orchestration, invokes a deterministic workflow skill/command, or names a saved JavaScript workflow. Once that prerequisite is met, prefer it when runtime discovery, loops, staged text handoffs, or independently verified findings require scripted control; otherwise use Agent directly.",
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
     parameters: Type.Object({
-      planRef: Type.Optional(
-        Type.String({
-          pattern: "^wfp_[a-f0-9]{24}$",
-          description:
-            "Opaque one-use execution reference returned by an approved WorkflowPlan. Use it exactly as returned and do not combine it with script, scriptPath, name, args, or resumeFromRunId.",
-        }),
-      ),
       script: Type.Optional(
         Type.String({
           maxLength: 524288,
@@ -2686,22 +2657,15 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      if ((params as Record<string, unknown>).planRef !== undefined) {
+        return textResult(
+          "`planRef` is no longer supported. Pass `script`, `scriptPath`, or `name` directly; "
+          + "interactive runs use the current workflow approval flow. No run was started.",
+        );
+      }
       const suppliedSources = [params.script, params.scriptPath, params.name].filter((value) => value !== undefined);
       if (suppliedSources.length > 1) {
         return textResult("Provide only one workflow source: `script`, `scriptPath`, or `name`.");
-      }
-      if (params.planRef !== undefined && (suppliedSources.length > 0 || params.args !== undefined || params.resumeFromRunId !== undefined)) {
-        return textResult("`planRef` cannot be combined with script, scriptPath, name, args, or resumeFromRunId.");
-      }
-      const plannedEntry = params.planRef !== undefined
-        ? plannedWorkflowScripts.get(params.planRef)
-        : undefined;
-      const plannedScript = plannedEntry?.script;
-      if (params.planRef !== undefined) {
-        plannedWorkflowScripts.delete(params.planRef);
-        if (plannedEntry === undefined) {
-          return textResult("Workflow plan reference is unknown, expired, or already consumed.");
-        }
       }
 
       const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
@@ -2715,12 +2679,10 @@ Terse command-style prompts produce shallow, generic work.
       // common case is an edited script, but "run that again, cheaply" should
       // not require repeating a path the run already knows.
       const resolved = resolveWorkflowScript(
-        plannedScript !== undefined
-          ? { script: plannedScript }
-          : params.script === undefined && params.scriptPath === undefined && params.name === undefined
+        params.script === undefined && params.scriptPath === undefined && params.name === undefined
             && resumeFrom !== undefined
-            ? { scriptPath: resumeFrom.scriptPath }
-            : params,
+          ? { scriptPath: resumeFrom.scriptPath }
+          : params,
         ctx.cwd,
       );
       if (!resolved.ok) return textResult(resolved.message);
@@ -2735,10 +2697,6 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(err instanceof Error ? err.message : String(err));
       }
 
-      const planned = params.planRef !== undefined && plannedEntry !== undefined;
-      if (planned && workflowAuthorizationDigest(resolved.script, undefined) !== plannedEntry.digest) {
-        return textResult("Workflow plan reference does not match its retained execution script.");
-      }
       const selectedDirectSource = params.name !== undefined
         ? { kind: "name" as const, label: `saved workflow: ${params.name}` }
         : params.scriptPath !== undefined
@@ -2747,12 +2705,17 @@ Terse command-style prompts produce shallow, generic work.
             ? { kind: "inline" as const, label: "inline script" }
             : { kind: "path" as const, label: `resumed script path: ${resolved.scriptPath ?? resumeFrom?.scriptPath ?? "unknown"}` };
       const nestedWorkflowCall = hasNestedWorkflowCall(resolved.script);
-      if (!planned && selectedDirectSource.kind !== "name" && nestedWorkflowCall) {
+      if (nestedWorkflowCall && ctx.hasUI) {
         return textResult(
-          "Direct inline/path scripts with nested workflow behavior cannot be approved from a top-level preview. Use a saved named workflow for trusted composition, or validate the orchestration through WorkflowPlan.",
+          "Interactive workflows with nested workflow() behavior cannot be approved from a top-level preview, including saved named parents. Flatten or split the orchestration so every child prompt, gate, and isolation option is visible in one approval.",
         );
       }
-      if (!planned && ctx.hasUI) {
+      if (selectedDirectSource.kind !== "name" && nestedWorkflowCall) {
+        return textResult(
+          "Direct inline/path scripts with nested workflow() behavior are not supported. Use a saved named workflow only from a trusted headless automation boundary, or flatten/split the orchestration.",
+        );
+      }
+      if (ctx.hasUI) {
         const completeness = validateDirectWorkflowApprovalCompleteness(resolved.script);
         if (!completeness.ok) {
           if (completeness.kind === "indirection") {
@@ -2780,10 +2743,10 @@ Terse command-style prompts produce shallow, generic work.
         });
         if (approvalText.length > 48_000) {
           return textResult(
-            "Workflow behavior summary exceeds 48000 characters. Validate it through WorkflowPlan or split the workflow before running it.",
+            "Workflow behavior summary exceeds 48000 characters. Split or rewrite the workflow before running it.",
           );
         }
-        const approved = await ctx.ui.confirm("Run workflow?", approvalText);
+        const approved = await confirmWorkflowApproval(ctx.ui, "Run workflow?", approvalText);
         if (!approved) return textResult("Workflow was not approved. No run was started.");
       }
 
@@ -2853,14 +2816,11 @@ Terse command-style prompts produce shallow, generic work.
     },
   });
 
-  if (isWorkflowsEnabled()) {
-    pi.registerTool(workflowTool);
-    registerWorkflowPlaybookTools(pi, {
-      authorizeScript: authorizePlannedWorkflowScript,
-      worktreeAllowed: isWorktreeIsolationEnabled(),
-    });
-    registerWorkflowPlaybookSaveTool(pi);
-  }
+  // Markdown Playbooks are adaptive coordinator guidance and remain available
+  // independently of the deterministic JavaScript runtime switch/collisions.
+  registerWorkflowPlaybookTools(pi);
+  registerWorkflowPlaybookSaveTool(pi);
+  if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
 
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.
@@ -2908,17 +2868,6 @@ Terse command-style prompts produce shallow, generic work.
       if (verdict.kind === "none") return;
       if (verdict.kind === "report") {
         warn(verdict.message);
-        if (verdict.withdrawCompanions) {
-          const companionNames = new Set<string>([
-            SUBAGENT_TOOL_NAMES.PLAYBOOK,
-            SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
-            SUBAGENT_TOOL_NAMES.PLAN,
-          ]);
-          const active = pi.getActiveTools();
-          if (active.some(name => companionNames.has(name))) {
-            pi.setActiveTools(active.filter(name => !companionNames.has(name)));
-          }
-        }
         return;
       }
 
@@ -2928,14 +2877,8 @@ Terse command-style prompts produce shallow, generic work.
       warn(verdict.message);
 
       const active = pi.getActiveTools();
-      const workflowToolNames = new Set<string>([
-        SUBAGENT_TOOL_NAMES.PLAYBOOK,
-        SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
-        SUBAGENT_TOOL_NAMES.PLAN,
-      ]);
-      if (verdict.withdraw) workflowToolNames.add(SUBAGENT_TOOL_NAMES.WORKFLOW);
-      if (active.some(name => workflowToolNames.has(name))) {
-        pi.setActiveTools(active.filter(name => !workflowToolNames.has(name)));
+      if (verdict.withdraw && active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
+        pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
       }
     } catch {
       // getAllTools/setActiveTools are unavailable in some hosts (print mode,

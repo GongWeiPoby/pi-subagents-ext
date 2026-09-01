@@ -37,7 +37,6 @@ import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
   collapse,
-  formatDuration,
   header,
   sizeWarning,
   stats,
@@ -45,7 +44,13 @@ import {
   type WorkflowEntry,
   type WorkflowRunStatus,
 } from "../workflow/progress.js";
-import type { Theme } from "./agent-widget.js";
+import {
+  executionActivityText,
+  executionStatParts,
+  formatMs,
+  formatTokens,
+  type Theme,
+} from "./agent-widget.js";
 
 /**
  * Header re-render cadence. Claude Code ticks the workflow clock once a second,
@@ -239,19 +244,29 @@ export function formatThinking(entry: WorkflowAgentEntry): string | undefined {
 export const REPLAYED_ANNOTATION = "from resume journal";
 
 /**
- * The `·`-separated tail of an agent row, in the recovered order: agentType,
- * model, tokens, toolCalls, durationMs. Absent values drop out entirely rather
- * than rendering a placeholder.
+ * The `·`-separated tail of an agent row, in order: agentType, model, live
+ * activity, turns, tokens, toolCalls, durationMs. Absent values drop out
+ * entirely rather than rendering a placeholder.
  */
-export function agentStatSegments(entry: WorkflowAgentEntry): string[] {
-  const parts: string[] = [];
-  if (entry.agentType) parts.push(entry.agentType);
-  const model = formatModel(entry);
-  if (model) parts.push(model);
-  if (entry.tokens) parts.push(formatCompactTokens(entry.tokens));
-  if (entry.toolCalls) parts.push(`${entry.toolCalls} tool call${entry.toolCalls === 1 ? "" : "s"}`);
-  if (entry.durationMs) parts.push(formatDuration(entry.durationMs));
+export function agentStatSegments(
+  entry: WorkflowAgentEntry,
+  options: { canonicalModel?: boolean; duration?: boolean } = {},
+): string[] {
+  const parts = executionStatParts({
+    modelName: formatModel(entry, { canonical: options.canonicalModel }),
+    thinking: formatThinking(entry),
+    turnCount: entry.turnCount,
+    toolUses: entry.toolCalls,
+    tokenText: entry.tokens ? formatTokens(entry.tokens) : undefined,
+    elapsed: options.duration === false || !entry.durationMs ? undefined : formatMs(entry.durationMs),
+  });
   return parts;
+}
+
+/** Ordinary-agent activity wording adapted from a persisted workflow snapshot. */
+export function workflowActivityText(entry: WorkflowAgentEntry): string | undefined {
+  if (!entry.activity && !entry.outputPreview) return undefined;
+  return executionActivityText({ activity: entry.activity, outputPreview: entry.outputPreview });
 }
 
 /**
@@ -325,7 +340,10 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
   const statsWidth = visibleWidth(head.stats);
   const clampedLeft = clampLine(left, Math.max(0, width - statsWidth - 1));
   const gap = Math.max(1, width - lineWidth(clampedLeft) - statsWidth);
-  lines.push([...clampedLeft, { text: " ".repeat(gap) }, { text: head.stats, color: "dim" }]);
+  lines.push(clampLine(
+    [...clampedLeft, { text: " ".repeat(gap) }, { text: head.stats, color: "dim" }],
+    width,
+  ));
 
   if (head.subtext) lines.push(clampLine([{ text: `  ${head.subtext}`, color: "dim" }], width));
 
@@ -375,15 +393,25 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
       // ported stat tail in its recovered order. A replayed agent otherwise
       // renders as a tick with no tokens and no duration — indistinguishable
       // from one that somehow did the work for free.
+      const baseStats = agentStatSegments(entry);
       const statParts = entry.cached
-        ? [REPLAYED_ANNOTATION, ...agentStatSegments(entry)]
-        : agentStatSegments(entry);
+        ? [REPLAYED_ANNOTATION, entry.agentType, ...baseStats].filter((part): part is string => part !== undefined)
+        : [entry.agentType, ...baseStats].filter((part): part is string => part !== undefined);
       const pad = Math.max(0, labelColumn - visibleWidth(entry.label));
       segments.push({ text: statParts.length > 0 ? entry.label + " ".repeat(pad) : entry.label });
       for (const part of statParts) {
         segments.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
       }
       lines.push(clampLine(segments, width));
+      const liveActivity = workflowActivityText(entry);
+      if (liveActivity && entry.state !== "done" && entry.state !== "error") {
+        lines.push(clampLine([
+          { text: "  " },
+          { text: rail, color: "dim" },
+          { text: `   ${glyphs.log}  `, color: "dim" },
+          { text: liveActivity, color: "dim" },
+        ], width));
+      }
     });
   });
 
