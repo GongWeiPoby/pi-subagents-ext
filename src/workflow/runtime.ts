@@ -14,6 +14,13 @@
  */
 
 import { Worker } from "node:worker_threads";
+import {
+  createWorkflowChildAttempt,
+  isSafeWorkflowReference,
+  snapshotWorkflowChildAttempt,
+  type WorkflowChildAttempt,
+  type WorkflowChildAttemptUsage,
+} from "./attempt.js";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
 import { extractMeta, type WorkflowMeta } from "./meta.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "./progress.js";
@@ -55,6 +62,8 @@ export interface WorkflowSpawnRequest {
   agentId: string;
   /** Position in the run, and the progress entry's stable identity. */
   index: number;
+  /** Previous immutable attempt when the runtime is replacing this child after a retry. */
+  sourceAttemptId?: string;
   prompt: string;
   label: string;
   agentType: string;
@@ -123,18 +132,32 @@ export interface WorkflowSpawnRequest {
 
 export interface WorkflowSpawnResult {
   ok: boolean;
+  /** Safe manager/result identities. Paths and artifact bodies never cross this boundary. */
+  recordId?: string;
+  artifactId?: string;
+  sourceAttemptId?: string;
+  /** Effective configuration captured at the physical-attempt boundary. */
+  model?: string;
+  modelId?: string;
+  thinking?: string;
+  /** Usage from this physical invocation only. */
+  usage?: WorkflowChildAttemptUsage;
+  /** The agent was hard-aborted rather than returning an ordinary failure. */
+  killed?: boolean;
   /** The agent's answer. Present when `ok`. */
   text?: string;
   /** Why it failed. Present when not `ok`. */
   error?: string;
   /** The user dismissed it rather than it failing; renders as skipped. */
   skipped?: boolean;
+  /** Display-token total for this physical invocation (input + output + cache write). */
   tokens?: number;
   /**
-   * Output tokens only, for the script's `budget.spent()`.
+   * Output tokens from this physical invocation, for the script's `budget.spent()`.
    *
-   * Separate from {@link tokens}, which is the lifetime total. Claude Code's
-   * budget counts output, and a fan-out's re-sent input would swamp it.
+   * Separate from {@link tokens}, which includes this attempt's input and cache
+   * writes. Claude Code's budget counts output, and a fan-out's re-sent input
+   * would swamp it.
    */
   outputTokens?: number;
   toolCalls?: number;
@@ -266,9 +289,10 @@ export interface WorkflowControl {
    * re-run, so the script's `agent()` promise is still the one waiting and it
    * gets the new answer.
    *
-   * Only while it is running — that is the whole window. Once the call has
-   * settled its value is already the script's, and re-running would produce a
-   * result with nowhere to go.
+   * Only while it is running and the host has exposed an abortable record — a
+   * startup-pending child cannot be stopped safely, so retry is rejected. Once
+   * the call has settled its value is already the script's, and re-running
+   * would produce a result with nowhere to go.
    */
   retry(index: number): boolean;
 }
@@ -279,6 +303,8 @@ export interface RunWorkflowOptions {
   args?: unknown;
   host: WorkflowHost;
   signal?: AbortSignal;
+  /** Fired with a complete, detached snapshot whenever one physical child attempt changes. */
+  onAttempt?(attempt: WorkflowChildAttempt): void;
   /** Fired per batch, not per entry — see the worker's progress batching. */
   onProgress?(entries: readonly WorkflowEntry[]): void;
   concurrency?: number;
@@ -327,6 +353,8 @@ export interface WorkflowRunResult {
   agentCount: number;
   /** How many of those came back from the journal instead of being spawned. */
   replayedCount: number;
+  /** Final snapshots of every physical child attempt, including replaced retries. */
+  attempts?: WorkflowChildAttempt[];
 }
 
 /* ------------------------------------------------------------------------- *
@@ -588,6 +616,29 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   const semaphore = new Semaphore(options.concurrency ?? workflowConcurrency());
 
   const progress: WorkflowEntry[] = [];
+  const attempts: WorkflowChildAttempt[] = [];
+  const emitAttempt = (attempt: WorkflowChildAttempt): void => {
+    const snapshot = snapshotWorkflowChildAttempt(attempt);
+    const existing = attempts.findIndex(candidate =>
+      candidate.logicalChildIndex === snapshot.logicalChildIndex
+      && candidate.logicalChildId === snapshot.logicalChildId
+      && candidate.physicalAttempt === snapshot.physicalAttempt,
+    );
+    if (existing === -1) attempts.push(snapshot);
+    else attempts[existing] = snapshot;
+    options.onAttempt?.(snapshotWorkflowChildAttempt(snapshot));
+  };
+  const safeRef = (value: string | undefined): string | undefined =>
+    value !== undefined && isSafeWorkflowReference(value) ? value : undefined;
+  const safeAttemptMetadata = (result: WorkflowSpawnResult): Partial<WorkflowChildAttempt> => ({
+    ...(safeRef(result.recordId) !== undefined ? { recordId: safeRef(result.recordId) } : {}),
+    ...(safeRef(result.artifactId) !== undefined ? { artifactId: safeRef(result.artifactId) } : {}),
+    ...(safeRef(result.sourceAttemptId) !== undefined ? { sourceAttemptId: safeRef(result.sourceAttemptId) } : {}),
+    ...(result.model !== undefined ? { model: result.model } : {}),
+    ...(result.modelId !== undefined ? { modelId: result.modelId } : {}),
+    ...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+    ...(result.usage !== undefined ? { usage: result.usage } : {}),
+  });
   const inflight = new Set<string>();
   /** Label → the child that ran under it, last one wins. The `resume` handle. */
   const completedByLabel = new Map<string, CompletedChild>();
@@ -631,11 +682,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
    *
    * The window in which skip and retry mean anything: before the entry appears
    * there is nothing to act on, and after it is gone the script already has its
-   * value. `started` is what separates the two — a retry needs a child to stop.
+   * value. `started` is what separates the two — a retry also needs the host's
+   * manager record so it can stop the physical child before replacing it.
    */
   interface LiveAgent {
     agentId: string;
     started: boolean;
+    /** The host has supplied the manager record needed for a physical abort. */
+    abortable: boolean;
+    /** Physical attempt whose callbacks are currently allowed to mutate this live entry. */
+    attempt?: number;
     intent?: "skip" | "retry";
     /** Wakes it out of a pause hold, so a skip does not wait for a resume. */
     wake?: () => void;
@@ -693,7 +749,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     },
     retry: index => {
       const live = liveAgents.get(index);
-      if (live === undefined || !live.started || live.intent !== undefined) return false;
+      // A startup that has not reported its manager record cannot be aborted:
+      // calling the host here would leave the old physical child running while
+      // this intent could otherwise start a second one.
+      if (live === undefined || !live.started || !live.abortable || live.intent !== undefined) return false;
       live.intent = "retry";
       host.abortAgent(live.agentId);
       return true;
@@ -739,10 +798,20 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       worker.postMessage({ type: "response", callId, ok, value, error, fatal, spent: spentOutputTokens });
     };
 
-    const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount">) => {
+    const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount" | "attempts">) => {
       if (settled) return;
       settled = true;
       options.signal?.removeEventListener("abort", onAbort);
+      const finishedAt = Date.now();
+      for (const attempt of attempts) {
+        if (attempt.status !== "queued" && attempt.status !== "running") continue;
+        emitAttempt({
+          ...attempt,
+          status: "killed",
+          completedAt: finishedAt,
+          error: result.error ?? "Workflow stopped before the child settled.",
+        });
+      }
       // Symmetric with `semaphore.drain()` below: everything parked is woken so
       // it observes the settle and unwinds. Nothing depends on it — the run's
       // promise resolves either way — it just does not leave live-agent
@@ -753,7 +822,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       semaphore.drain();
       // Resolve only once the thread is actually down, so a caller that awaits
       // runWorkflow() is guaranteed not to be leaking one.
-      const settle = () => resolve({ ...result, meta, progress, agentCount, replayedCount });
+      const settle = () => resolve({
+        ...result,
+        meta,
+        progress,
+        agentCount,
+        replayedCount,
+        attempts: attempts.map(snapshotWorkflowChildAttempt),
+      });
       void worker.terminate().then(settle, settle);
     };
 
@@ -849,7 +925,17 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         ...(payload.phaseTitle !== undefined ? { phaseTitle: payload.phaseTitle } : {}),
       };
 
-      const queuedAt = Date.now();
+      let queuedAt = Date.now();
+      let attempt = 1;
+      const logicalChildId = `workflow-child-${index}`;
+      emitAttempt(createWorkflowChildAttempt({
+        logicalChildIndex: index,
+        logicalChildId,
+        physicalAttempt: 1,
+        status: "queued",
+        invocation: resumed === undefined ? "spawn" : "resume",
+        queuedAt,
+      }));
       emit([{ ...base, queuedAt }]);
 
       // Replay before the semaphore, not after: a cached answer is not model
@@ -877,6 +963,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             resultPreview: preview(replayedText),
           },
         ]);
+        emitAttempt({
+          ...attempts.find(candidate => candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt)!,
+          status: "replayed",
+          invocation: "replay",
+          queuedAt,
+          startedAt: at,
+          completedAt: at,
+          cached: true,
+          usage: { turns: 0, toolCalls: 0, tokens: { input: 0, output: 0, cacheWrite: 0 } },
+        });
         openLaunches.delete(callId);
         // Re-recorded so this run's journal is complete on its own terms: a
         // resume of a resume must not have to walk back through a chain of
@@ -892,6 +988,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       /** A skip the user asked for, before the child ever started. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
         recordJournal?.({ index, key, ok: false, ...resumeMark });
+        emitAttempt({
+          ...attempts.find(candidate => candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt)!,
+          status: "skipped",
+          completedAt: Date.now(),
+          skipped: true,
+          error: "Skipped by user.",
+        });
         emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
         // the script's `.filter(Boolean)` was already written to survive.
@@ -900,14 +1003,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
       // Registered for exactly as long as the call is unanswered, which is the
       // window in which skip and retry mean anything.
-      const live: LiveAgent = { agentId, started: false };
+      const live: LiveAgent = { agentId, started: false, abortable: false };
       liveAgents.set(index, live);
       // Read through a call, not off the field: `intent` is set from outside
       // this function while it is suspended at an await, so control-flow
       // narrowing across the awaits would be reasoning about a value that has
       // since changed.
       const intent = (): LiveAgent["intent"] => live.intent;
-      let attempt = 1;
       try {
         for (;;) {
           // Held before the slot, not after: a paused run must not sit on
@@ -945,6 +1047,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             attempt > 1 ? { attempt, lastAttemptReason: "user-retry" as const } : {};
 
           const startedAt = Date.now();
+          const currentAttempt = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          );
+          if (currentAttempt === undefined) throw new Error("Workflow child attempt is missing.");
+          emitAttempt({ ...currentAttempt, status: "running", startedAt });
           delete base.turnCount;
           delete base.outputPreview;
           base.activity = "starting";
@@ -955,6 +1062,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // without knowing they were ever corrected. Re-emitting under the
           // same `index` is what the append-only, last-write-wins progress log
           // is for — the row updates in place while the agent is still running.
+          const physicalAttempt = attempt;
           const onSessionReady = () => {
             base.activity = "waiting for model";
             if (!inflight.has(agentId)) return;
@@ -968,12 +1076,28 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             requestedThinking?: string;
             requestedModel?: string;
           }) => {
+            // A late callback from an older physical attempt must not make a
+            // newer startup look abortable.
+            if (live.attempt !== physicalAttempt) return;
+            if (info.recordId !== undefined) live.abortable = true;
             if (info.recordId !== undefined) base.recordId = info.recordId;
             if (info.modelName !== undefined) base.model = safeProgressLine(info.modelName);
             if (info.modelId !== undefined) base.modelId = safeProgressLine(info.modelId);
             if (info.thinking !== undefined) base.thinking = safeProgressLine(info.thinking);
             if (info.requestedThinking !== undefined) base.requestedThinking = safeProgressLine(info.requestedThinking);
             if (info.requestedModel !== undefined) base.requestedModel = safeProgressLine(info.requestedModel);
+            const liveAttempt = attempts.find(candidate =>
+              candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+            );
+            if (liveAttempt !== undefined) {
+              emitAttempt({
+                ...liveAttempt,
+                ...(safeRef(info.recordId) !== undefined ? { recordId: safeRef(info.recordId) } : {}),
+                ...(info.modelName !== undefined ? { model: info.modelName } : {}),
+                ...(info.modelId !== undefined ? { modelId: info.modelId } : {}),
+                ...(info.thinking !== undefined ? { thinking: info.thinking } : {}),
+              });
+            }
             // `base.state` is still "start", so emitting after the row reached a
             // terminal state would revert it to running under last-write-wins.
             // Not reachable from this repo's host, which reports during startup
@@ -1038,10 +1162,17 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             outputTimer = undefined;
             emitOutputProgress();
           };
+          live.attempt = physicalAttempt;
+          live.abortable = false;
           live.started = true;
           inflight.add(agentId);
 
           let result: WorkflowSpawnResult;
+          const sourceAttemptId = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          )?.sourceAttemptId ?? attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          )?.artifactId;
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
@@ -1057,6 +1188,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 : await host.spawnAgent({
                     agentId,
                     index,
+                    ...(attempt > 1 && safeRef(sourceAttemptId) !== undefined
+                      ? { sourceAttemptId: safeRef(sourceAttemptId) }
+                      : {}),
                     prompt: payload.prompt,
                     label,
                     agentType,
@@ -1098,24 +1232,78 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             semaphore.release();
           }
 
-          if (settled) return;
+          const finishedAt = Date.now();
+          const current = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          );
+          if (current === undefined) return;
+          const metadata = safeAttemptMetadata(result);
+
+          // The workflow may already be terminal while its aborted child is
+          // still unwinding. Keep the terminal classification from finish(),
+          // but retain the attempt-local evidence that only the child can
+          // report at settle. Nothing below this branch may answer the dead
+          // worker, append a journal entry, retry, or change workflow status.
+          if (settled) {
+            if (current.status === "killed") {
+              emitAttempt({
+                ...current,
+                ...metadata,
+                status: "killed",
+                completedAt: finishedAt,
+                ...(result.error !== undefined ? { error: result.error } : {}),
+              });
+            }
+            return;
+          }
+
+          // Every physical invocation pays its output-token budget, including a
+          // stopped attempt that is about to be replaced by retry.
+          spentOutputTokens += result.outputTokens ?? 0;
 
           // The stop that produced this result was ours, so run the same call
-          // again rather than reporting it. The script is still awaiting this
-          // `agent()`, which is the only reason a retry can mean anything.
+          // again rather than reporting it. The old physical attempt remains in
+          // telemetry as killed; the script is still awaiting this `agent()`.
           if (intent() === "retry" && !aborted) {
+            emitAttempt({
+              ...current,
+              ...metadata,
+              status: "killed",
+              completedAt: finishedAt,
+              error: result.error ?? "Replaced by user retry.",
+            });
             live.intent = undefined;
             attempt++;
+            queuedAt = Date.now();
+            emitAttempt({
+              logicalChildIndex: index,
+              logicalChildId,
+              physicalAttempt: attempt,
+              status: "queued",
+              invocation: "retry",
+              sourceAttemptId: safeRef(result.artifactId),
+              queuedAt,
+            });
             emit([{ ...base, queuedAt, attempt, lastAttemptReason: "user-retry" }]);
             continue;
           }
 
-          // Counted before the response is sent, so the very call that spent
-          // them already sees them in `budget.spent()`. Failed and skipped
-          // agents count too — they burned the tokens either way.
-          spentOutputTokens += result.outputTokens ?? 0;
+          const terminalStatus = result.ok
+            ? "completed" as const
+            : result.killed
+              ? "killed" as const
+              : result.skipped
+                ? "skipped" as const
+                : "failed" as const;
+          emitAttempt({
+            ...current,
+            ...metadata,
+            status: terminalStatus,
+            completedAt: finishedAt,
+            ...(result.skipped ? { skipped: true } : {}),
+            ...(result.error !== undefined ? { error: result.error } : {}),
+          });
 
-          const finishedAt = Date.now();
           const common = {
             ...base,
             queuedAt,

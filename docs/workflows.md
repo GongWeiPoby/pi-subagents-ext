@@ -72,7 +72,7 @@ FleetView renders the same workflow controller and tree below the editor. Workfl
 | `x` | Stop the workflow |
 | `p` | Pause or resume; running children finish, but no new children start |
 | `s` | Skip the selected queued/running child; its `agent()` call returns `null` |
-| `r` | Retry the selected running child; the same pending call receives the replacement result |
+| `r` | Retry the selected running child once its host record is available; the same pending call receives the replacement result. A child still in startup cannot be stopped safely, so retry is rejected until that record exists |
 | `c` | Open the selected child's live conversation |
 
 Skipping and terminal child failure both appear as `null` to the script. A script should filter or handle that result where a later stage needs a value. The workflow controls do not rewrite the script or invent a replacement call.

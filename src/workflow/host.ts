@@ -40,6 +40,10 @@ import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import type { AgentRecord, ThinkingLevel } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
+import {
+  isSafeWorkflowReference,
+  type WorkflowChildAttemptUsage,
+} from "./attempt.js";
 import type { WorkflowGateResult, WorkflowHost, WorkflowSpawnResult } from "./runtime.js";
 import { resolveWorkflowSource } from "./saved.js";
 
@@ -117,36 +121,64 @@ function resolvedInfo(record: AgentRecord | undefined) {
   };
 }
 
-function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
-  const tokens = getLifetimeTotal(record.lifetimeUsage);
-  // Reported separately from `tokens`, which is the lifetime total. The script's
-  // `budget` counts *output* tokens, as Claude Code's does — billing the input
-  // and cache reads a fan-out re-sends would over-report it by an order of
-  // magnitude and make the documented guards useless.
-  const outputTokens = record.lifetimeUsage?.output ?? 0;
+function safeReference(value: string | undefined): string | undefined {
+  return value !== undefined && isSafeWorkflowReference(value) ? value : undefined;
+}
+
+function attemptUsage(
+  record: AgentRecord,
+  baseline: { toolUses: number; usage: NonNullable<AgentRecord["lifetimeUsage"]> },
+): WorkflowChildAttemptUsage {
+  const subtract = (current: number | undefined, start: number | undefined) =>
+    Math.max(0, (current ?? 0) - (start ?? 0));
+  return {
+    turns: record.turnCount ?? 0,
+    toolCalls: Math.max(0, record.toolUses - baseline.toolUses),
+    tokens: {
+      input: subtract(record.lifetimeUsage.input, baseline.usage.input),
+      output: subtract(record.lifetimeUsage.output, baseline.usage.output),
+      cacheWrite: subtract(record.lifetimeUsage.cacheWrite, baseline.usage.cacheWrite),
+      cacheRead: subtract(record.lifetimeUsage.cacheRead, baseline.usage.cacheRead),
+      cost: subtract(record.lifetimeUsage.cost, baseline.usage.cost),
+    },
+  };
+}
+
+function toSpawnResult(
+  record: AgentRecord,
+  baseline: { toolUses: number; usage: NonNullable<AgentRecord["lifetimeUsage"]> } = {
+    toolUses: 0,
+    usage: { input: 0, output: 0, cacheWrite: 0 },
+  },
+): WorkflowSpawnResult {
+  const usage = attemptUsage(record, baseline);
+  const tokens = getLifetimeTotal(usage.tokens);
   const cwd = childCwd(record);
   const common = {
+    ...(safeReference(record.id) !== undefined ? { recordId: safeReference(record.id) } : {}),
+    ...(safeReference(record.artifactId) !== undefined ? { artifactId: safeReference(record.artifactId) } : {}),
+    ...(safeReference(record.sourceAttemptId) !== undefined ? { sourceAttemptId: safeReference(record.sourceAttemptId) } : {}),
+    ...(record.invocation?.modelName !== undefined ? { model: record.invocation.modelName } : {}),
+    ...(record.invocation?.modelId !== undefined ? { modelId: record.invocation.modelId } : {}),
+    ...(record.invocation?.thinking !== undefined ? { thinking: record.invocation.thinking } : {}),
+    usage,
     ...(tokens > 0 ? { tokens } : {}),
-    ...(outputTokens > 0 ? { outputTokens } : {}),
-    ...(record.toolUses > 0 ? { toolCalls: record.toolUses } : {}),
-    turnCount: record.turnCount,
+    ...(usage.tokens.output > 0 ? { outputTokens: usage.tokens.output } : {}),
+    ...(usage.toolCalls > 0 ? { toolCalls: usage.toolCalls } : {}),
+    turnCount: usage.turns,
     ...(cwd !== undefined ? { cwd } : {}),
   };
 
-  if (succeeded(record)) {
-    return {
-      ...common,
-      ok: true,
-      text: record.result ?? "",
-    };
-  }
-  // "stopped" is someone reaching in and stopping this child — /agents, the
-  // fleet list, a workflow abort. That is the same thing the workflows dialog's
-  // skip action means, so it renders as skipped rather than failed.
+  if (succeeded(record)) return { ...common, ok: true, text: record.result ?? "" };
   if (record.status === "stopped") {
     return { ...common, ok: false, skipped: true, error: record.error ?? "Stopped." };
   }
-  return { ...common, ok: false, error: record.error ?? `Agent ${record.status}.` };
+  return {
+    ...common,
+    ok: false,
+    ...(record.status === "aborted" ? { killed: true } : {}),
+    error: record.error ?? `Agent ${record.status}.`,
+  };
 }
 
 /** Shell used to run a `gate` command, mirroring how a user would type it. */
@@ -308,6 +340,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // cast asserts what the boundary has already checked. Left unset,
             // the agent definition's `thinking` (then the parent's) still wins —
             // same precedence as `model` above.
+            ...(request.sourceAttemptId !== undefined ? { sourceAttemptId: request.sourceAttemptId } : {}),
             ...(request.effort !== undefined ? { thinkingLevel: request.effort as ThinkingLevel } : {}),
             // Seeded with the REQUEST, not the outcome. The manager overwrites
             // the effective half at session creation; without a seed there is
@@ -381,6 +414,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       const info = resolvedInfo(existing);
       if (info !== undefined) onResolved?.(info);
       if (existing?.session !== undefined) onSessionReady?.();
+      const baseline = existing === undefined
+        ? { toolUses: 0, usage: { input: 0, output: 0, cacheWrite: 0 } }
+        : { toolUses: existing.toolUses, usage: { ...existing.lifetimeUsage } };
       const record = await manager.resume(id, prompt, deps.signal, { onTurnEnd, onToolActivity, onTextDelta });
       if (record === undefined) {
         return {
@@ -389,7 +425,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         };
       }
       settledRecords.set(agentId, record);
-      return toSpawnResult(record);
+      return {
+        ...toSpawnResult(record, baseline),
+      };
     },
 
     /**

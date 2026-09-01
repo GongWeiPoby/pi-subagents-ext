@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import type { WorkflowChildAttempt } from "../src/workflow/attempt.js";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
   completeWorkflowTask,
@@ -18,6 +19,7 @@ import {
   pauseWorkflowTask,
   resolveResumeTarget,
   resumeWorkflowTask,
+  updateWorkflowAttempt,
   updateWorkflowProgressBatch,
   type WorkflowTask,
 } from "../src/workflow/task.js";
@@ -37,6 +39,20 @@ function runningTask(): { task: WorkflowTask; control: ReturnType<typeof stubCon
   const control = stubControl();
   task.control = control;
   return { task, control };
+}
+
+function childAttempt(overrides: Partial<WorkflowChildAttempt> = {}): WorkflowChildAttempt {
+  return {
+    logicalChildIndex: 0,
+    logicalChildId: "workflow-child-0",
+    physicalAttempt: 1,
+    status: "running",
+    invocation: "spawn",
+    queuedAt: 1_000,
+    startedAt: 1_100,
+    usage: { turns: 1, toolCalls: 2, tokens: { input: 3, output: 4, cacheWrite: 5 } },
+    ...overrides,
+  };
 }
 
 describe("Todo execution binding", () => {
@@ -144,7 +160,46 @@ describe("settling a run", () => {
     completeWorkflowTask(task, result);
 
     expect(task.control).toBeUndefined();
+    expect(task.workflowAttempts).toEqual([]);
     expect(pauseWorkflowTask(task)).toBe(false);
+  });
+
+  it("stores non-empty live and completed attempt snapshots with clone isolation", () => {
+    const { task } = runningTask();
+    const live = childAttempt();
+
+    updateWorkflowAttempt(task, live);
+    live.usage!.tokens.input = 99;
+    expect(task.workflowAttempts).toEqual([expect.objectContaining({
+      status: "running",
+      usage: { turns: 1, toolCalls: 2, tokens: { input: 3, output: 4, cacheWrite: 5 } },
+    })]);
+
+    const completed = childAttempt({
+      status: "completed",
+      completedAt: 1_200,
+      artifactId: "artifact-1",
+      usage: { turns: 2, toolCalls: 3, tokens: { input: 6, output: 7, cacheWrite: 8 } },
+    });
+    updateWorkflowAttempt(task, completed);
+    expect(task.workflowAttempts).toHaveLength(1);
+    expect(task.workflowAttempts[0]).toMatchObject({ status: "completed", artifactId: "artifact-1" });
+
+    const completedResult = { ...result, agentCount: 1, attempts: [completed] };
+    completeWorkflowTask(task, completedResult);
+
+    completed.usage!.tokens.output = 77;
+    task.workflowAttempts[0].usage!.tokens.cacheWrite = 88;
+    expect(task.workflowAttempts).toEqual([expect.objectContaining({
+      status: "completed",
+      artifactId: "artifact-1",
+      usage: { turns: 2, toolCalls: 3, tokens: { input: 6, output: 7, cacheWrite: 88 } },
+    })]);
+    expect(completed.usage).toEqual({
+      turns: 2,
+      toolCalls: 3,
+      tokens: { input: 6, output: 77, cacheWrite: 8 },
+    });
   });
 
   it("banks a pause that was still open when the run finished", () => {

@@ -114,18 +114,47 @@ describe("createWorkflowHost — spawn mapping", () => {
     registerAgents(new Map());
   });
 
-  it("spawns through the manager and maps a completed record onto the script's result", async () => {
+  it("spawns through the manager and maps attempt identity, configuration and usage", async () => {
     const stub = stubManager(() =>
-      record({ result: "the answer", toolUses: 3, lifetimeUsage: { input: 100, output: 20, cacheWrite: 5 } }),
+      record({
+        id: "record-1",
+        artifactId: "artifact-1",
+        sourceAttemptId: "source-1",
+        result: "the answer",
+        turnCount: 2,
+        toolUses: 3,
+        lifetimeUsage: { input: 100, output: 20, cacheWrite: 5, cacheRead: 4, cost: 0.25 },
+        invocation: {
+          modelName: "Sonnet 4.6",
+          modelId: "anthropic/claude-sonnet-4-6",
+          thinking: "high",
+        } as AgentRecord["invocation"],
+      }),
     );
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 
     const result = await host.spawnAgent(request({ label: "review:bugs" }));
 
-    expect(result).toMatchObject({ ok: true, text: "the answer", tokens: 125, toolCalls: 3 });
-    // `tokens` is the lifetime total (100 + 20 + 5); `outputTokens` feeds the
-    // script's `budget.spent()` and must be output alone, as Claude Code's
-    // budget is. Billing a fan-out's re-sent input would swamp it.
+    expect(result).toMatchObject({
+      ok: true,
+      text: "the answer",
+      recordId: "record-1",
+      artifactId: "artifact-1",
+      sourceAttemptId: "source-1",
+      model: "Sonnet 4.6",
+      modelId: "anthropic/claude-sonnet-4-6",
+      thinking: "high",
+      tokens: 125,
+      toolCalls: 3,
+      usage: {
+        turns: 2,
+        toolCalls: 3,
+        tokens: { input: 100, output: 20, cacheWrite: 5, cacheRead: 4, cost: 0.25 },
+      },
+    });
+    // `tokens` is this physical invocation's total (100 + 20 + 5), while
+    // `outputTokens` feeds the script's `budget.spent()` and must be output
+    // alone. Billing a fan-out's re-sent input would swamp it.
     expect(result.outputTokens).toBe(20);
     const [, , type, prompt, options] = stub.spawnAndWait.mock.calls[0];
     expect(type).toBe("general-purpose");
@@ -146,10 +175,11 @@ describe("createWorkflowHost — spawn mapping", () => {
       rootSessionId: "root-1",
     });
 
-    await host.spawnAgent(request({ isolation: "worktree" }));
+    await host.spawnAgent(request({ isolation: "worktree", sourceAttemptId: "artifact-parent" }));
 
     const options = stub.spawnAndWait.mock.calls[0][4];
     expect(options.isolation).toBe("worktree");
+    expect(options.sourceAttemptId).toBe("artifact-parent");
     expect(options.signal).toBe(controller.signal);
     expect(options.rootSessionId).toBe("root-1");
   });
@@ -540,6 +570,46 @@ describe("createWorkflowHost — abort, resume and gate", () => {
       onTextDelta: undefined,
     });
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+  });
+
+  it("subtracts a non-zero resume baseline and preserves attempt lineage", async () => {
+    const stub = stubManager(() => record({
+      id: "manager-id-7",
+      artifactId: "artifact-1",
+      turnCount: 4,
+      toolUses: 5,
+      lifetimeUsage: { input: 100, output: 40, cacheWrite: 10, cacheRead: 8, cost: 0.5 },
+    }));
+    stub.resume.mockResolvedValue(record({
+      id: "manager-id-7",
+      artifactId: "artifact-2",
+      sourceAttemptId: "artifact-1",
+      result: "resumed",
+      turnCount: 2,
+      toolUses: 8,
+      lifetimeUsage: { input: 130, output: 52, cacheWrite: 14, cacheRead: 11, cost: 0.65 },
+    }));
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ agentId: "wf-agent-0" }));
+    const resumed = await host.resumeAgent?.("wf-agent-0", "continue");
+
+    expect(resumed).toMatchObject({
+      ok: true,
+      recordId: "manager-id-7",
+      artifactId: "artifact-2",
+      sourceAttemptId: "artifact-1",
+      tokens: 46,
+      outputTokens: 12,
+      toolCalls: 3,
+      turnCount: 2,
+      usage: {
+        turns: 2,
+        toolCalls: 3,
+        tokens: { input: 30, output: 12, cacheWrite: 4, cacheRead: 3 },
+      },
+    });
+    expect(resumed?.usage?.tokens.cost).toBeCloseTo(0.15);
   });
 
   it("bridges live resume callbacks before settlement", async () => {

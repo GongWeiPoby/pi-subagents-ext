@@ -17,6 +17,11 @@
 import { randomUUID } from "node:crypto";
 import type { TaskExecutionRef } from "../tasks/types.js";
 import { escapeXml } from "../xml.js";
+import {
+  cloneWorkflowChildAttempt,
+  snapshotWorkflowChildAttempt,
+  type WorkflowChildAttempt,
+} from "./attempt.js";
 import { type FleetWorkflowPhase, workflowFleetPhases } from "./fleet.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
@@ -65,6 +70,8 @@ export interface WorkflowTask {
   /** How many agents came back from {@link replay} instead of being spawned. */
   replayedCount: number;
 
+  /** Physical child invocation snapshots, retained separately from UI progress. */
+  workflowAttempts: WorkflowChildAttempt[];
   /** The append-only event log, in emission order. */
   workflowProgress: WorkflowEntry[];
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */
@@ -131,6 +138,7 @@ export function createWorkflowTask(init: {
     sessionId: init.sessionId,
     sessionGeneration: init.sessionGeneration ?? 0,
     replayedCount: 0,
+    workflowAttempts: [],
     workflowProgress: [],
     progressVersion: 0,
     agentCount: 0,
@@ -143,6 +151,18 @@ export function createWorkflowTask(init: {
     startTime: init.startTime ?? Date.now(),
     totalPausedMs: 0,
   };
+}
+
+/** Apply or replace one physical child attempt without collapsing retry history. */
+export function updateWorkflowAttempt(task: WorkflowTask, attempt: WorkflowChildAttempt): void {
+  const snapshot = snapshotWorkflowChildAttempt(attempt);
+  const index = task.workflowAttempts.findIndex(candidate =>
+    candidate.logicalChildIndex === snapshot.logicalChildIndex
+    && candidate.logicalChildId === snapshot.logicalChildId
+    && candidate.physicalAttempt === snapshot.physicalAttempt,
+  );
+  if (index === -1) task.workflowAttempts.push(snapshot);
+  else task.workflowAttempts[index] = snapshot;
 }
 
 /**
@@ -230,6 +250,7 @@ export function completeWorkflowTask(
   task.workflowName ??= result.meta.name;
   task.agentCount = Math.max(task.agentCount, result.agentCount);
   task.replayedCount = result.replayedCount;
+  task.workflowAttempts = (result.attempts ?? []).map(cloneWorkflowChildAttempt);
   task.value = result.value;
   task.error = result.error;
   task.endTime = now;
