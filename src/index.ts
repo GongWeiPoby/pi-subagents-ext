@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
-import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AgentManager, isTopLevelAgent, resolveResultBodyEnabled } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -710,9 +710,16 @@ export default function (pi: ExtensionAPI) {
     // Like the tool's own, it is a prediction — editing the agent file mid-run
     // leaves the displayed ceiling stale.
     const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns));
+    const resultBodyEnabled = typeof options?.resultBodyEnabled === "boolean"
+      ? options.resultBodyEnabled
+      : resolveResultBodyEnabled(dispatch.type);
     // Repaints are left to the manager's `onStart` callback, which already starts
     // the widget/fleet timers for agents that enter this way.
-    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks });
+    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, {
+      ...options,
+      ...callbacks,
+      resultBodyEnabled,
+    });
     agentActivity.set(id, state);
     return id;
   };
@@ -733,6 +740,9 @@ export default function (pi: ExtensionAPI) {
     // conversation. Only the mention dispatcher may set it, and only from a
     // path this extension itself recorded — never from anything a caller sent.
     delete safeOptions.resumeSessionFile;
+    delete safeOptions.sourceAttemptId;
+    delete safeOptions.sourceAgentId;
+    delete safeOptions.resultBodyEnabled;
     // Bypasses handle allocation, so a forged value would duplicate a live
     // agent's name and make `@handle` ambiguous. Same rule: dispatcher only.
     delete safeOptions.reclaim;
@@ -967,7 +977,6 @@ export default function (pi: ExtensionAPI) {
         // downstream consumer keys off and a resume must not re-open it.
         const config = getAgentConfig(record.type);
         const resumedRecord = await startBackgroundResume(ctx, record, mention.message, {
-          outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
           maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
         });
         ctx.ui.notify(
@@ -1024,6 +1033,9 @@ export default function (pi: ExtensionAPI) {
           description: entry.description,
           reclaim: { handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
+          sourceAttemptId: entry.artifactId,
+          sourceAgentId: entry.id,
+          resultBodyEnabled: entry.resultBodyEnabled,
           isBackground: true,
         });
         // The agent may still be starting — wait, so a startup failure lands in
@@ -1319,9 +1331,12 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     existing: AgentRecord,
     prompt: string,
-    opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
+    opts: { maxTurns?: number; toolCallId?: string },
   ): Promise<AgentRecord | undefined> {
     const id = existing.id;
+    const outputTranscript = typeof existing.resultBodyEnabled === "boolean"
+      ? existing.resultBodyEnabled
+      : resolveResultBodyEnabled(existing.type);
     const joinMode = resolveJoinMode(defaultJoinMode, true);
     // Assigned unconditionally: the completion notification carries this as
     // `<tool-use-id>`, so a mention-resume (which passes none) has to CLEAR the
@@ -1332,9 +1347,11 @@ export default function (pi: ExtensionAPI) {
     // Reuse the agent's transcript rather than starting a fresh one: the
     // path is deterministic per agent+session, so writing an initial entry
     // would truncate the previous run's turns (see ensureOutputFile).
-    if (opts.outputTranscript) {
+    if (outputTranscript) {
       existing.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
       ensureOutputFile(existing.outputFile);
+    } else {
+      existing.outputFile = undefined;
     }
     // Anchor streaming past the turns already on disk, captured BEFORE the
     // run starts. The resumed prompt lands as an ordinary user message at
@@ -1883,7 +1900,7 @@ Terse command-style prompts produce shallow, generic work.
       // default applies. `attachTranscript` below is the SOLE gate — every
       // downstream consumer keys off record.outputFile being set, so no spawn
       // path can re-enable the transcript by accident.
-      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
+      const outputTranscript = resolveResultBodyEnabled(subagentType);
       const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
         if (!rec || !outputTranscript) return;
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
@@ -2036,7 +2053,6 @@ Terse command-style prompts produce shallow, generic work.
           }
 
           const record = await startBackgroundResume(ctx, existing, params.prompt, {
-            outputTranscript,
             maxTurns: effectiveMaxTurns,
             toolCallId,
           });
@@ -2104,6 +2120,7 @@ Terse command-style prompts produce shallow, generic work.
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          resultBodyEnabled: outputTranscript,
           ...bgCallbacks,
         });
 
@@ -2258,6 +2275,7 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          resultBodyEnabled: outputTranscript,
           // Deliberately does NOT set fgId: that drives agentActivity, the
           // widget and the `finally` cleanup below, none of which should see an
           // agent that has no session and may never get one.
@@ -3704,6 +3722,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // cancel at all. It is also one human action that cannot fan out, which
       // is what the limit exists to bound. It still counts once started.
       bypassQueue: true,
+      resultBodyEnabled: getOutputTranscriptDefault(),
     });
 
     if (record.status === "error") {

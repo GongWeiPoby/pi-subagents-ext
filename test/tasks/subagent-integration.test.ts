@@ -391,6 +391,7 @@ describe("TaskExecute", () => {
     expect(rpc.spawned[0].type).toBe("general-purpose");
     expect(rpc.spawned[0].prompt).toContain("Run the test suite");
     expect(rpc.spawned[0].options.isBackground).toBe(true);
+    expect(rpc.spawned[0].options).not.toHaveProperty("resultBodyEnabled");
   });
 
   it("reconciles an agent that completes before the spawn reply is handled", async () => {

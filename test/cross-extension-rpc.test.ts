@@ -109,6 +109,21 @@ describe("cross-extension RPC", () => {
       );
     });
 
+    it("does not allow RPC callers to override result-body privacy", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-privacy", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-privacy", type: "Explore", prompt: "private",
+        options: { resultBodyEnabled: true },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "Explore", "private", {},
+      );
+    });
     it("returns the manager-stamped task execution ref", async () => {
       const taskExecution = {
         storeId: "store-1",

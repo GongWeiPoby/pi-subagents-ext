@@ -289,7 +289,7 @@ Individual agent results render Claude Code-style in the conversation:
 
 Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
 
-By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
+By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file in an OS-managed, session-private temp directory under `tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript or result body for it, or set `outputTranscript: false` in `subagents.json` to make both opt-in for the whole project (frontmatter overrides the project default). The effective privacy choice is captured when the Agent record is first spawned and remains in force for foreground/background resumes, even if the agent file or global default changes later. This governs conversation transcript and optional result body persistence, but not the metadata-only result manifest. It is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
 
 ```
 ✓ Find auth files completed
@@ -300,7 +300,15 @@ By default, foreground and background agents each stream their full conversation
 
 Group completions render each agent as a separate block. The LLM receives structured `<task-notification>` XML for parsing, while the user sees the themed visual.
 
-## Default Agent Types
+### Result artifacts
+
+Each completed top-level Agent attempt also gets an internal result artifact in the session-private task directory. The writer reserves `results/<artifact-id>/` and stores `<artifact-id>.json` as the manifest and, when body persistence is enabled, `<artifact-id>.md` as the result body. IDs are generated internal identifiers with path-safe, bounded components; the artifact directory is created once and later calls are idempotent, so a retry cannot replace a different attempt's files. The body is written before the manifest, and the manifest is written with schema version `1`.
+
+The optional Markdown body is controlled by the same captured `outputTranscript` / `output_transcript` choice as the conversation transcript; disabling it leaves a metadata-only manifest and does not disable pi's persisted session. A newly spawned record stores this choice and every resume reuses it. Records/tombstones created by an older runtime that have no stored choice derive it from the current configuration once when reopened. The manifest contains run metadata, bounded provider error summaries, usage, and a SHA-256 digest for a complete body. The digest detects an incomplete or changed body when it is read, but result artifacts are not immutable or tamper-proof records.
+
+Result artifacts are an internal persistence aid, not verification credentials and not proof that a verification command, Todo, or task is complete. They are distinct from the `.output` transcript (streamed conversation JSONL), pi's session file, and task journal/state. This release provides no `ArtifactRead` tool and no Workflow aggregate result; the manifest/body are not a public read API. The writer validates safe IDs, checks each managed directory with `lstat`, requires the private root to be owner-only `0700`, and uses regular-file plus `O_NOFOLLOW`/exclusive publication checks where the platform exposes them. Node does not provide the directory-fd/`openat` operations needed to bind the whole write to already-open directory handles, so a malicious process running as the same UID can still race a checked directory path; that is outside the protection target. Other local users are excluded by the private root, and the extension does not claim complete protection from same-UID tampering.
+
+
 
 | Type | Tools | Model | Prompt Mode | Description |
 |------|-------|-------|-------------|-------------|
@@ -1139,7 +1147,8 @@ src/
   # Context & environment
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
   skill-loader.ts     # Preload skills (Pi-standard + Agent Skills spec layouts)
-  output-file.ts      # Streaming output file transcripts for agent sessions
+  output-file.ts      # Streaming output file transcripts and session-private task paths
+  result-artifact.ts  # Validated per-attempt result manifests and optional bodies
   worktree.ts         # Git worktree isolation (create, cleanup, prune)
   prompts.ts          # Config-driven system prompt builder
   context.ts          # Parent conversation context for inherit_context

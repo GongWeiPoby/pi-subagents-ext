@@ -191,7 +191,9 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
         if (verdict.kind === "error") throw new Error(verdict.message);
       }
 
-      const id = manager.spawn(pi, ctx, type, prompt, normalizedOptions);
+      const safeOptions = { ...normalizedOptions };
+      delete safeOptions.resultBodyEnabled;
+      const id = manager.spawn(pi, ctx, type, prompt, safeOptions);
       // With isolation: "worktree" the agent starts asynchronously — wait for
       // it, so a strict-isolation failure is still an error envelope rather
       // than an id for an agent that never ran.

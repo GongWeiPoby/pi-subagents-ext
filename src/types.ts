@@ -93,6 +93,9 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+/** Internal persistence state for one immutable Agent attempt result. */
+export type ResultArtifactStatus = "pending" | "complete" | "metadata-only" | "failed" | "skipped";
+
 /**
  * Display mode for the persistent above-editor agent widget.
  * - `all`: show every agent (foreground + background).
@@ -139,6 +142,14 @@ export interface AgentTombstone {
   handle: string;
   alias?: string;
   id: string;
+  /** Last immutable attempt identity, used as lineage when this session is reopened. */
+  artifactId: string;
+  /**
+   * Body/transcript privacy captured by the first live record. Optional only for
+   * tombstones created by an older runtime, which resolve the current policy
+   * once when reopened.
+   */
+  resultBodyEnabled?: boolean;
   type: SubagentType;
   description: string;
   /** Always set — a record with no session file is never tombstoned. */
@@ -156,6 +167,24 @@ export type MentionResolution =
 
 export interface AgentRecord {
   id: string;
+  /** Immutable result-attempt identity. A resume replaces it with a new ID. */
+  artifactId: string;
+  /**
+   * Body/transcript privacy captured at the first spawn and reused by every
+   * resume. Optional only for records created by an older runtime; the manager
+   * fills it once from historical attempt state or the current configuration.
+   */
+  resultBodyEnabled?: boolean;
+  /** Previous attempt when this invocation is a resume or identifiable task retry. */
+  sourceAttemptId?: string;
+  /** Absolute internal manifest path, intentionally omitted from user-facing results. */
+  resultArtifactPath?: string;
+  /** Absolute internal Markdown body path, when privacy policy allowed a body. */
+  resultBodyPath?: string;
+  /** Best-effort persistence outcome; never determines the Agent's terminal status. */
+  artifactStatus: ResultArtifactStatus;
+  /** Sanitized artifact writer failure, separate from the Agent's own error. */
+  artifactError?: string;
   type: SubagentType;
   /**
    * Typeable name for the `@handle message` prompt mention, derived from the

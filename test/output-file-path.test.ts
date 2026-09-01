@@ -11,7 +11,7 @@
 // intermittently in the full run). Redirecting `tmpdir()` gives each run its own
 // root and removes the shared state entirely.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir as realTmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +48,29 @@ describe("createOutputFilePath", () => {
     const path = createOutputFilePath("/home/user/project", AGENT, SESSION);
     expect(path).toBe(join(root, "home-user-project", SESSION, "tasks", `${AGENT}.output`));
   });
+
+  it.each(["../escape", "a/b", "..", `a${"x".repeat(128)}`, "bad\u0000id"]) (
+    "rejects unsafe session ids: %s",
+    (sessionId) => {
+      expect(() => createOutputFilePath("/home/user/project", AGENT, sessionId)).toThrow("invalid session id");
+    },
+  );
+
+  it("rejects unsafe agent ids before constructing an output path", () => {
+    expect(() => createOutputFilePath("/home/user/project", "../escape", SESSION))
+      .toThrow("invalid agent id");
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlinked session root", () => {
+    const target = mkdtempSync(join(realTmpdir(), "pi-outpath-target-"));
+    symlinkSync(target, root, "dir");
+
+    expect(() => createOutputFilePath("/home/user/project", AGENT, SESSION))
+      .toThrow("invalid session root");
+    rmSync(target, { recursive: true, force: true });
+  });
+
+
 
   it("creates the directory chain so the first write cannot fail", () => {
     const path = createOutputFilePath("/home/user/project", AGENT, SESSION);

@@ -1,8 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { encodeCwd, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { encodeCwd, ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
 
 describe("encodeCwd", () => {
   it("encodes a POSIX absolute path by stripping the leading slash and replacing separators", () => {
@@ -79,6 +85,58 @@ function makeFakeSession(initialMessages: unknown[] = []) {
     },
   };
 }
+
+describe("secure transcript writes", () => {
+  let tmp: string;
+  let outPath: string;
+  let targetPath: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "secure-output-test-"));
+    outPath = join(tmp, "agent.output");
+    targetPath = join(tmp, "redirect-target");
+    writeFileSync(targetPath, "keep\n");
+  });
+
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it.skipIf(process.platform === "win32")("refuses a symlinked output parent", () => {
+    const targetDir = mkdtempSync(join(tmpdir(), "secure-output-target-"));
+    const linkedDir = join(tmp, "linked-output");
+    symlinkSync(targetDir, linkedDir, "dir");
+    const linkedPath = join(linkedDir, "agent.output");
+
+    expect(() => writeInitialEntry(linkedPath, "agent-1", "full secret prompt", "/work"))
+      .toThrow("invalid output directory");
+    rmSync(targetDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")("does not follow a symlink at initial spawn creation", () => {
+    symlinkSync(targetPath, outPath);
+
+    expect(() => writeInitialEntry(outPath, "agent-1", "full secret prompt", "/work"))
+      .toThrow();
+    expect(readFileSync(targetPath, "utf-8")).toBe("keep\n");
+  });
+  it.skipIf(process.platform === "win32")("does not follow a symlink while ensuring a resume transcript", () => {
+    symlinkSync(targetPath, outPath);
+
+    ensureOutputFile(outPath);
+
+    expect(readFileSync(targetPath, "utf-8")).toBe("keep\n");
+  });
+
+  it.skipIf(process.platform === "win32")("does not follow a symlink during streaming append", () => {
+    symlinkSync(targetPath, outPath);
+    const session = makeFakeSession([{ role: "user", content: "go" }]);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work");
+    session.push({ role: "assistant", content: [{ type: "text", text: "full secret result" }] });
+
+    session.fire({ type: "turn_end" });
+
+    expect(readFileSync(targetPath, "utf-8")).toBe("keep\n");
+  });
+});
 
 /** Drain the microtask queue (the compaction re-anchor is deferred one tick). */
 const microtask = () => Promise.resolve();
