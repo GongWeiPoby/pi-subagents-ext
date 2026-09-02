@@ -5,6 +5,7 @@
  * matching Claude Code's task output file format.
  */
 
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -16,10 +17,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 const INTERNAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const CWD_HASH_LENGTH = 64;
+const CWD_PREFIX_MAX_LENGTH = 128 - CWD_HASH_LENGTH - 1;
 
 /** Validate a single component used in an internal session/result path. */
 export function assertSafeInternalId(value: string, label: string): void {
@@ -69,29 +72,39 @@ export function getOutputTranscriptDefault(): boolean { return outputTranscriptD
 export function setOutputTranscriptDefault(b: boolean): void { outputTranscriptDefault = b; }
 
 /**
- * Encode a cwd path as a filesystem-safe directory name. Handles:
- *   - POSIX:   "/home/user/project"        → "home-user-project"
- *   - Windows: "C:\Users\foo\project"      → "Users-foo-project"
- *   - UNC:     "\\\\server\\share\\project"  → "server-share-project"
+ * Encode the resolved cwd as a readable, collision-resistant internal ID.
+ * The full SHA-256 suffix is the project identity; the bounded path suffix is
+ * only for humans inspecting the private temp root.
  */
 export function encodeCwd(cwd: string): string {
-  return cwd
-    .replace(/[/\\]/g, "-")        // both separators → dash
-    .replace(/^[A-Za-z]:-/, "")    // strip Windows drive prefix ("C:-")
-    .replace(/^-+/, "")            // strip leading dashes (POSIX root, UNC)
-    .replace(/[^A-Za-z0-9._-]/g, "-");
+  const canonicalCwd = resolve(cwd);
+  const readable = canonicalCwd
+    .replace(/[/\\]+/g, "-")
+    .replace(/^[A-Za-z]:-/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/\.{2,}/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/-+$/, "");
+  const prefix = readable
+    .slice(-CWD_PREFIX_MAX_LENGTH)
+    .replace(/^[^A-Za-z0-9]+/, "") || "root";
+  const hash = createHash("sha256").update(canonicalCwd).digest("hex");
+  return `${prefix}-${hash}`;
 }
 
 /**
  * The per-session scratch directory, created if missing.
- * Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks
+ * Layout: /tmp/{prefix}-{uid}/{readable-cwd-prefix}-{sha256}/{sessionId}/tasks
+ *
+ * The hashed resolved cwd keeps equal session IDs isolated between projects.
+ * Older unhashed directory names are intentionally never consulted.
  *
  * Shared with the workflow tool, which persists each invocation's script here so
  * iterating on one is edit-file-then-rerun — the same convention, one directory.
  */
 export function sessionTaskDir(cwd: string, sessionId: string): string {
   assertSafeInternalId(sessionId, "session id");
-  const encoded = encodeCwd(cwd) || "root";
+  const encoded = encodeCwd(cwd);
   assertSafeInternalId(encoded, "encoded cwd");
   const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
   ensureDirectory(root, "session root");

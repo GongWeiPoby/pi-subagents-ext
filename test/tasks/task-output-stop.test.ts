@@ -8,13 +8,16 @@
  * process-tracker.test.ts.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sessionTaskDir } from "../../src/output-file.js";
+import { writeResultArtifact, writeWorkflowAggregateArtifact } from "../../src/result-artifact.js";
 import type { TaskExecutionRef } from "../../src/tasks/execution-contract.js";
 import type { TaskExecutionCoordinator } from "../../src/tasks/index.js";
 import initExtension from "../../src/tasks/index.js";
+import { TASK_OUTPUT_RESULT_MAX_LIMIT } from "../../src/tasks/task-output-view.js";
 import {
   aggregateWorkflowCoverage,
   type WorkflowChildAttempt,
@@ -276,13 +279,211 @@ describe("TaskOutput", () => {
     expect(result.content[0].text).toContain("Agent status: in_progress");
   });
 
+  it("reads only an explicitly requested Agent artifact body and preserves Markdown slices", async () => {
+    await launchAgentTask(mock);
+    const cwd = mkdtempSync(join(tmpdir(), "pi-task-output-result-"));
+    const sessionId = "agent-result-session";
+    const taskDir = sessionTaskDir(cwd, sessionId);
+    const written = writeResultArtifact({
+      taskDir,
+      artifactId: "agent-attempt-live",
+      agentId: "agent-1",
+      status: "completed",
+      startedAt: 1_000,
+      completedAt: 2_000,
+      invocation: "spawn",
+      usage: {
+        turns: 1,
+        toolCalls: 2,
+        tokens: { input: 3, output: 4, cacheWrite: 0 },
+      },
+      result: "# Result\r\n\r\nline 2\u001b[31m",
+      includeBody: true,
+    });
+    const managerSymbol = Symbol.for("pi-subagents:manager");
+    const previous = (globalThis as Record<symbol, unknown>)[managerSymbol];
+    (globalThis as Record<symbol, unknown>)[managerSymbol] = {
+      getRecord: () => ({
+        id: "agent-1",
+        artifactId: "agent-attempt-live",
+        artifactStatus: "complete",
+        status: "completed",
+        result: "PRIVATE_IN_MEMORY_RESULT",
+        resultBodyEnabled: true,
+        taskExecutionRef: rpc.taskExecutionRef("agent-1"),
+      }),
+    };
+    const context = mockSessionCtx(sessionId, { cwd });
+    try {
+      const defaultView = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+      }, context);
+      expect(defaultView.content[0].text).not.toMatch(/# Result|PRIVATE_IN_MEMORY_RESULT/);
+
+      const summary = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "summary",
+      }, context);
+      expect(summary.content[0].text).toContain("Result body: not read by this view");
+      expect(summary.content[0].text).not.toMatch(/# Result|PRIVATE_IN_MEMORY_RESULT/);
+      expect(rpc.consumed).toEqual([]);
+
+      const result = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+        offset: 10,
+        limit: 6,
+      }, context);
+      expect(result.content[0].text).toContain(
+        "Result: offset=10 limit=6 total=21 showing=10-16 more=true\n\nline 2",
+      );
+      expect(result.content[0].text).not.toContain("PRIVATE_IN_MEMORY_RESULT");
+      expect(result.content[0].text).not.toMatch(/[\u001b\u202E]/);
+      expect(rpc.consumed).toEqual(["agent-1"]);
+
+      const beyond = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+        offset: 1_000,
+        limit: 6,
+      }, context);
+      expect(beyond.content[0].text).toContain(
+        "Result: offset=1000 limit=6 total=21 showing=1000-1000 more=false",
+      );
+      expect(rpc.consumed).toEqual(["agent-1", "agent-1"]);
+
+      writeFileSync(written.bodyPath!, "tampered\n");
+      await expect(mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+      }, context)).rejects.toThrow("result body digest mismatch");
+      await expect(mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "summary",
+      }, context)).resolves.toBeDefined();
+      expect(rpc.consumed).toEqual(["agent-1", "agent-1"]);
+    } finally {
+      if (previous === undefined) delete (globalThis as Record<symbol, unknown>)[managerSymbol];
+      else (globalThis as Record<symbol, unknown>)[managerSymbol] = previous;
+      rmSync(dirname(dirname(taskDir)), { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { status: "running", artifactStatus: "complete", resultBodyEnabled: true },
+    { status: "queued", artifactStatus: "complete", resultBodyEnabled: false },
+    { status: "completed", artifactStatus: "pending", resultBodyEnabled: true },
+  ])("returns unavailable without reading an Agent body for $status/$artifactStatus", async ({
+    status,
+    artifactStatus,
+    resultBodyEnabled,
+  }) => {
+    await launchAgentTask(mock);
+    const managerSymbol = Symbol.for("pi-subagents:manager");
+    const previous = (globalThis as Record<symbol, unknown>)[managerSymbol];
+    (globalThis as Record<symbol, unknown>)[managerSymbol] = {
+      getRecord: () => ({
+        id: "agent-1",
+        artifactId: "agent-attempt-unavailable",
+        artifactStatus,
+        status,
+        resultBodyEnabled,
+        taskExecutionRef: rpc.taskExecutionRef("agent-1"),
+      }),
+    };
+    try {
+      const result = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+      }, mockSessionCtx("agent-unavailable-session"));
+
+      expect(result.content[0].text).toContain("Result: result body is unavailable");
+      expect(rpc.consumed).toEqual([]);
+    } finally {
+      if (previous === undefined) delete (globalThis as Record<symbol, unknown>)[managerSymbol];
+      else (globalThis as Record<symbol, unknown>)[managerSymbol] = previous;
+    }
+  });
+
+  it("uses the fixed privacy marker without exposing an Agent's in-memory result", async () => {
+    await launchAgentTask(mock);
+    const managerSymbol = Symbol.for("pi-subagents:manager");
+    const previous = (globalThis as Record<symbol, unknown>)[managerSymbol];
+    (globalThis as Record<symbol, unknown>)[managerSymbol] = {
+      getRecord: () => ({
+        id: "agent-1",
+        status: "completed",
+        result: "PRIVATE_IN_MEMORY_RESULT",
+        resultBodyEnabled: false,
+        taskExecutionRef: rpc.taskExecutionRef("agent-1"),
+      }),
+    };
+    try {
+      const result = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+      });
+      expect(result.content[0].text).toContain("Result: Output persistence disabled.");
+      expect(result.content[0].text).not.toContain("PRIVATE_IN_MEMORY_RESULT");
+      expect(rpc.consumed).toEqual([]);
+    } finally {
+      if (previous === undefined) delete (globalThis as Record<symbol, unknown>)[managerSymbol];
+      else (globalThis as Record<symbol, unknown>)[managerSymbol] = previous;
+    }
+  });
+
+  it("does not invent Agent result reload support without an in-memory artifact locator", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Reloaded Agent", description: "d" });
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "completed",
+      metadata: { agentId: "reloaded-agent", result: "PRIVATE_RELOADED_RESULT" },
+    });
+
+    const result = await mock.executeTool("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "result",
+    }, mockSessionCtx("reloaded-agent-session"));
+
+    expect(result.content[0].text).toContain("Agent: reloaded-agent");
+    expect(result.content[0].text).toContain("Result: result body is unavailable");
+    expect(result.content[0].text).not.toContain("PRIVATE_RELOADED_RESULT");
+  });
+
   it("rejects invalid explicit views", async () => {
     await mock.executeTool("TaskCreate", { subject: "Manual", description: "d" });
     await expect(mock.executeTool("TaskOutput", {
       task_id: "1",
       block: false,
+      view: "bogus",
+    })).rejects.toThrow("Invalid TaskOutput view: bogus");
+  });
+
+  it.each([
+    { field: "offset", value: -1 },
+    { field: "offset", value: 1.5 },
+    { field: "offset", value: TASK_OUTPUT_RESULT_MAX_LIMIT + 1 },
+    { field: "limit", value: -1 },
+    { field: "limit", value: 1.5 },
+    { field: "limit", value: TASK_OUTPUT_RESULT_MAX_LIMIT + 1 },
+  ])("rejects invalid result $field=$value", async ({ field, value }) => {
+    await mock.executeTool("TaskCreate", { subject: "Manual", description: "d" });
+    await expect(mock.executeTool("TaskOutput", {
+      task_id: "1",
+      block: false,
       view: "result",
-    })).rejects.toThrow("Invalid TaskOutput view: result");
+      [field]: value,
+    })).rejects.toThrow(`TaskOutput ${field} must be a non-negative integer within the result limit`);
   });
 
   it("throws for a task with neither a process nor an agent", async () => {
@@ -462,7 +663,94 @@ describe("TaskOutput — workflow runs", () => {
     expect(text).toContain("Artifact: workflow-wf_test123 [metadata-only]");
     expect(text).toContain("Result body: Output persistence disabled.");
     expect(text).not.toMatch(/PRIVATE_WORKFLOW_RESULT|PRIVATE_CHILD_ERROR/);
+
+    const privateResult = await mock.executeTool("TaskOutput", {
+      task_id: "wf_test123",
+      block: false,
+      view: "result",
+    });
+    expect(privateResult.content[0].text).toContain("Result: Output persistence disabled.");
+    expect(privateResult.content[0].text).not.toContain("PRIVATE_WORKFLOW_RESULT");
     expect(harness.consume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "running" as const, artifactStatus: "complete" as const },
+    { status: "paused" as const, artifactStatus: "complete" as const },
+    { status: "completed" as const, artifactStatus: "pending" as const },
+    { status: "failed" as const, artifactStatus: "failed" as const },
+    { status: "killed" as const, artifactStatus: "skipped" as const },
+  ])("returns unavailable without reading a Workflow body for $status/$artifactStatus", async ({
+    status,
+    artifactStatus,
+  }) => {
+    const mock = mockPi();
+    const harness = workflowHarness({
+      ...running(),
+      status,
+      output: "PRIVATE_LIVE_WORKFLOW_RESULT",
+      resultBodyEnabled: true,
+      aggregateArtifactId: "workflow-wf_test123",
+      aggregateArtifactStatus: artifactStatus,
+    });
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+
+    const result = await mock.executeTool("TaskOutput", {
+      task_id: "wf_test123",
+      block: false,
+      view: "result",
+      offset: 0,
+      limit: 50,
+    }, mockSessionCtx("live-workflow-session"));
+
+    expect(result.content[0].text).toContain("Workflow: wf_test123");
+    expect(result.content[0].text).toContain("Result: workflow aggregate body is unavailable");
+    expect(result.content[0].text).not.toContain("PRIVATE_LIVE_WORKFLOW_RESULT");
+    expect(harness.consume).not.toHaveBeenCalled();
+  });
+
+  it("consumes a settled Workflow only after returning its persisted body", async () => {
+    const mock = mockPi();
+    const cwd = mkdtempSync(join(tmpdir(), "pi-task-output-workflow-result-"));
+    const sessionId = "workflow-result-session";
+    const taskDir = sessionTaskDir(cwd, sessionId);
+    writeWorkflowAggregateArtifact({
+      taskDir,
+      artifactId: "workflow-wf_test123",
+      workflowId: "wf_test123",
+      status: "completed",
+      startedAt: 1_000,
+      completedAt: 2_000,
+      coverage: aggregateWorkflowCoverage([]),
+      childAttempts: [],
+      resultSummary: "persisted workflow result",
+      result: "# Persisted workflow result",
+      includeBody: true,
+    });
+    const harness = workflowHarness({
+      ...running(),
+      status: "completed",
+      output: "PRIVATE_IN_MEMORY_WORKFLOW_RESULT",
+      resultBodyEnabled: true,
+      aggregateArtifactId: "workflow-wf_test123",
+      aggregateArtifactStatus: "complete",
+    });
+    initExtension(mock.pi as never, { workflowOutput: harness.adapter });
+    try {
+      const result = await mock.executeTool("TaskOutput", {
+        task_id: "wf_test123",
+        block: false,
+        view: "result",
+      }, mockSessionCtx(sessionId, { cwd }));
+
+      expect(result.content[0].text).toContain("# Persisted workflow result");
+      expect(result.content[0].text).not.toContain("PRIVATE_IN_MEMORY_WORKFLOW_RESULT");
+      expect(harness.consume).toHaveBeenCalledTimes(1);
+      expect(harness.consume).toHaveBeenCalledWith("wf_test123");
+    } finally {
+      rmSync(dirname(dirname(taskDir)), { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it("bounds workflow child rows and applies privacy markers", async () => {
@@ -653,7 +941,7 @@ describe("TaskOutput — persisted workflow views", () => {
     mock: ReturnType<typeof mockPi>,
     coordinator: TaskExecutionCoordinator,
     options: {
-      artifactStatus?: "complete" | "metadata-only";
+      artifactStatus?: "pending" | "complete" | "metadata-only" | "failed" | "skipped";
       coverage?: WorkflowCoverageAggregate;
       resultBodyEnabled?: boolean;
       taskId?: string;
@@ -739,6 +1027,27 @@ describe("TaskOutput — persisted workflow views", () => {
       taskBinding: ref,
     });
   });
+
+  it.each(["pending", "failed", "skipped"] as const)(
+    "returns unavailable for persisted aggregate status %s without calling the manifest reader",
+    async artifactStatus => {
+      const mock = mockPi();
+      const reader = vi.fn(() => {
+        throw new Error("manifest reader must not run");
+      });
+      const coordinator = initExtension(mock.pi as never, { workflowAggregateReader: reader });
+      await seed(mock, coordinator, { artifactStatus });
+
+      const result = await mock.executeTool("TaskOutput", {
+        task_id: "1",
+        block: false,
+        view: "result",
+      }, mockSessionCtx("reload-session"));
+
+      expect(result.content[0].text).toContain("Result: workflow aggregate body is unavailable");
+      expect(reader).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps legacy workflow metadata queryable when no aggregate exists", async () => {
     const mock = mockPi();

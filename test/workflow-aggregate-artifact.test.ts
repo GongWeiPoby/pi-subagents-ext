@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import subagentsExtension from "../src/index.js";
 import { sessionTaskDir, setOutputTranscriptDefault } from "../src/output-file.js";
 import {
+  readWorkflowAggregateArtifactBody,
   readWorkflowAggregateArtifactManifest,
   type WorkflowAggregateArtifactManifest,
   writeWorkflowAggregateArtifact,
@@ -260,6 +261,139 @@ describe("workflow aggregate result artifacts", () => {
       expect(mismatch).toMatchObject({ error: "workflow aggregate task binding does not match" });
     } finally {
       rmSync(dirname(managedTaskDir), { recursive: true, force: true });
+    }
+  });
+
+  it("reads the fixed workflow body locator with binding, pagination, and digest validation", () => {
+    const cwd = join(taskDir, "managed-body-cwd");
+    const sessionId = "aggregate-body-session";
+    const managedTaskDir = sessionTaskDir(cwd, sessionId);
+    const taskBinding = input().taskBinding;
+    try {
+      const written = writeWorkflowAggregateArtifact(input({
+        taskDir: managedTaskDir,
+        taskBinding,
+      }));
+
+      const read = readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        taskBinding,
+        offset: 6,
+        limit: 10,
+      });
+      expect(read).toMatchObject({
+        manifestPath: written.manifestPath,
+        manifest: { workflowId: "wf_abc123", taskBinding },
+        slice: {
+          body: "summary\nfu",
+          offset: 6,
+          limit: 10,
+          hasMore: true,
+        },
+      });
+
+      expect(readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        taskBinding: { ...taskBinding!, attemptId: "other-attempt" },
+      })).toMatchObject({ error: "workflow aggregate task binding does not match" });
+      expect(readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId: "other-session",
+        workflowId: "wf_abc123",
+        taskBinding,
+      })).toMatchObject({ error: "workflow aggregate manifest is missing" });
+
+      writeFileSync(written.bodyPath!, "tampered\n");
+      expect(readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        taskBinding,
+      })).toMatchObject({ error: "workflow aggregate body digest mismatch" });
+    } finally {
+      rmSync(dirname(dirname(managedTaskDir)), { recursive: true, force: true });
+    }
+  });
+
+  it("reads an unbound workflow body by its wf_* identity", () => {
+    const cwd = join(taskDir, "managed-unbound-cwd");
+    const sessionId = "aggregate-unbound-session";
+    const managedTaskDir = sessionTaskDir(cwd, sessionId);
+    try {
+      writeWorkflowAggregateArtifact(input({
+        taskDir: managedTaskDir,
+        taskBinding: undefined,
+      }));
+
+      const read = readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        offset: 10_000,
+        limit: 10,
+      });
+      expect(read).toMatchObject({
+        manifest: { workflowId: "wf_abc123" },
+        slice: { body: "", offset: 10_000, limit: 10, hasMore: false },
+      });
+      expect("manifest" in read && read.manifest.taskBinding).toBeUndefined();
+    } finally {
+      rmSync(dirname(dirname(managedTaskDir)), { recursive: true, force: true });
+    }
+  });
+
+  it("returns a controlled error when workflow directories and the manifest are absent", () => {
+    const cwd = join(taskDir, "missing-workflow-cwd");
+    const sessionId = "aggregate-missing-session";
+    const managedTaskDir = sessionTaskDir(cwd, sessionId);
+    try {
+      rmSync(join(managedTaskDir, "results"), { recursive: true, force: true });
+
+      expect(() => readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+      })).not.toThrow();
+      expect(readWorkflowAggregateArtifactBody({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+      })).toMatchObject({ error: "workflow aggregate manifest is missing" });
+    } finally {
+      rmSync(dirname(dirname(managedTaskDir)), { recursive: true, force: true });
+    }
+  });
+
+  it("isolates an unbound wf_* result between formerly colliding project paths", () => {
+    const projectA = join(taskDir, "a-b", "c");
+    const projectB = join(taskDir, "a", "b-c");
+    const sessionId = "shared-session";
+    mkdirSync(projectA, { recursive: true });
+    mkdirSync(projectB, { recursive: true });
+    const taskDirA = sessionTaskDir(projectA, sessionId);
+    const taskDirB = sessionTaskDir(projectB, sessionId);
+    try {
+      expect(taskDirA).not.toBe(taskDirB);
+      writeWorkflowAggregateArtifact(input({
+        taskDir: taskDirA,
+        taskBinding: undefined,
+        result: "project A private result",
+      }));
+
+      const crossProjectRead = readWorkflowAggregateArtifactBody({
+        cwd: projectB,
+        sessionId,
+        workflowId: "wf_abc123",
+      });
+      expect(crossProjectRead).toMatchObject({ error: "workflow aggregate manifest is missing" });
+      expect(JSON.stringify(crossProjectRead)).not.toContain("project A private result");
+    } finally {
+      rmSync(dirname(dirname(taskDirA)), { recursive: true, force: true });
+      rmSync(dirname(dirname(taskDirB)), { recursive: true, force: true });
     }
   });
 

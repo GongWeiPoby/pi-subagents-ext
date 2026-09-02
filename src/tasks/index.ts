@@ -19,7 +19,13 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { canonicalJson, type ReadWorkflowAggregateArtifactResult, readWorkflowAggregateArtifactManifest } from "../result-artifact.js";
+import {
+  canonicalJson,
+  type ReadWorkflowAggregateArtifactResult,
+  readResultArtifactBody,
+  readWorkflowAggregateArtifactBody,
+  readWorkflowAggregateArtifactManifest,
+} from "../result-artifact.js";
 import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../subagent-contract.js";
 import type { ResultArtifactStatus } from "../types.js";
 import type { LifetimeUsage } from "../usage.js";
@@ -46,9 +52,12 @@ import { resolveTaskGlyphs } from "./task-glyphs.js";
 import {
   assertTaskOutputSafeId,
   formatTaskOutputChildren,
+  formatTaskOutputResult,
   formatTaskOutputSummary,
   parseTaskWorkflowAggregateMetadata,
   TASK_OUTPUT_PRIVATE_MARKER,
+  TASK_OUTPUT_RESULT_DEFAULT_LIMIT,
+  TASK_OUTPUT_RESULT_MAX_LIMIT,
   type TaskOutputAgentSummary,
   type TaskOutputSummaryContext,
   type TaskOutputWorkflowSummary,
@@ -1689,10 +1698,17 @@ Set up task dependencies:
       task_id: Type.String({ description: "The task ID, agent ID/prefix, or SubagentWorkflow wf_* run ID to inspect" }),
       block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion", default: true })),
       timeout: Type.Optional(Type.Number({ description: "Max wait time in ms", default: 30000, minimum: 0, maximum: 600000 })),
-      view: Type.Optional(Type.Unsafe<"summary" | "children">({
+      view: Type.Optional(Type.Unsafe<"summary" | "children" | "result">({
         type: "string",
-        enum: ["summary", "children"],
-        description: "Metadata-only view. summary never reads result bodies; children lists bounded workflow child attempts.",
+        enum: ["summary", "children", "result"],
+        description: "Metadata views or an explicitly requested persisted result body slice.",
+      })),
+      offset: Type.Optional(Type.Number({ description: "Character offset for view=result", minimum: 0 })),
+      limit: Type.Optional(Type.Number({
+        description: "Maximum characters for view=result",
+        default: TASK_OUTPUT_RESULT_DEFAULT_LIMIT,
+        minimum: 0,
+        maximum: TASK_OUTPUT_RESULT_MAX_LIMIT,
       })),
     }),
 
@@ -1701,8 +1717,16 @@ Set up task dependencies:
       const block = params.block ?? true;
       const timeout = params.timeout ?? 30000;
       const view = params.view;
-      if (view !== undefined && view !== "summary" && view !== "children") {
+      if (view !== undefined && view !== "summary" && view !== "children" && view !== "result") {
         throw new Error(`Invalid TaskOutput view: ${String(view)}`);
+      }
+      const offset = params.offset ?? 0;
+      const limit = params.limit ?? TASK_OUTPUT_RESULT_DEFAULT_LIMIT;
+      if (!Number.isInteger(offset) || offset < 0 || offset > TASK_OUTPUT_RESULT_MAX_LIMIT) {
+        throw new Error("TaskOutput offset must be a non-negative integer within the result limit");
+      }
+      if (!Number.isInteger(limit) || limit < 0 || limit > TASK_OUTPUT_RESULT_MAX_LIMIT) {
+        throw new Error("TaskOutput limit must be a non-negative integer within the result limit");
       }
       const taskStore = store;
       const operationGeneration = storeGeneration;
@@ -1711,6 +1735,12 @@ Set up task dependencies:
         textResult(view === "children"
           ? formatTaskOutputChildren(context)
           : formatTaskOutputSummary(context));
+
+      const renderResult = (
+        context: TaskOutputSummaryContext,
+        result?: { body: string; offset: number; limit: number; totalLength: number; hasMore: boolean },
+        resultError?: string,
+      ): ReturnType<typeof textResult> => textResult(formatTaskOutputResult({ ...context, result, resultError }));
 
       const workflowSummary = (workflow: WorkflowTaskOutputSnapshot): TaskOutputWorkflowSummary => ({
         id: workflow.id,
@@ -1730,6 +1760,49 @@ Set up task dependencies:
         evidenceIncomplete: workflow.evidenceIncomplete,
       });
 
+      const readWorkflowResult = (
+        runId: string,
+        context: TaskOutputSummaryContext,
+        resultBodyEnabled: boolean | undefined,
+        artifactId: string | undefined,
+        expectedRef?: TaskExecutionRef,
+      ): ReturnType<typeof textResult> => {
+        const workflow = context.workflow;
+        if (workflow?.status === "running" || workflow?.status === "paused") {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        if (resultBodyEnabled === false) {
+          return renderResult(context, undefined, TASK_OUTPUT_PRIVATE_MARKER);
+        }
+        if (workflow?.artifactStatus !== "complete") {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        const sessionId = ctx.sessionManager?.getSessionId?.();
+        if (sessionId === undefined) {
+          return renderResult(context, undefined, "result body is unavailable without a persisted session");
+        }
+        if (artifactId === undefined) {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        assertTaskOutputSafeId(artifactId, "workflow aggregate artifact id");
+        const loaded = readWorkflowAggregateArtifactBody({
+          cwd: ctx.cwd,
+          sessionId,
+          workflowId: runId,
+          ...(expectedRef !== undefined ? { taskBinding: expectedRef } : {}),
+          offset,
+          limit,
+        });
+        if ("error" in loaded) throw new Error(loaded.error);
+        if (loaded.manifest.artifactId !== artifactId
+          || loaded.manifest.workflowId !== runId
+          || loaded.manifest.artifactStatus !== "complete") {
+          throw new Error(`Workflow aggregate metadata does not match its manifest for ${runId}`);
+        }
+        const rendered = renderResult(context, loaded.slice);
+        options.workflowOutput?.consume(runId);
+        return rendered;
+      };
       const readUnboundWorkflowView = (runId: string): ReturnType<typeof textResult> | undefined => {
         const sessionId = ctx.sessionManager?.getSessionId?.();
         if (sessionId === undefined) return undefined;
@@ -1741,7 +1814,7 @@ Set up task dependencies:
         });
         if (!("manifest" in loaded) || loaded.manifest.taskBinding !== undefined) return undefined;
         const manifest = loaded.manifest;
-        return renderView({
+        const context: TaskOutputSummaryContext = {
           workflow: {
             id: runId,
             status: manifest.status,
@@ -1754,7 +1827,16 @@ Set up task dependencies:
             artifactError: manifest.artifactError,
             evidenceIncomplete: manifest.evidenceIncomplete,
           },
-        });
+        };
+        if (view === "result") {
+          return readWorkflowResult(
+            runId,
+            context,
+            context.workflow?.resultBodyEnabled,
+            manifest.artifactId,
+          );
+        }
+        return renderView(context);
       };
 
       const readWorkflowView = async (
@@ -1781,13 +1863,23 @@ Set up task dependencies:
             throw new Error("Task context changed while waiting for output");
           }
           const updated = task === undefined ? undefined : taskStore.get(task.id) ?? task;
-          return renderView({
+          const liveContext: TaskOutputSummaryContext = {
             ...(updated === undefined
               ? {}
               : { taskId: updated.id, taskStatus: updated.status, owner: updated.owner }),
             ...(expectedRef !== undefined ? { execution: expectedRef } : {}),
             workflow: workflowSummary(workflow),
-          });
+          };
+          if (view === "result") {
+            return readWorkflowResult(
+              runId,
+              liveContext,
+              liveContext.workflow?.resultBodyEnabled,
+              liveContext.workflow?.artifactId,
+              expectedRef,
+            );
+          }
+          return renderView(liveContext);
         }
 
         if (task === undefined) {
@@ -1807,7 +1899,7 @@ Set up task dependencies:
           throw new Error(`Invalid workflow aggregate metadata for Task #${task.id}`);
         }
         if (aggregate === undefined) {
-          return renderView({
+          const context: TaskOutputSummaryContext = {
             taskId: task.id,
             taskStatus: task.status,
             owner: task.owner,
@@ -1816,19 +1908,23 @@ Set up task dependencies:
               status: task.status,
               attempts: [],
             },
-          });
+          };
+          return view === "result"
+            ? readWorkflowResult(runId, context, undefined, undefined, expectedRef)
+            : renderView(context);
         }
         if (expectedRef !== undefined && !sameTaskExecutionRef(expectedRef, aggregate.taskBinding)) {
           throw new Error(`Workflow aggregate task binding does not match Task #${task.id}`);
         }
 
         const sessionId = ctx.sessionManager?.getSessionId?.();
-        if (aggregate.artifactStatus === "skipped" || sessionId === undefined) {
-          const artifactError = aggregate.artifactStatus === "skipped"
-            ? undefined
-            : "workflow aggregate is unavailable without a persisted session";
+        const resultDoesNotNeedManifest = view === "result" && aggregate.artifactStatus !== "complete";
+        if (aggregate.artifactStatus === "skipped" || sessionId === undefined || resultDoesNotNeedManifest) {
+          const artifactError = sessionId === undefined && aggregate.artifactStatus !== "skipped"
+            ? "workflow aggregate is unavailable without a persisted session"
+            : undefined;
           if (view === "children" && artifactError !== undefined) throw new Error(artifactError);
-          return renderView({
+          const context: TaskOutputSummaryContext = {
             taskId: task.id,
             taskStatus: task.status,
             owner: task.owner,
@@ -1844,7 +1940,17 @@ Set up task dependencies:
               artifactError,
               evidenceIncomplete: aggregate.evidenceIncomplete,
             },
-          });
+          };
+          if (view === "result") {
+            return readWorkflowResult(
+              runId,
+              context,
+              aggregate.resultBodyEnabled,
+              aggregate.artifactId,
+              expectedRef,
+            );
+          }
+          return renderView(context);
         }
 
         const readAggregate = options.workflowAggregateReader ?? readWorkflowAggregateArtifactManifest;
@@ -1855,7 +1961,7 @@ Set up task dependencies:
           taskBinding: aggregate.taskBinding,
         });
         if ("error" in loaded) {
-          if (view === "children") throw new Error(loaded.error);
+          if (view === "children" || view === "result") throw new Error(loaded.error);
           return renderView({
             taskId: task.id,
             taskStatus: task.status,
@@ -1882,7 +1988,7 @@ Set up task dependencies:
           || Boolean(manifest.evidenceIncomplete) !== Boolean(aggregate.evidenceIncomplete)) {
           throw new Error(`Workflow aggregate metadata does not match its manifest for Task #${task.id}`);
         }
-        return renderView({
+        const context: TaskOutputSummaryContext = {
           taskId: task.id,
           taskStatus: task.status,
           owner: task.owner,
@@ -1898,7 +2004,17 @@ Set up task dependencies:
             artifactStatus: manifest.artifactStatus,
             evidenceIncomplete: manifest.evidenceIncomplete,
           },
-        });
+        };
+        if (view === "result") {
+          return readWorkflowResult(
+            runId,
+            context,
+            aggregate.resultBodyEnabled,
+            manifest.artifactId,
+            expectedRef,
+          );
+        }
+        return renderView(context);
       };
 
       const waitForAgentView = async (task: Task, agentId: string): Promise<Task> => {
@@ -1966,13 +2082,45 @@ Set up task dependencies:
           toolCalls: record?.toolUses,
           tokens: usage === undefined ? undefined : usage.input + usage.output + usage.cacheWrite,
         };
-        return renderView({
+        const context: TaskOutputSummaryContext = {
           taskId: updated.id,
           taskStatus: updated.status,
           owner: updated.owner,
           ...(execution !== undefined ? { execution } : {}),
           agent,
-        });
+        };
+        if (view === "result") {
+          if (agent.status === "running" || agent.status === "queued" || agent.artifactStatus === "pending") {
+            return renderResult(context, undefined, "result body is unavailable");
+          }
+          if (agent.resultBodyEnabled === false) {
+            return renderResult(context, undefined, TASK_OUTPUT_PRIVATE_MARKER);
+          }
+          const sessionId = ctx.sessionManager?.getSessionId?.();
+          if (sessionId === undefined) {
+            return renderResult(context, undefined, "result body is unavailable without a persisted session");
+          }
+          if (agent.artifactId === undefined) {
+            return renderResult(context, undefined, "result body is unavailable");
+          }
+          assertTaskOutputSafeId(agent.artifactId, "agent artifact id");
+          const loaded = readResultArtifactBody({
+            cwd: ctx.cwd,
+            sessionId,
+            agentId,
+            artifactId: agent.artifactId,
+            offset,
+            limit,
+          });
+          if ("error" in loaded) throw new Error(loaded.error);
+          if (loaded.manifest.agentId !== agentId || loaded.manifest.artifactId !== agent.artifactId) {
+            throw new Error(`Agent result metadata does not match the requested agent ${agentId}`);
+          }
+          const rendered = renderResult(context, loaded.slice);
+          consumeSubagentResult(agentId);
+          return rendered;
+        }
+        return renderView(context);
       };
 
       if (view !== undefined) {
@@ -2041,7 +2189,10 @@ Set up task dependencies:
 
         const processOutput = tracker.getOutput(task_id);
         if (processOutput !== undefined) {
-          return renderView({ taskId: task_id, taskStatus: processOutput.status });
+          const context = { taskId: task_id, taskStatus: processOutput.status };
+          return view === "result"
+            ? renderResult(context, undefined, "result body is unavailable")
+            : renderView(context);
         }
         const resolvedId = resolveTaskId(task_id);
         const task = taskStore.get(resolvedId);
@@ -2051,11 +2202,10 @@ Set up task dependencies:
           return readWorkflowView(execution.executorId, task, execution);
         }
         if (isTaskExecutionClaim(execution) && execution.kind === "workflow") {
-          return textResult(`${formatTaskOutputSummary({
-            taskId: task.id,
-            taskStatus: task.status,
-            owner: task.owner,
-          })}\nWorkflow: controller is starting`);
+          const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+          return view === "result"
+            ? renderResult(context, undefined, "workflow aggregate body is unavailable while the controller is starting")
+            : textResult(`${formatTaskOutputSummary(context)}\nWorkflow: controller is starting`);
         }
         const rawAggregate = task.metadata.workflowAggregate;
         if (rawAggregate !== undefined) {
@@ -2083,16 +2233,18 @@ Set up task dependencies:
           return readAgentView(task, execution.executorId, execution);
         }
         if (isTaskExecutionClaim(execution) && execution.kind === "agent") {
-          return textResult(`${formatTaskOutputSummary({
-            taskId: task.id,
-            taskStatus: task.status,
-            owner: task.owner,
-          })}\nAgent: starting`);
+          const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+          return view === "result"
+            ? renderResult(context, undefined, "result body is unavailable while the agent is starting")
+            : textResult(`${formatTaskOutputSummary(context)}\nAgent: starting`);
         }
         if (execution === undefined && typeof task.metadata.agentId === "string") {
           return readAgentView(task, task.metadata.agentId);
         }
-        return renderView({ taskId: task.id, taskStatus: task.status, owner: task.owner });
+        const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+        return view === "result"
+          ? renderResult(context, undefined, "result body is unavailable")
+          : renderView(context);
       }
 
       const readPersistedWorkflow = (runId: string): string | undefined => {

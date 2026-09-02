@@ -12,9 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sessionTaskDir } from "../src/output-file.js";
 import {
   canonicalJson,
   type ResultArtifactManifest,
+  readResultArtifactBody,
   sanitizeArtifactText,
   writeResultArtifact,
 } from "../src/result-artifact.js";
@@ -184,5 +186,127 @@ describe("result artifact writer", () => {
   it("preserves ordinary tabs and newlines while removing control and bidi characters", () => {
     expect(sanitizeArtifactText("a\tb\r\nc\u001b\u0085\u061C\u200F\u2069d"))
       .toBe("a\tb\ncd");
+  });
+});
+
+describe("result artifact body reader", () => {
+  let cwd: string;
+  let taskDir: string;
+  const sessionId = "result-reader-session";
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "pi-result-reader-cwd-"));
+    taskDir = sessionTaskDir(cwd, sessionId);
+  });
+
+  afterEach(() => {
+    rmSync(dirname(dirname(taskDir)), { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("reads sanitized Markdown by character slice and reports pagination", () => {
+    writeResultArtifact(input(taskDir, {
+      result: "# Heading\r\n\r\n- first\n- second\u001b[31m",
+    }));
+
+    const first = readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+      offset: 2,
+      limit: 12,
+    });
+    expect(first).toMatchObject({
+      manifest: { agentId: "agent-1", artifactId: ARTIFACT_ID },
+      slice: {
+        body: "Heading\n\n- f",
+        offset: 2,
+        limit: 12,
+        totalLength: 32,
+        hasMore: true,
+      },
+    });
+
+    const beyond = readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+      offset: 1_000,
+      limit: 25,
+    });
+    expect(beyond).toMatchObject({
+      slice: { body: "", offset: 1_000, limit: 25, totalLength: 32, hasMore: false },
+    });
+  });
+
+  it("rejects Agent and artifact identity mismatches", () => {
+    const written = writeResultArtifact(input(taskDir));
+
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-other",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result agent identity does not match" });
+
+    const manifest = JSON.parse(readFileSync(written.manifestPath, "utf-8")) as ResultArtifactManifest;
+    writeFileSync(written.manifestPath, JSON.stringify({ ...manifest, artifactId: "agent-attempt-other" }));
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result manifest is invalid" });
+  });
+
+  it("rejects a changed digest and a missing body", () => {
+    const written = writeResultArtifact(input(taskDir));
+    writeFileSync(written.bodyPath!, "tampered\n");
+
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result body digest mismatch" });
+
+    rmSync(written.bodyPath!);
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result body is missing" });
+  });
+
+  it("returns a controlled error when result directories and the manifest are absent", () => {
+    rmSync(join(taskDir, "results"), { recursive: true, force: true });
+
+    expect(() => readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).not.toThrow();
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result manifest is missing" });
+  });
+
+  it("rejects a body larger than the bounded read limit", () => {
+    const written = writeResultArtifact(input(taskDir));
+    writeFileSync(written.bodyPath!, "x".repeat(8 * 1024 * 1024 + 1));
+
+    expect(readResultArtifactBody({
+      cwd,
+      sessionId,
+      agentId: "agent-1",
+      artifactId: ARTIFACT_ID,
+    })).toMatchObject({ error: "result body exceeds the read limit" });
   });
 });

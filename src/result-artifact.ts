@@ -30,6 +30,8 @@ const UNSAFE_RESULT_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u
 const SAFE_ERROR_MAX_LENGTH = 512;
 const SAFE_ERROR_CODE_MAX_LENGTH = 64;
 const WORKFLOW_MANIFEST_MAX_BYTES = 2 * 1024 * 1024;
+const RESULT_MANIFEST_MAX_BYTES = 128 * 1024;
+const RESULT_BODY_MAX_BYTES = 8 * 1024 * 1024;
 const RUN_STATUSES = ["completed", "steered", "aborted", "stopped", "error"] as const;
 const ARTIFACT_STATUSES = ["complete", "metadata-only", "failed"] as const;
 
@@ -174,6 +176,36 @@ export interface ReadWorkflowAggregateArtifactInput {
 
 export type ReadWorkflowAggregateArtifactResult =
   | { manifest: WorkflowAggregateArtifactManifest; manifestPath: string }
+  | { error: string; manifestPath: string };
+
+export interface ReadResultArtifactBodyInput {
+  cwd: string;
+  sessionId: string;
+  agentId: string;
+  artifactId: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface ResultArtifactBodySlice {
+  body: string;
+  offset: number;
+  limit: number;
+  totalLength: number;
+  hasMore: boolean;
+}
+
+export type ReadResultArtifactBodyResult =
+  | { manifest: ResultArtifactManifest; manifestPath: string; slice: ResultArtifactBodySlice }
+  | { error: string; manifestPath: string };
+
+export interface ReadWorkflowAggregateArtifactBodyInput extends ReadWorkflowAggregateArtifactInput {
+  offset?: number;
+  limit?: number;
+}
+
+export type ReadWorkflowAggregateArtifactBodyResult =
+  | { manifest: WorkflowAggregateArtifactManifest; manifestPath: string; slice: ResultArtifactBodySlice }
   | { error: string; manifestPath: string };
 
 export interface WriteWorkflowAggregateArtifactInput {
@@ -558,9 +590,14 @@ export function readWorkflowAggregateArtifactManifest(
   const artifactId = `workflow-${input.workflowId}`;
   assertSafeInternalId(artifactId, "workflow aggregate artifact id");
   const taskDir = sessionTaskDir(input.cwd, input.sessionId);
-  const manifestPath = join(taskDir, "results", artifactId, `${artifactId}.json`);
+  const resultsDir = join(taskDir, "results");
+  const artifactDir = join(resultsDir, artifactId);
+  const manifestPath = join(artifactDir, `${artifactId}.json`);
 
   try {
+    ensureExistingDirectory(taskDir, "task directory");
+    ensureExistingDirectory(resultsDir, "results directory");
+    ensureExistingDirectory(artifactDir, "workflow aggregate artifact directory");
     const stat = lstatSync(manifestPath);
     if (stat.isSymbolicLink() || !stat.isFile()) {
       return { manifestPath, error: "workflow aggregate manifest is not a regular file" };
@@ -590,6 +627,148 @@ export function readWorkflowAggregateArtifactManifest(
         : "workflow aggregate manifest could not be read",
     };
   }
+}
+
+function bodySlice(body: string, offset = 0, limit = 20_000): ResultArtifactBodySlice {
+  if (!Number.isInteger(offset) || offset < 0 || offset > RESULT_BODY_MAX_BYTES) {
+    throw new Error("invalid result body offset");
+  }
+  if (!Number.isInteger(limit) || limit < 0 || limit > RESULT_BODY_MAX_BYTES) {
+    throw new Error("invalid result body limit");
+  }
+  const end = Math.min(body.length, offset + limit);
+  return {
+    body: body.slice(offset, end),
+    offset,
+    limit,
+    totalLength: body.length,
+    hasMore: end < body.length,
+  };
+}
+
+function readBodySlice(
+  bodyPath: string,
+  digest: string | undefined,
+  label: string,
+  offset?: number,
+  limit?: number,
+): ResultArtifactBodySlice | string {
+  try {
+    ensureRegularFile(bodyPath, label);
+    const stat = lstatSync(bodyPath);
+    if (stat.size > RESULT_BODY_MAX_BYTES) return `${label} exceeds the read limit`;
+    const body = readFileSync(bodyPath, "utf-8");
+    const actualDigest = `sha256:${createHash("sha256").update(Buffer.from(body, "utf-8")).digest("hex")}`;
+    if (actualDigest !== digest) return `${label} digest mismatch`;
+    return bodySlice(body, offset, limit);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("invalid result body")) return error.message;
+    return safeErrorCode(error) === "ENOENT" ? `${label} is missing` : `${label} is unreadable`;
+  }
+}
+
+function resultArtifactPaths(cwd: string, sessionId: string, artifactId: string): {
+  taskDir: string;
+  resultsDir: string;
+  artifactDir: string;
+  manifestPath: string;
+  bodyPath: string;
+} {
+  assertSafeInternalId(sessionId, "session id");
+  assertSafeInternalId(artifactId, "artifact id");
+  const taskDir = sessionTaskDir(cwd, sessionId);
+  const resultsDir = join(taskDir, "results");
+  const artifactDir = join(resultsDir, artifactId);
+  return {
+    taskDir,
+    resultsDir,
+    artifactDir,
+    manifestPath: join(artifactDir, `${artifactId}.json`),
+    bodyPath: join(artifactDir, `${artifactId}.md`),
+  };
+}
+
+/** Read one current-session-owned Agent result body after validating its manifest and digest. */
+export function readResultArtifactBody(
+  input: ReadResultArtifactBodyInput,
+): ReadResultArtifactBodyResult {
+  assertSafeInternalId(input.agentId, "agent id");
+  const paths = resultArtifactPaths(input.cwd, input.sessionId, input.artifactId);
+  try {
+    ensureExistingDirectory(paths.taskDir, "task directory");
+    ensureExistingDirectory(paths.resultsDir, "results directory");
+    ensureExistingDirectory(paths.artifactDir, "artifact directory");
+    const manifestStat = lstatSync(paths.manifestPath);
+    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
+      return { manifestPath: paths.manifestPath, error: "result manifest is not a regular file" };
+    }
+    if (manifestStat.size > RESULT_MANIFEST_MAX_BYTES) {
+      return { manifestPath: paths.manifestPath, error: "result manifest exceeds the read limit" };
+    }
+    const parsed: unknown = JSON.parse(readFileSync(paths.manifestPath, "utf-8"));
+    if (!validateManifest(parsed, input.artifactId)) {
+      return { manifestPath: paths.manifestPath, error: "result manifest is invalid" };
+    }
+    const manifest = parsed as ResultArtifactManifest;
+    if (manifest.agentId !== input.agentId) {
+      return { manifestPath: paths.manifestPath, error: "result agent identity does not match" };
+    }
+    if (manifest.artifactStatus !== "complete") {
+      return { manifestPath: paths.manifestPath, error: "result body is unavailable" };
+    }
+    const slice = readBodySlice(
+      paths.bodyPath,
+      manifest.resultDigest,
+      "result body",
+      input.offset,
+      input.limit,
+    );
+    return typeof slice === "string"
+      ? { manifestPath: paths.manifestPath, error: slice }
+      : { manifestPath: paths.manifestPath, manifest, slice };
+  } catch (error) {
+    return {
+      manifestPath: paths.manifestPath,
+      error: safeErrorCode(error) === "ENOENT" ? "result manifest is missing" : "result manifest could not be read",
+    };
+  }
+}
+
+/** Read one current-session-owned Workflow aggregate body after validating its manifest and digest. */
+export function readWorkflowAggregateArtifactBody(
+  input: ReadWorkflowAggregateArtifactBodyInput,
+): ReadWorkflowAggregateArtifactBodyResult {
+  const loaded = readWorkflowAggregateArtifactManifest(input);
+  if ("error" in loaded) return loaded;
+  const paths = resultArtifactPaths(input.cwd, input.sessionId, loaded.manifest.artifactId);
+  try {
+    ensureExistingDirectory(paths.taskDir, "task directory");
+    ensureExistingDirectory(paths.resultsDir, "results directory");
+    ensureExistingDirectory(paths.artifactDir, "workflow aggregate artifact directory");
+  } catch (error) {
+    return {
+      manifestPath: loaded.manifestPath,
+      error: safeErrorCode(error) === "ENOENT"
+        ? "workflow aggregate body is missing"
+        : "workflow aggregate body is unreadable",
+    };
+  }
+  if (paths.manifestPath !== loaded.manifestPath) {
+    return { manifestPath: loaded.manifestPath, error: "workflow aggregate manifest path does not match" };
+  }
+  if (loaded.manifest.artifactStatus !== "complete") {
+    return { manifestPath: loaded.manifestPath, error: "workflow aggregate body is unavailable" };
+  }
+  const slice = readBodySlice(
+    paths.bodyPath,
+    loaded.manifest.resultDigest,
+    "workflow aggregate body",
+    input.offset,
+    input.limit,
+  );
+  return typeof slice === "string"
+    ? { manifestPath: loaded.manifestPath, error: slice }
+    : { manifestPath: loaded.manifestPath, manifest: loaded.manifest, slice };
 }
 
 function corruptWorkflowAggregate(

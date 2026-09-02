@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
@@ -192,6 +192,77 @@ describe("SubagentWorkflow task_id execution binding", () => {
     await harness.fire("session_shutdown");
   });
 
+  it("reads a bound workflow result slice live and after reload", async () => {
+    delete process.env.PI_TASKS;
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+    await createTask(first);
+
+    await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return "# Bound\\nline two";`,
+      task_id: "1",
+    });
+    await vi.waitFor(async () => expect(await taskText(first)).toContain("Status: completed"));
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    const workflowId = stored.metadata.workflowId;
+    expect(workflowId).toMatch(/^wf_/);
+
+    const live = textOf(await first.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "result",
+      offset: 2,
+      limit: 7,
+    }));
+    expect(live).toContain("Result: offset=2 limit=7 total=17 showing=2-9 more=true");
+    expect(live).toContain("\n\nBound\nl");
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const afterReload = textOf(await reloaded.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "result",
+      offset: 8,
+      limit: 20,
+    }));
+    expect(afterReload).toContain(`Workflow: ${workflowId}`);
+    expect(afterReload).toContain("Result: offset=8 limit=20 total=17 showing=8-17 more=false");
+    expect(afterReload).toContain("\n\nline two\n");
+    await reloaded.fire("session_shutdown");
+  });
+
+  it("rejects a tampered bound workflow result body", async () => {
+    delete process.env.PI_TASKS;
+    const harness = integratedHarness(hermetic.dir);
+    await harness.fire("session_start", { reason: "startup" });
+    await createTask(harness);
+
+    await harness.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return "trusted workflow result";`,
+      task_id: "1",
+    });
+    await vi.waitFor(async () => expect(await taskText(harness)).toContain("Status: completed"));
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    const workflowId = stored.metadata.workflowId;
+    expect(workflowId).toMatch(/^wf_/);
+    const bodyPath = join(
+      sessionTaskDir(hermetic.dir, "binding-session"),
+      "results",
+      `workflow-${workflowId}`,
+      `workflow-${workflowId}.md`,
+    );
+    writeFileSync(bodyPath, "tampered\n");
+
+    await expect(harness.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "result",
+    })).rejects.toThrow("workflow aggregate body digest mismatch");
+    await harness.fire("session_shutdown");
+  });
+
   it("does not persist a private workflow result in the bound Todo", async () => {
     delete process.env.PI_TASKS;
     setOutputTranscriptDefault(false);
@@ -259,6 +330,14 @@ describe("SubagentWorkflow task_id execution binding", () => {
     expect(children).toContain("index=0 attempt=1 status=failed invocation=spawn");
     expect(children).toContain("error=Output persistence disabled.");
     expect(children).not.toContain(privateText);
+
+    const result = textOf(await reloaded.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "result",
+    }));
+    expect(result).toContain("Result: Output persistence disabled.");
+    expect(result).not.toContain(privateText);
     await reloaded.fire("session_shutdown");
   });
 
@@ -452,6 +531,42 @@ describe("SubagentWorkflow task_id execution binding", () => {
     expect(children).toContain("index=0 attempt=1");
     expect(children).toContain("error=Output persistence disabled.");
     expect(children).not.toContain(privateText);
+
+    const result = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "result",
+    }));
+    expect(result).toContain("Result: Output persistence disabled.");
+    expect(result).not.toContain(privateText);
+    await reloaded.fire("session_shutdown");
+  });
+
+  it("reloads an unbound workflow result by its wf_* ID", async () => {
+    delete process.env.PI_TASKS;
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+
+    const started = await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return "# Unbound\\nline two";`,
+    });
+    const workflowId = /Task ID: (wf_\w+)/.exec(textOf(started))?.[1];
+    expect(workflowId).toBeTruthy();
+    await first.execute("TaskOutput", { task_id: workflowId!, block: true, timeout: 5_000 });
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const result = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "result",
+      offset: 0,
+      limit: 9,
+    }));
+    expect(result).toContain(`Workflow: ${workflowId}`);
+    expect(result).toContain("Result: offset=0 limit=9 total=19 showing=0-9 more=true");
+    expect(result).toContain("\n\n# Unbound");
     await reloaded.fire("session_shutdown");
   });
 

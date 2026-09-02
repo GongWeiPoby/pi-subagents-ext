@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdtempSync,
   readFileSync,
@@ -6,49 +7,55 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { encodeCwd, ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
 
 describe("encodeCwd", () => {
-  it("encodes a POSIX absolute path by stripping the leading slash and replacing separators", () => {
-    expect(encodeCwd("/home/user/project")).toBe("home-user-project");
+  const digest = (cwd: string) => createHash("sha256").update(resolve(cwd)).digest("hex");
+
+  it("uses a readable prefix and the full hash of the resolved cwd", () => {
+    const encoded = encodeCwd("/home/user/project");
+
+    expect(encoded).toContain("home-user-project-");
+    expect(encoded.endsWith(digest("/home/user/project"))).toBe(true);
+    expect(encoded).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
   });
 
-  it("handles a POSIX root path", () => {
-    expect(encodeCwd("/")).toBe("");
+  it("uses a readable root prefix", () => {
+    expect(encodeCwd("/")).toMatch(/^root-[0-9a-f]{64}$/);
   });
 
-  it("encodes a Windows drive-letter path by stripping the drive prefix", () => {
-    expect(encodeCwd("C:\\Users\\foo\\project")).toBe("Users-foo-project");
+  it.each([
+    "C:\\Users\\foo\\project",
+    "c:\\foo",
+    "C:/Users/foo/project",
+    "\\\\server\\share\\project",
+    "/home\\user/project",
+    "///foo",
+  ])("keeps platform-style path input safe and hashed: %s", (cwd) => {
+    const encoded = encodeCwd(cwd);
+
+    expect(encoded.endsWith(digest(cwd))).toBe(true);
+    expect(encoded).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
   });
 
-  it("handles lowercase Windows drives", () => {
-    expect(encodeCwd("c:\\foo")).toBe("foo");
+  it("resolves empty and relative cwd inputs before hashing", () => {
+    expect(encodeCwd("")).toBe(encodeCwd(resolve("")));
+    expect(encodeCwd("foo/bar")).toBe(encodeCwd(resolve("foo/bar")));
   });
 
-  it("handles a Windows path written with forward slashes", () => {
-    expect(encodeCwd("C:/Users/foo/project")).toBe("Users-foo-project");
+  it("is stable for the same cwd and separates formerly colliding paths", () => {
+    expect(encodeCwd("/tmp/a-b/c")).toBe(encodeCwd("/tmp/a-b/c"));
+    expect(encodeCwd("/tmp/a-b/c")).not.toBe(encodeCwd("/tmp/a/b-c"));
   });
 
-  it("preserves server and share for UNC paths", () => {
-    expect(encodeCwd("\\\\server\\share\\project")).toBe("server-share-project");
-  });
+  it("stays within the internal ID length for long cwd paths", () => {
+    const cwd = `/tmp/${"long-segment/".repeat(30)}project`;
+    const encoded = encodeCwd(cwd);
 
-  it("handles mixed separators", () => {
-    expect(encodeCwd("/home\\user/project")).toBe("home-user-project");
-  });
-
-  it("collapses runs of leading dashes after separator replacement", () => {
-    expect(encodeCwd("///foo")).toBe("foo");
-  });
-
-  it("returns an empty string for an empty cwd", () => {
-    expect(encodeCwd("")).toBe("");
-  });
-
-  it("leaves a relative-looking path with no leading separator alone", () => {
-    expect(encodeCwd("foo/bar")).toBe("foo-bar");
+    expect(encoded.length).toBeLessThanOrEqual(128);
+    expect(encoded.endsWith(digest(cwd))).toBe(true);
   });
 });
 

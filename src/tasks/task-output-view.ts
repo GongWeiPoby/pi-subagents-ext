@@ -1,3 +1,4 @@
+import { sanitizeArtifactText } from "../result-artifact.js";
 import type { ResultArtifactStatus } from "../types.js";
 import {
   aggregateWorkflowCoverage,
@@ -10,6 +11,8 @@ import type { TaskWorkflowAggregateMetadata } from "./types.js";
 
 export const TASK_OUTPUT_CHILD_LIMIT = 100;
 export const TASK_OUTPUT_PRIVATE_MARKER = "Output persistence disabled.";
+export const TASK_OUTPUT_RESULT_DEFAULT_LIMIT = 20_000;
+export const TASK_OUTPUT_RESULT_MAX_LIMIT = 8 * 1024 * 1024;
 
 export interface TaskOutputAgentSummary {
   id: string;
@@ -191,6 +194,43 @@ export function formatTaskOutputSummary(context: TaskOutputSummaryContext): stri
 
   lines.push("Artifact: unavailable");
   lines.push("Result body: not read by this view");
+  return lines.join("\n");
+}
+
+export interface TaskOutputResultSlice {
+  body: string;
+  offset: number;
+  limit: number;
+  totalLength: number;
+  hasMore: boolean;
+}
+
+export interface TaskOutputResultContext extends TaskOutputSummaryContext {
+  result?: TaskOutputResultSlice;
+  resultError?: string;
+}
+
+export function formatTaskOutputResult(context: TaskOutputResultContext): string {
+  const lines = ["TaskOutput result", ...summaryHeader(context).slice(1)];
+  if (context.workflow !== undefined) lines.push(`Workflow: ${safeId(context.workflow.id)}`);
+  else if (context.agent !== undefined) lines.push(`Agent: ${safeId(context.agent.id)}`);
+
+  if (context.resultError !== undefined) {
+    lines.push(`Result: ${safeLine(context.resultError, 256)}`);
+    return lines.join("\n");
+  }
+  const result = context.result;
+  if (result === undefined) {
+    lines.push("Result: unavailable");
+    return lines.join("\n");
+  }
+  const shownEnd = result.offset + result.body.length;
+  lines.push(
+    `Result: offset=${result.offset} limit=${result.limit} total=${result.totalLength}`
+      + ` showing=${result.offset}-${shownEnd}${result.hasMore ? " more=true" : " more=false"}`,
+    "",
+    sanitizeArtifactText(result.body),
+  );
   return lines.join("\n");
 }
 
