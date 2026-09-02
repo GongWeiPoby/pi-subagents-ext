@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
-import { assertSafeInternalId } from "./output-file.js";
+import { assertSafeInternalId, sessionTaskDir } from "./output-file.js";
 import type { TaskExecutionRef } from "./tasks/execution-contract.js";
 import type { ResultArtifactStatus } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -29,6 +29,7 @@ export const WORKFLOW_AGGREGATE_ERROR_DISABLED = "Workflow failed; output persis
 const UNSAFE_RESULT_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
 const SAFE_ERROR_MAX_LENGTH = 512;
 const SAFE_ERROR_CODE_MAX_LENGTH = 64;
+const WORKFLOW_MANIFEST_MAX_BYTES = 2 * 1024 * 1024;
 const RUN_STATUSES = ["completed", "steered", "aborted", "stopped", "error"] as const;
 const ARTIFACT_STATUSES = ["complete", "metadata-only", "failed"] as const;
 
@@ -163,6 +164,17 @@ export interface WorkflowAggregateArtifactManifest {
   error?: string;
   artifactError?: string;
 }
+
+export interface ReadWorkflowAggregateArtifactInput {
+  cwd: string;
+  sessionId: string;
+  workflowId: string;
+  taskBinding?: TaskExecutionRef;
+}
+
+export type ReadWorkflowAggregateArtifactResult =
+  | { manifest: WorkflowAggregateArtifactManifest; manifestPath: string }
+  | { error: string; manifestPath: string };
 
 export interface WriteWorkflowAggregateArtifactInput {
   taskDir: string;
@@ -522,6 +534,62 @@ function validateWorkflowAggregateManifest(
   if (value.artifactStatus !== "complete"
     && (value.resultBodyPath !== undefined || value.resultDigest !== undefined)) return false;
   return true;
+}
+
+function sameWorkflowTaskBinding(left: TaskExecutionRef, right: TaskExecutionRef): boolean {
+  return left.storeId === right.storeId
+    && left.taskId === right.taskId
+    && left.taskAttemptId === right.taskAttemptId
+    && left.attemptId === right.attemptId
+    && left.kind === right.kind
+    && left.executorId === right.executorId;
+}
+
+/**
+ * Read only a workflow aggregate manifest from its fixed session-owned location.
+ * The caller supplies identities, never a path; result bodies are intentionally
+ * outside this API.
+ */
+export function readWorkflowAggregateArtifactManifest(
+  input: ReadWorkflowAggregateArtifactInput,
+): ReadWorkflowAggregateArtifactResult {
+  assertSafeInternalId(input.sessionId, "session id");
+  assertSafeInternalId(input.workflowId, "workflow id");
+  const artifactId = `workflow-${input.workflowId}`;
+  assertSafeInternalId(artifactId, "workflow aggregate artifact id");
+  const taskDir = sessionTaskDir(input.cwd, input.sessionId);
+  const manifestPath = join(taskDir, "results", artifactId, `${artifactId}.json`);
+
+  try {
+    const stat = lstatSync(manifestPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return { manifestPath, error: "workflow aggregate manifest is not a regular file" };
+    }
+    if (stat.size > WORKFLOW_MANIFEST_MAX_BYTES) {
+      return { manifestPath, error: "workflow aggregate manifest exceeds the read limit" };
+    }
+    const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    if (!validateWorkflowAggregateManifest(parsed, artifactId)) {
+      return { manifestPath, error: "workflow aggregate manifest is invalid" };
+    }
+    const manifest = parsed as WorkflowAggregateArtifactManifest;
+    if (manifest.workflowId !== input.workflowId) {
+      return { manifestPath, error: "workflow aggregate identity does not match" };
+    }
+    if (input.taskBinding !== undefined
+      && (manifest.taskBinding === undefined
+        || !sameWorkflowTaskBinding(manifest.taskBinding, input.taskBinding))) {
+      return { manifestPath, error: "workflow aggregate task binding does not match" };
+    }
+    return { manifestPath, manifest };
+  } catch (error) {
+    return {
+      manifestPath,
+      error: safeErrorCode(error) === "ENOENT"
+        ? "workflow aggregate manifest is missing"
+        : "workflow aggregate manifest could not be read",
+    };
+  }
 }
 
 function corruptWorkflowAggregate(

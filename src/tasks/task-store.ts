@@ -305,6 +305,7 @@ export class TaskStore {
       delete task.metadata.lastError;
       delete task.metadata.agentId;
       delete task.metadata.workflowId;
+      delete task.metadata.workflowAggregate;
       task.owner = undefined;
       // Compatibility read for older clients. It is not used as CAS authority.
       task.metadata.taskAttemptId = taskAttemptId;
@@ -433,6 +434,16 @@ export class TaskStore {
     return this.update(ref.taskId, fields, ref, token, retainBinding);
   }
 
+  /** Merge metadata under the opaque stop token without releasing the reservation. */
+  updateExecutionStopMetadata(
+    ref: TaskExecutionRef,
+    token: string,
+    metadata: Record<string, unknown>,
+  ): boolean {
+    if (!isTaskExecutionRef(ref) || !token) return false;
+    return this.update(ref.taskId, { metadata }, ref, token).casMatched === true;
+  }
+
   /** Commit one bound executor's outcome. Stale, malformed, cross-store, or
    *  duplicate refs are rejected without mutating the task. A terminal task
    *  may still carry its ref while TaskUpdate finishes a stop reservation; the
@@ -544,7 +555,7 @@ export class TaskStore {
           && !stopMatched && !claimMatched)) {
         return { task: cloneTask(task), changedFields: [], warnings: [], casMatched: false };
       }
-      if (stopMatched) {
+      if (stopMatched && fields.status !== undefined) {
         const reservedStatus = task.executionStop?.status;
         const requestedStatus = fields.status === "pending" ? "pending" : "completed";
         if (reservedStatus !== requestedStatus) {

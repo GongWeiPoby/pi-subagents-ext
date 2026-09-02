@@ -216,6 +216,52 @@ describe("SubagentWorkflow task_id execution binding", () => {
     await harness.fire("session_shutdown");
   });
 
+  it("reloads privacy-off workflow summary and children from persisted aggregate metadata", async () => {
+    delete process.env.PI_TASKS;
+    setOutputTranscriptDefault(false);
+    const privateText = "PRIVATE_RELOAD_CHILD_ERROR";
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: privateText,
+      failure: privateText,
+      session: { dispose: vi.fn() },
+      aborted: false,
+      steered: false,
+    } as never);
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+    await createTask(first);
+
+    await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return await agent("private reload prompt");`,
+      task_id: "1",
+    });
+    await vi.waitFor(async () => expect(await taskText(first)).toContain("Status: completed"));
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const summary = textOf(await reloaded.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "summary",
+    }));
+    expect(summary).toContain("TaskOutput summary");
+    expect(summary).toContain("Artifact: workflow-");
+    expect(summary).toContain("[metadata-only]");
+    expect(summary).toContain("Result body: Output persistence disabled.");
+    expect(summary).not.toContain(privateText);
+
+    const children = textOf(await reloaded.execute("TaskOutput", {
+      task_id: "1",
+      block: false,
+      view: "children",
+    }));
+    expect(children).toContain("index=0 attempt=1 status=failed invocation=spawn");
+    expect(children).toContain("error=Output persistence disabled.");
+    expect(children).not.toContain(privateText);
+    await reloaded.fire("session_shutdown");
+  });
+
   it("uses a fixed error marker for private child text in Todo and TaskOutput", async () => {
     delete process.env.PI_TASKS;
     setOutputTranscriptDefault(false);
@@ -359,6 +405,147 @@ describe("SubagentWorkflow task_id execution binding", () => {
     expect(textOf(retry)).toContain("started in the background");
     await vi.waitFor(async () => expect(await taskText(harness)).toContain("Status: completed"));
     await harness.fire("session_shutdown");
+  });
+
+  it("reloads an unbound workflow aggregate by wf_* for summary and children", async () => {
+    delete process.env.PI_TASKS;
+    setOutputTranscriptDefault(false);
+    const privateText = "PRIVATE_UNBOUND_RELOAD_CHILD";
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: privateText,
+      failure: privateText,
+      session: { dispose: vi.fn() },
+      aborted: false,
+      steered: false,
+    } as never);
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+
+    const started = await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return await agent("unbound private reload prompt");`,
+    });
+    const workflowId = /Task ID: (wf_\w+)/.exec(textOf(started))?.[1];
+    expect(workflowId).toBeTruthy();
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1));
+    await first.execute("TaskOutput", { task_id: workflowId!, block: false, view: "summary" });
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const summary = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "summary",
+    }));
+    expect(summary).toContain("TaskOutput summary");
+    expect(summary).toContain(`Workflow: ${workflowId} [completed]`);
+    expect(summary).toContain("Artifact: workflow-");
+    expect(summary).toContain("[metadata-only]");
+    expect(summary).toContain("Result body: Output persistence disabled.");
+    expect(summary).not.toContain(privateText);
+
+    const children = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "children",
+    }));
+    expect(children).toContain("index=0 attempt=1");
+    expect(children).toContain("error=Output persistence disabled.");
+    expect(children).not.toContain(privateText);
+    await reloaded.fire("session_shutdown");
+  });
+
+  it("reloads a TaskStop-settled workflow aggregate with child refs", async () => {
+    delete process.env.PI_TASKS;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+    await createTask(first);
+
+    const started = await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return await agent("stop and reload");`,
+      task_id: "1",
+    });
+    const workflowId = /Task ID: (wf_\w+)/.exec(textOf(started))?.[1];
+    expect(workflowId).toBeTruthy();
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1));
+
+    await first.execute("TaskStop", { task_id: "1" });
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    expect(stored.metadata.workflowAggregate).toMatchObject({ artifactId: `workflow-${workflowId}` });
+    expect(stored.metadata.workflowAggregate?.taskBinding.executorId).toBe(workflowId);
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const summary = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "summary",
+    }));
+    expect(summary).toContain("Workflow:");
+    expect(summary).toContain("[killed]");
+    expect(summary).toContain("Artifact: workflow-");
+    const children = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "children",
+    }));
+    expect(children).toContain("index=0 attempt=1");
+    expect(children).toContain("record:");
+    await reloaded.fire("session_shutdown");
+  });
+
+  it.each([
+    { label: "null deletion", workflowAggregate: null },
+    { label: "replacement", workflowAggregate: { artifactId: "forged-user-aggregate" } },
+  ])("keeps the runtime workflow aggregate when TaskUpdate attempts $label", async ({ workflowAggregate }) => {
+    delete process.env.PI_TASKS;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const first = integratedHarness(hermetic.dir);
+    await first.fire("session_start", { reason: "startup" });
+    await createTask(first);
+
+    const started = await first.execute("SubagentWorkflow", {
+      script: `${inlineMeta}return await agent("update and reload");`,
+      task_id: "1",
+    });
+    const workflowId = /Task ID: (wf_\w+)/.exec(textOf(started))?.[1];
+    expect(workflowId).toBeTruthy();
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1));
+
+    await first.execute("TaskUpdate", {
+      taskId: "1",
+      status: "pending",
+      metadata: {
+        workflowAggregate,
+        userMetadata: "preserved",
+      },
+    });
+    const stored = new TaskStore(sessionTaskFile(hermetic.dir, "binding-session", "session")).get("1")!;
+    expect(stored.metadata.workflowAggregate).toMatchObject({ artifactId: `workflow-${workflowId}` });
+    expect(stored.metadata.workflowAggregate?.taskBinding.executorId).toBe(workflowId);
+    expect(stored.metadata.userMetadata).toBe("preserved");
+    await first.fire("session_shutdown");
+
+    const reloaded = integratedHarness(hermetic.dir);
+    await reloaded.fire("session_start", { reason: "reload" });
+    const summary = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "summary",
+    }));
+    expect(summary).toContain("Workflow:");
+    expect(summary).toContain("[killed]");
+    expect(summary).toContain("Artifact: workflow-");
+    const children = textOf(await reloaded.execute("TaskOutput", {
+      task_id: workflowId!,
+      block: false,
+      view: "children",
+    }));
+    expect(children).toContain("index=0 attempt=1");
+    expect(children).toContain("record:");
+    await reloaded.fire("session_shutdown");
   });
 
   it("holds a delayed workflow stop reservation against concurrent updates and claims", async () => {

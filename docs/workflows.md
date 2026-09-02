@@ -38,7 +38,11 @@ Script: <session task path>/<run id>.workflow.js
 You will be notified when it finishes — do NOT poll or sleep waiting for it.
 ```
 
-`TaskOutput({ task_id, block: false })` reports current state and counts. For a structured Todo ID it dispatches from the canonical workflow binding (and the protected settled workflow ID afterward), not from stale Agent metadata. `block: true` waits event-first until settlement, timeout, abort, or session change. A timeout or abort does not consume the future notification. Returning settled workflow output consumes its held notification so it is not delivered twice.
+`TaskOutput({ task_id, block: false })` reports current state and counts. For a structured Todo ID it dispatches from the canonical workflow binding (and the protected settled workflow ID afterward), not from stale Agent metadata. `view: "summary"` is metadata-only and never reads a result body; it includes the task/executor binding, workflow status, bounded counters, coverage, aggregate artifact status, and privacy state. `view: "children"` lists at most 100 bounded workflow child attempts with status, invocation, safe references, usage, and sanitized errors. On an Agent or manual task, the children view reports that children are not applicable. The default view is unchanged when `view` is omitted.
+
+When a settled workflow is reloaded, the explicit summary/children views may read its fixed session-owned aggregate manifest after validating the persisted Task binding. This is internal metadata access only: there is no standalone `ArtifactRead` tool, and `result`/body views are not implemented. Privacy-off views never expose workflow result, prompt, log, or child error text; they use `Output persistence disabled.` as the fixed marker. Child attempts and coverage describe persisted execution records, not verification evidence or proof that the work is complete.
+
+A timeout or abort does not consume the future notification. Returning settled workflow output consumes its held notification so it is not delivered twice.
 
 The inline script is persisted in the session task directory so the model can edit and re-run it. It is scratch storage and may disappear with a reboot or temp cleanup. A named workflow reports its durable source path instead.
 

@@ -3,7 +3,9 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import type { TaskExecutionBinding } from "./execution-contract.js";
+import type { ResultArtifactStatus } from "../types.js";
+import type { WorkflowCoverageAggregate } from "../workflow/attempt.js";
+import type { TaskExecutionBinding, TaskExecutionRef } from "./execution-contract.js";
 
 export type {
   TaskExecutionBinding,
@@ -22,6 +24,16 @@ export interface TaskCascadeConfig {
   model?: string;
 }
 
+export interface TaskWorkflowAggregateMetadata {
+  artifactId: string;
+  artifactStatus: ResultArtifactStatus;
+  coverage: WorkflowCoverageAggregate;
+  evidenceIncomplete?: boolean;
+  resultBodyEnabled: boolean;
+  status: "completed" | "failed" | "killed";
+  taskBinding: TaskExecutionRef;
+}
+
 export interface TaskMetadata extends Record<string, unknown> {
   agentId?: string;
   agentType?: string;
@@ -29,6 +41,7 @@ export interface TaskMetadata extends Record<string, unknown> {
   result?: string;
   taskAttemptId?: string;
   taskCascadeConfig?: TaskCascadeConfig;
+  workflowAggregate?: TaskWorkflowAggregateMetadata;
   workflowId?: string;
 }
 

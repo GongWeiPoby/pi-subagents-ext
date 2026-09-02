@@ -38,7 +38,7 @@ import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { registerTasks, type WorkflowTaskOutputSnapshot } from "./tasks/index.js";
-import type { TaskExecutionRef } from "./tasks/types.js";
+import type { TaskExecutionRef, TaskWorkflowAggregateMetadata } from "./tasks/types.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -72,7 +72,7 @@ import {
   hasNestedWorkflowCall,
   validateDirectWorkflowApprovalCompleteness,
 } from "./workflow/approval.js";
-import { aggregateWorkflowCoverage } from "./workflow/attempt.js";
+import { aggregateWorkflowCoverage, cloneWorkflowChildAttempt } from "./workflow/attempt.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
 import type { FleetWorkflow } from "./workflow/fleet.js";
@@ -2439,6 +2439,17 @@ Terse command-style prompts produce shallow, generic work.
       totalTokens: task.totalTokens,
       totalToolCalls: task.totalToolCalls,
       elapsedMs: elapsedMs(task, Date.now()),
+      taskExecutionRef: task.taskExecutionRef === undefined ? undefined : { ...task.taskExecutionRef },
+      attempts: task.workflowAttempts.map(cloneWorkflowChildAttempt),
+      coverage: aggregateWorkflowCoverage(task.workflowAttempts),
+      resultBodyEnabled: task.resultBodyEnabled,
+      ...(task.artifactSessionId !== undefined
+        ? {
+            aggregateArtifactId: `workflow-${task.id}`,
+            aggregateArtifactStatus: task.aggregateArtifactStatus ?? "pending",
+          }
+        : { aggregateArtifactStatus: task.aggregateArtifactStatus ?? "skipped" }),
+      ...(task.evidenceIncomplete !== undefined ? { evidenceIncomplete: task.evidenceIncomplete } : {}),
       ...(settled && task.resultBodyEnabled
         ? { output: workflowResultText(task) }
         : settled && task.status !== "completed"
@@ -2576,6 +2587,19 @@ Terse command-style prompts produce shallow, generic work.
   function settleWorkflowTaskBinding(task: WorkflowTask, ctx: ExtensionContext): void {
     const ref = task.taskExecutionRef;
     if (!ref) return;
+    const aggregateMetadata: TaskWorkflowAggregateMetadata = {
+      artifactId: `workflow-${task.id}`,
+      artifactStatus: task.aggregateArtifactStatus ?? "skipped",
+      coverage: aggregateWorkflowCoverage(persistedWorkflowAttempts(task)),
+      resultBodyEnabled: task.resultBodyEnabled,
+      status: task.status as "completed" | "failed" | "killed",
+      taskBinding: { ...ref },
+      ...(task.evidenceIncomplete !== undefined ? { evidenceIncomplete: task.evidenceIncomplete } : {}),
+    };
+    const metadataCommitted = taskExecutions.updateStop(ref, { metadata: { workflowAggregate: aggregateMetadata } });
+    if (!metadataCommitted) {
+      taskExecutions.update(ref, { metadata: { workflowAggregate: aggregateMetadata } });
+    }
     const result = task.resultBodyEnabled
       ? scrubWorkflowPersistenceText(task, ctx, workflowResultText(task))
       : undefined;

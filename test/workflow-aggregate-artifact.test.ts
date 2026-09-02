@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import subagentsExtension from "../src/index.js";
 import { sessionTaskDir, setOutputTranscriptDefault } from "../src/output-file.js";
 import {
+  readWorkflowAggregateArtifactManifest,
   type WorkflowAggregateArtifactManifest,
   writeWorkflowAggregateArtifact,
 } from "../src/result-artifact.js";
@@ -221,6 +222,45 @@ describe("workflow aggregate result artifacts", () => {
     const manifest = JSON.parse(readFileSync(written.manifestPath, "utf-8")) as WorkflowAggregateArtifactManifest;
     expect(manifest.resultBodyPath).toBe("workflow-wf_abc123.md");
     expect(manifest.resultBodyPath).not.toContain(taskDir);
+  });
+
+  it("reads only the fixed managed manifest and validates its task binding", () => {
+    const cwd = join(taskDir, "managed-cwd");
+    const sessionId = "aggregate-reader-session";
+    const managedTaskDir = sessionTaskDir(cwd, sessionId);
+    const taskBinding = input().taskBinding;
+    try {
+      const written = writeWorkflowAggregateArtifact(input({
+        taskDir: managedTaskDir,
+        taskBinding,
+      }));
+      rmSync(written.bodyPath!);
+
+      const read = readWorkflowAggregateArtifactManifest({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        taskBinding,
+      });
+      expect(read).toMatchObject({
+        manifestPath: written.manifestPath,
+        manifest: {
+          workflowId: "wf_abc123",
+          artifactStatus: "complete",
+          taskBinding,
+        },
+      });
+
+      const mismatch = readWorkflowAggregateArtifactManifest({
+        cwd,
+        sessionId,
+        workflowId: "wf_abc123",
+        taskBinding: { ...taskBinding!, attemptId: "other-attempt" },
+      });
+      expect(mismatch).toMatchObject({ error: "workflow aggregate task binding does not match" });
+    } finally {
+      rmSync(dirname(managedTaskDir), { recursive: true, force: true });
+    }
   });
 
   it("rejects unsafe aggregate and workflow IDs before creating results", () => {
