@@ -3,6 +3,18 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import type { ResultArtifactStatus } from "../types.js";
+import type { WorkflowCoverageAggregate } from "../workflow/attempt.js";
+import type { TaskExecutionBinding, TaskExecutionRef } from "./execution-contract.js";
+
+export type {
+  TaskExecutionBinding,
+  TaskExecutionClaim,
+  TaskExecutionClaimOptions,
+  TaskExecutionKind,
+  TaskExecutionRef,
+  TaskExecutionSettle,
+} from "./execution-contract.js";
 
 export type TaskStatus = "pending" | "in_progress" | "completed";
 
@@ -12,6 +24,16 @@ export interface TaskCascadeConfig {
   model?: string;
 }
 
+export interface TaskWorkflowAggregateMetadata {
+  artifactId: string;
+  artifactStatus: ResultArtifactStatus;
+  coverage: WorkflowCoverageAggregate;
+  evidenceIncomplete?: boolean;
+  resultBodyEnabled: boolean;
+  status: "completed" | "failed" | "killed";
+  taskBinding: TaskExecutionRef;
+}
+
 export interface TaskMetadata extends Record<string, unknown> {
   agentId?: string;
   agentType?: string;
@@ -19,6 +41,15 @@ export interface TaskMetadata extends Record<string, unknown> {
   result?: string;
   taskAttemptId?: string;
   taskCascadeConfig?: TaskCascadeConfig;
+  workflowAggregate?: TaskWorkflowAggregateMetadata;
+  workflowId?: string;
+}
+
+export interface TaskExecutionStopReservation {
+  /** Opaque authority returned only to the caller that prepared this stop. */
+  readonly token: string;
+  readonly status: "completed" | "pending";
+  readonly error?: string;
 }
 
 export interface Task {
@@ -29,6 +60,10 @@ export interface Task {
   activeForm?: string;
   owner?: string;
   metadata: TaskMetadata;
+  /** Canonical execution authority. Only TaskStore may mutate this field. */
+  execution?: TaskExecutionBinding;
+  /** Terminal stop reservation. Only its opaque token may release the binding. */
+  executionStop?: TaskExecutionStopReservation;
   blocks: string[];
   blockedBy: string[];
   createdAt: number;
@@ -37,6 +72,8 @@ export interface Task {
 
 /** Serialized store format on disk. */
 export interface TaskStoreData {
+  /** Stable identity for CAS refs. Missing only in stores written by older versions. */
+  storeId?: string;
   nextId: number;
   tasks: Task[];
 }

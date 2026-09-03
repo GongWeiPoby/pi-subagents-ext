@@ -145,29 +145,24 @@ describe("Workflow end to end", () => {
       // builder, and every link has to be wired for it to land.
       expect(childSystemPrompts).toHaveLength(childPrompts.length);
       expect(childSystemPrompts.every(p => p.includes("<workflow_child>"))).toBe(true);
-      expect(childSystemPrompts[0]).toContain("Your final message IS the return value");
+      expect(childSystemPrompts[0]).toContain("Your final message IS the text/Markdown return value");
     } finally {
       await run.dispose?.();
     }
   }, 90_000);
 
-  it("runs a saved workflow by name, with schema and a nested child, end to end", async () => {
-    // The point of the compatibility work, exercised the way a real script
-    // does it: a saved workflow invoked by `name`, calling another saved
-    // workflow inline, whose agent answers through StructuredOutput. Every
-    // link — resolution, nesting, the injected tool, validation, the realm
-    // parse — has to hold or this fails.
+  it("runs a saved workflow by name, with a text-only nested child, end to end", async () => {
+    // Exercise saved-name resolution, nesting, real workflow startup/background
+    // completion, and journal persistence using a line-oriented handoff.
     const cwd = workflowProject();
     mkdirSync(join(cwd, ".pi", "workflows"), { recursive: true });
     writeFileSync(
       join(cwd, ".pi", "workflows", "child.js"),
       [
         'export const meta = { name: "child", description: "the nested one" };',
-        'const found = await agent("NESTED-TASK-MARKER", {',
-        '  label: "scan",',
-        '  schema: { type: "object", properties: { files: { type: "array", items: { type: "string" } } }, required: ["files"] },',
-        "});",
-        "return found.files.length;",
+        'const found = await agent("NESTED-TASK-MARKER", { label: "scan" });',
+        "const files = typeof found === \"string\" ? found.split(\"\\n\").filter(line => line.trim()) : [];",
+        "return files.length;",
       ].join("\n"),
     );
     writeFileSync(
@@ -190,12 +185,11 @@ describe("Workflow end to end", () => {
         if (!isParent) {
           const seen = asText(context);
           childPrompts.push(seen);
-          // Answer through the injected tool exactly once, then stop — a model
-          // that kept calling it every turn would just spin.
+          // Return the line-oriented handoff consumed by the nested script.
           const alreadyAnswered = (context.tools ?? []).length > 0 && /Recorded\./.test(seen);
           return alreadyAnswered
             ? fauxText("done")
-            : fauxToolCall("StructuredOutput", { files: ["a.ts", "b.ts"] }, { id: "so-1" });
+            : fauxText("a.ts\n\nb.ts\n");
         }
         return asText(context).includes("Task ID")
           ? fauxText("workflow launched")
@@ -218,8 +212,7 @@ describe("Workflow end to end", () => {
       const recorded = readJournal(journals[0]);
       expect(recorded).toHaveLength(1);
       expect(recorded[0].index).toBe(0);
-      // And the recorded answer is the validated payload, not prose.
-      expect(JSON.parse(String(recorded[0].text))).toEqual({ files: ["a.ts", "b.ts"] });
+      expect(recorded[0].text).toBe("a.ts\n\nb.ts");
     } finally {
       await run.dispose?.();
     }
@@ -266,10 +259,9 @@ describe("Workflow end to end", () => {
 // The suite above pins `live: false` because its assertions rest on a
 // `SubagentWorkflow` call the harness emits itself. That buys determinism at the
 // cost of the one link a faux backend cannot stand in for: whether a real model,
-// handed the tool description, actually *calls* the thing — and whether a real
-// provider can answer a schema-bearing child under constrained sampling. Both
-// are pure prompt/provider behaviour, invisible to every test that puts the call
-// there by hand.
+// handed the tool description, actually *calls* the thing. That is pure
+// prompt/provider behaviour, invisible to every test that puts the call there
+// by hand.
 //
 // SMOKE, not strict assertions, in the same spirit as the live block in
 // test/subagents-print-mode-e2e.test.ts: the script is handed to the model
@@ -403,53 +395,4 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
     LIVE_VITEST_TIMEOUT,
   );
 
-  it(
-    "a schema-bearing agent answers through StructuredOutput against a real provider",
-    async () => {
-      // The one path a faux backend genuinely cannot stand in for. `schema`
-      // rests on `constrainedSampling` reaching the provider's own constrained
-      // decoding, plus a description, a guideline and host-side validation
-      // behind it — a faux model answers because the harness told it to, so
-      // nothing below the tool call is exercised there.
-      const script = [
-        'export const meta = { name: "live-schema", description: "one structured answer" };',
-        "const picked = await agent(",
-        '  "Pick the fruit named in this sentence: the banana is yellow. Answer through the StructuredOutput tool.",',
-        '  { label: "pick", schema: { type: "object", properties: { fruit: { type: "string" } }, required: ["fruit"] } },',
-        ");",
-        "return picked.fruit;",
-      ].join("\n");
-
-      const cwd = liveProject();
-      run = await runPrintMode({
-        prompt: [
-          "Call the SubagentWorkflow tool once, passing EXACTLY the following script as the",
-          "`script` parameter. Do not modify it. Then tell me the task id it returned.",
-          "",
-          script,
-        ].join("\n"),
-        cwd,
-        timeoutMs: LIVE_TIMEOUT,
-      });
-
-      expect(toolCallsNamed(run.parentSession, "SubagentWorkflow").length).toBeGreaterThan(0);
-      expect(toolResultsNamed(run.parentSession, "SubagentWorkflow").join("\n")).toContain("Task ID");
-
-      const settled = await waitFor(
-        () => entriesFor(cwd).some(entry => entry.ok && (entry.text ?? "").trim().startsWith("{")),
-        LIVE_SETTLE_TIMEOUT,
-      );
-      const recorded = entriesFor(cwd);
-      expect(settled, `journal entries: ${JSON.stringify(recorded)}`).toBe(true);
-
-      // The journal records the validated payload, not prose — `text` is
-      // `record.structuredJson ?? record.result`, so JSON here means the
-      // StructuredOutput path answered and validation passed.
-      const structured = recorded.find(entry => (entry.text ?? "").trim().startsWith("{"));
-      const payload = JSON.parse(String(structured?.text)) as { fruit?: unknown };
-      expect(typeof payload.fruit).toBe("string");
-      expect(String(payload.fruit)).toMatch(/banana/i);
-    },
-    LIVE_VITEST_TIMEOUT,
-  );
 });

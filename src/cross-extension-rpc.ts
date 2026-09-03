@@ -10,12 +10,18 @@
  *
  * @see docs/rpc.md — the caller-facing integration reference: spawn options
  * (including the fields spawnTopLevel strips), every error string, the
- * completion-notification race, and what protocol version 2 does not promise.
+ * completion-notification race, and what protocol version 4 does not promise.
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
+import {
+  STRUCTURED_OUTPUT_MIGRATION_ERROR,
+  SUBAGENTS_RPC_PROTOCOL_VERSION,
+} from "./subagent-contract.js";
+import type { TaskExecutionClaim, TaskExecutionRef } from "./tasks/execution-contract.js";
+import { isTaskExecutionClaim } from "./tasks/execution-contract.js";
 import type { AgentRecord } from "./types.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
@@ -30,11 +36,22 @@ export type RpcReply<T = void> =
   | { success: false; error: string };
 
 /** RPC protocol version — bumped when the envelope or method contracts change. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = SUBAGENTS_RPC_PROTOCOL_VERSION;
+
+export interface RpcSpawnOptions extends Record<string, unknown> {
+  model?: unknown;
+  taskExecution?: TaskExecutionClaim;
+}
+
+function isModelRef(value: unknown): value is { provider: string; id: string } {
+  return value !== null && typeof value === "object"
+    && "provider" in value && typeof value.provider === "string"
+    && "id" in value && typeof value.id === "string";
+}
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
 export interface SpawnCapable {
-  spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
+  spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: RpcSpawnOptions): string;
   /** Resolves once the spawned agent is running; rejects on a startup failure. */
   awaitStartup(id: string): Promise<void>;
   abort(id: string): boolean;
@@ -43,7 +60,7 @@ export interface SpawnCapable {
    * to the two fields `isTopLevelAgent` reads, so the RPC layer keeps its
    * deliberately shallow view of the manager.
    */
-  getRecord(id: string): Pick<AgentRecord, "parentAgentId" | "workflowId"> | undefined;
+  getRecord(id: string): Pick<AgentRecord, "parentAgentId" | "workflowId" | "taskExecutionRef"> | undefined;
   /**
    * Mark a settled agent's result as read by the caller, suppressing the
    * completion notification — what `get_subagent_result` does when it returns
@@ -82,9 +99,9 @@ function handleRpc<P extends { requestId: string }>(
       const reply: { success: true; data?: unknown } = { success: true };
       if (data !== undefined) reply.data = data;
       events.emit(`${channel}:reply:${params.requestId}`, reply);
-    } catch (err: any) {
+    } catch (err: unknown) {
       events.emit(`${channel}:reply:${params.requestId}`, {
-        success: false, error: err?.message ?? String(err),
+        success: false, error: err instanceof Error ? err.message : String(err),
       });
     }
   });
@@ -101,8 +118,18 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     return { version: PROTOCOL_VERSION };
   });
 
-  const unsubSpawn = handleRpc<{ requestId: string; type: string; prompt: string; options?: any }>(
+  const unsubSpawn = handleRpc<{
+    requestId: string;
+    type: string;
+    prompt: string;
+    options?: RpcSpawnOptions | null;
+  }>(
     events, "subagents:rpc:spawn", async ({ type, prompt, options }) => {
+      if (options !== null && typeof options === "object"
+        && Object.hasOwn(options, "structuredOutput")) {
+        throw new Error(STRUCTURED_OUTPUT_MIGRATION_ERROR);
+      }
+
       const ctx = getCtx();
       if (!ctx) throw new Error("No active session");
 
@@ -112,7 +139,11 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
       // — same pattern the scheduler path already uses — so the spawned
       // agent's auth lookup doesn't crash with "No API key found for
       // undefined".
-      let normalizedOptions = options ?? {};
+      let normalizedOptions: RpcSpawnOptions = options ?? {};
+      if (normalizedOptions.taskExecution !== undefined
+        && !isTaskExecutionClaim(normalizedOptions.taskExecution)) {
+        throw new Error("Invalid task execution binding");
+      }
       // `!= null` on purpose: a JSON-forwarding caller can serialize an unset
       // field as null, and the runner reads `options.model ?? default`, so null
       // means "inherit" — not an override to resolve or scope-check.
@@ -121,11 +152,14 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
         const { modelRegistry, cwd } = ctx as { modelRegistry?: ModelRegistry; cwd?: string };
         // Names the override the same way in both messages below; an object
         // override would otherwise interpolate as "[object Object]".
+        if (typeof override !== "string" && !isModelRef(override)) {
+          throw new Error("Model override must be a model id string or Model object");
+        }
         const label = typeof override === "string" ? override : `${override.provider}/${override.id}`;
         if (!modelRegistry) {
           throw new Error(`Model override "${label}" provided but ctx.modelRegistry is unavailable`);
         }
-        let model = override;
+        let model: { provider: string; id: string };
         if (typeof override === "string") {
           const resolved = resolveModel(override, modelRegistry);
           if (typeof resolved === "string") {
@@ -136,6 +170,8 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
           }
           model = resolved;
           normalizedOptions = { ...normalizedOptions, model: resolved };
+        } else {
+          model = override;
         }
 
         // A model on the RPC payload is an orchestrator-level choice, exactly
@@ -155,12 +191,15 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
         if (verdict.kind === "error") throw new Error(verdict.message);
       }
 
-      const id = manager.spawn(pi, ctx, type, prompt, normalizedOptions);
+      const safeOptions = { ...normalizedOptions };
+      delete safeOptions.resultBodyEnabled;
+      const id = manager.spawn(pi, ctx, type, prompt, safeOptions);
       // With isolation: "worktree" the agent starts asynchronously — wait for
       // it, so a strict-isolation failure is still an error envelope rather
       // than an id for an agent that never ran.
       await manager.awaitStartup(id);
-      return { id };
+      const taskExecutionRef: TaskExecutionRef | undefined = manager.getRecord(id)?.taskExecutionRef;
+      return { id, ...(taskExecutionRef !== undefined ? { taskExecutionRef } : {}) };
     },
   );
 
@@ -187,7 +226,7 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // TaskOutput is the one in practice — says so here, so the completion
   // notification for that same result is not delivered on top of it and does
   // not cost the parent a turn. Deliberately outside the ping version
-  // handshake: an extension built against protocol v2 simply never calls it.
+  // handshake: an older extension simply never calls it.
   const unsubConsume = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:consume", ({ agentId }) => {
       if (!manager.consumeResult(agentId)) throw new Error("Agent not found or still running");

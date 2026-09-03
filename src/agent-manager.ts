@@ -20,12 +20,21 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import { getOutputTranscriptDefault, sessionTaskDir } from "./output-file.js";
+import { type WriteResultArtifactInput, writeResultArtifact } from "./result-artifact.js";
+import { STRUCTURED_OUTPUT_MIGRATION_ERROR } from "./subagent-contract.js";
+import type { TaskExecutionClaim } from "./tasks/execution-contract.js";
+import { isTaskExecutionClaim } from "./tasks/execution-contract.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
-import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+
+export function resolveResultBodyEnabled(type: string): boolean {
+  return getAgentConfig(type)?.outputTranscript ?? getOutputTranscriptDefault();
+}
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -193,6 +202,12 @@ interface SpawnOptions {
    * `spawnTopLevel` strips it from anything a caller sends.
    */
   reclaim?: { handle: string; alias?: string };
+  /** Internal lineage for a reopened or explicitly retried invocation. */
+  sourceAttemptId?: string;
+  /** Original Agent record when a persisted conversation is reopened. */
+  sourceAgentId?: string;
+  /** Whether the final text may be persisted as a Markdown result body. */
+  resultBodyEnabled?: boolean;
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -227,11 +242,8 @@ interface SpawnOptions {
    * counting them twice would let one workflow starve the whole session.
    */
   workflowId?: string;
-  /**
-   * Make the child report through a `StructuredOutput` tool built from this
-   * compiled schema. Set only by the workflow host, for `agent({ schema })`.
-   */
-  structuredOutput?: CompiledSchema;
+  /** Internal TaskExecute claim. The manager stamps its generated id as executorId. */
+  taskExecution?: TaskExecutionClaim;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /**
@@ -314,6 +326,10 @@ interface ResumeOptions {
   isBackground?: boolean;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
+  /** Called at the end of each resumed agentic turn with the cumulative count. */
+  onTurnEnd?: (turnCount: number) => void;
+  /** Called with resumed assistant text deltas and the current response text. */
+  onTextDelta?: (delta: string, fullText: string) => void;
   /** Called once per assistant message_end with that message's usage delta. */
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
@@ -328,6 +344,19 @@ interface ResumeOptions {
    */
   onStarted?: () => void;
 }
+
+interface ArtifactAttemptContext {
+  cwd?: string;
+  sessionId?: string;
+  includeBody: boolean;
+  invocation: "spawn" | "resume" | "retry";
+  sourceAgentId?: string;
+  startedAt: number;
+  toolUsesAtStart: number;
+  usageAtStart: LifetimeUsage;
+}
+
+type ResultArtifactWriter = (input: WriteResultArtifactInput) => ReturnType<typeof writeResultArtifact>;
 
 /** Best-effort ceiling on one child's shutdown handlers, so teardown can't strand a quit. */
 const CHILD_SHUTDOWN_TIMEOUT_MS = 3_000;
@@ -411,6 +440,9 @@ export class AgentManager {
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
   private runningForeground = 0;
+  /** Current immutable result attempt for each live Agent record. */
+  private artifactAttempts = new Map<string, ArtifactAttemptContext>();
+  private resultArtifactWriter: ResultArtifactWriter;
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -418,15 +450,146 @@ export class AgentManager {
     onStart?: OnAgentStart,
     onCompact?: OnAgentCompact,
     onUsage?: OnAgentUsage,
+    resultArtifactWriter: ResultArtifactWriter = writeResultArtifact,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.onUsage = onUsage;
+    this.resultArtifactWriter = resultArtifactWriter;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
+  }
+
+  private findTaskRetrySource(options: SpawnOptions): AgentRecord | undefined {
+    const claim = options.taskExecution;
+    if (!claim) return undefined;
+    return [...this.agents.values()]
+      .filter(record => record.taskExecutionRef?.storeId === claim.storeId
+        && record.taskExecutionRef.taskId === claim.taskId)
+      .sort((a, b) => b.startedAt - a.startedAt)[0];
+  }
+
+  private captureResultBodyPolicy(record: AgentRecord, historical?: boolean): boolean {
+    if (typeof record.resultBodyEnabled === "boolean") return record.resultBodyEnabled;
+    // Records from before attempt privacy was stored have no snapshot. Prefer
+    // the in-memory attempt history when available, then resolve current config
+    // exactly once and retain that result for subsequent resumes.
+    const policy = historical ?? resolveResultBodyEnabled(record.type);
+    record.resultBodyEnabled = policy;
+    return policy;
+  }
+
+  private beginArtifactAttempt(
+    record: AgentRecord,
+    ctx: ExtensionContext,
+    options: Pick<SpawnOptions, "resultBodyEnabled" | "rootSessionId">,
+    invocation: ArtifactAttemptContext["invocation"],
+    sourceAgentId?: string,
+  ): void {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    const sessionId = sessionFile
+      ? options.rootSessionId ?? ctx.sessionManager?.getSessionId?.()
+      : undefined;
+    const includeBody = this.captureResultBodyPolicy(record, options.resultBodyEnabled);
+    record.resultArtifactPath = undefined;
+    record.resultBodyPath = undefined;
+    record.artifactError = undefined;
+    record.artifactStatus = sessionId ? "pending" : "skipped";
+    this.artifactAttempts.set(record.id, {
+      ...(sessionId ? { cwd: ctx.cwd, sessionId } : {}),
+      includeBody,
+      invocation,
+      ...(sourceAgentId !== undefined ? { sourceAgentId } : {}),
+      startedAt: Date.now(),
+      toolUsesAtStart: record.toolUses,
+      usageAtStart: { ...record.lifetimeUsage },
+    });
+  }
+
+  private beginResumeArtifact(record: AgentRecord): void {
+    const previous = this.artifactAttempts.get(record.id);
+    const sourceAttemptId = record.artifactId;
+    const includeBody = this.captureResultBodyPolicy(record, previous?.includeBody);
+    record.artifactId = `agent-attempt-${randomUUID()}`;
+    record.sourceAttemptId = sourceAttemptId;
+    record.resultArtifactPath = undefined;
+    record.resultBodyPath = undefined;
+    record.artifactError = undefined;
+    record.artifactStatus = previous?.sessionId ? "pending" : "skipped";
+    this.artifactAttempts.set(record.id, {
+      ...(previous?.cwd && previous.sessionId
+        ? { cwd: previous.cwd, sessionId: previous.sessionId }
+        : {}),
+      includeBody,
+      invocation: "resume",
+      sourceAgentId: record.id,
+      startedAt: Date.now(),
+      toolUsesAtStart: record.toolUses,
+      usageAtStart: { ...record.lifetimeUsage },
+    });
+  }
+
+  private markArtifactStarted(record: AgentRecord): void {
+    const attempt = this.artifactAttempts.get(record.id);
+    if (attempt) attempt.startedAt = record.startedAt;
+  }
+
+  private finalizeResultArtifact(record: AgentRecord): void {
+    if (!isTopLevelAgent(record)) return;
+    const attempt = this.artifactAttempts.get(record.id);
+    if (!attempt?.cwd || !attempt.sessionId) {
+      record.artifactStatus = "skipped";
+      return;
+    }
+    if (record.resultArtifactPath !== undefined) return;
+    if (record.status === "queued" || record.status === "running") return;
+
+    const subtract = (current: number | undefined, start: number | undefined) =>
+      Math.max(0, (current ?? 0) - (start ?? 0));
+    const usage: LifetimeUsage = {
+      input: subtract(record.lifetimeUsage.input, attempt.usageAtStart.input),
+      output: subtract(record.lifetimeUsage.output, attempt.usageAtStart.output),
+      cacheWrite: subtract(record.lifetimeUsage.cacheWrite, attempt.usageAtStart.cacheWrite),
+      cacheRead: subtract(record.lifetimeUsage.cacheRead, attempt.usageAtStart.cacheRead),
+      cost: subtract(record.lifetimeUsage.cost, attempt.usageAtStart.cost),
+    };
+
+    try {
+      const written = this.resultArtifactWriter({
+        taskDir: sessionTaskDir(attempt.cwd, attempt.sessionId),
+        artifactId: record.artifactId,
+        agentId: record.id,
+        status: record.status,
+        startedAt: attempt.startedAt,
+        completedAt: record.completedAt ?? Date.now(),
+        invocation: attempt.invocation,
+        usage: {
+          turns: record.turnCount ?? 0,
+          toolCalls: Math.max(0, record.toolUses - attempt.toolUsesAtStart),
+          tokens: usage,
+        },
+        modelId: record.invocation?.modelId,
+        thinking: record.invocation?.thinking,
+        sourceAttemptId: record.sourceAttemptId,
+        sourceAgentId: attempt.sourceAgentId,
+        result: record.result,
+        error: record.error?.replaceAll(attempt.cwd, "<cwd>"),
+        includeBody: attempt.includeBody,
+      });
+      record.resultArtifactPath = written.manifestPath;
+      record.resultBodyPath = written.bodyPath;
+      record.artifactStatus = written.status;
+      record.artifactError = written.error;
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "unknown")
+        : "unknown";
+      record.artifactStatus = "failed";
+      record.artifactError = `result artifact write failed (${code})`;
+    }
   }
 
   /** Update the max concurrent background agents limit. */
@@ -496,12 +659,38 @@ export class AgentManager {
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
+    if (Object.hasOwn(options, "structuredOutput")) {
+      throw new Error(STRUCTURED_OUTPUT_MIGRATION_ERROR);
+    }
+    if (options.isolation === "worktree" && !isWorktreeIsolationEnabled()) {
+      throw new Error(
+        'Cannot run with isolation: "worktree" — worktree isolation is disabled by project settings.',
+      );
+    }
     assertValidSpawnCwd(options.cwd);
+    if (options.taskExecution !== undefined
+      && !isTaskExecutionClaim(options.taskExecution)) {
+      throw new Error("Invalid task execution binding");
+    }
 
     const id = randomUUID().slice(0, 17);
+    const retrySource = options.sourceAttemptId === undefined
+      ? this.findTaskRetrySource(options)
+      : undefined;
+    const sourceAttemptId = options.sourceAttemptId ?? retrySource?.artifactId;
+    const invocation = options.resumeSessionFile !== undefined
+      ? "resume"
+      : retrySource !== undefined
+        ? "retry"
+        : "spawn";
+    const resultBodyEnabled = options.resultBodyEnabled ?? resolveResultBodyEnabled(type);
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
+      artifactId: `agent-attempt-${randomUUID()}`,
+      resultBodyEnabled,
+      ...(sourceAttemptId !== undefined ? { sourceAttemptId } : {}),
+      artifactStatus: "skipped",
       type,
       // Owned children — nested, or a workflow's — are filtered out of every
       // top-level surface, so no handle: nothing can address them and they must
@@ -521,6 +710,7 @@ export class AgentManager {
       // since the pool decision needs the finished record.
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
+      turnCount: 0,
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
@@ -539,10 +729,22 @@ export class AgentManager {
       depth: options.depth ?? 1,
       parentAgentId: options.parentAgentId,
       workflowId: options.workflowId,
+      ...(options.taskExecution !== undefined
+        ? { taskExecutionRef: { ...options.taskExecution, executorId: id } }
+        : {}),
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    if (isTopLevelAgent(record)) {
+      this.beginArtifactAttempt(
+        record,
+        ctx,
+        options,
+        invocation,
+        options.sourceAgentId ?? retrySource?.id,
+      );
+    }
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -599,6 +801,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        this.finalizeResultArtifact(record);
       }
       return false;
     }
@@ -632,9 +835,11 @@ export class AgentManager {
           record.status = "error";
           record.error = err instanceof Error ? err.message : String(err);
           record.completedAt = Date.now();
+          this.finalizeResultArtifact(record);
           this.onComplete?.(record);
         } else {
           this.agents.delete(id);
+          this.artifactAttempts.delete(id);
         }
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
@@ -698,6 +903,7 @@ export class AgentManager {
     };
     record.status = "running";
     record.startedAt = Date.now();
+    this.markArtifactStarted(record);
     record.startGate = undefined;
     if (pool === "background") this.runningBackground++;
     else if (pool === "foreground") this.runningForeground++;
@@ -736,6 +942,7 @@ export class AgentManager {
       if (record.status !== "running") {
         releaseSlot();
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
+        this.finalizeResultArtifact(record);
         this.drainQueue();
         return;
       }
@@ -766,7 +973,6 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
-      structuredOutput: options.structuredOutput,
       resumeSessionFile: options.resumeSessionFile,
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
@@ -785,7 +991,10 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
-      onTurnEnd: options.onTurnEnd,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+      },
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
@@ -846,7 +1055,7 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
+      .then(async ({ responseText, session, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
@@ -862,11 +1071,6 @@ export class AgentManager {
           }
         }
         record.result = responseText;
-        // Kept beside `result`, never inside it: `result` is prose meant for a
-        // reader — it is previewed, transcribed, and appended to below — while
-        // this is a machine-readable payload one caller asked for by schema.
-        record.structuredJson = structuredJson;
-        record.structuredRetried = structuredRetried;
         record.session = session;
         record.completedAt ??= Date.now();
 
@@ -894,9 +1098,6 @@ export class AgentManager {
             // With a caller-supplied cwd the branch lives in THAT repo, not the
             // parent session's — say so, or the orchestrator merges in the wrong repo.
             const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            // Appended to the prose only. A structured child's caller parses
-            // `structuredJson`, which stays untouched — but `result` is also
-            // what a human reads, so the note still belongs on it.
             record.result = (record.result ?? "") +
               `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
           }
@@ -904,6 +1105,7 @@ export class AgentManager {
 
         this.abortOwnedChildren(id);
 
+        this.finalizeResultArtifact(record);
         this.settleRun(record, true, pool);
         return responseText;
       })
@@ -933,6 +1135,7 @@ export class AgentManager {
 
         this.abortOwnedChildren(id);
 
+        this.finalizeResultArtifact(record);
         this.settleRun(record, false, pool);
         return "";
       });
@@ -1113,6 +1316,12 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
 
+    // Never re-enter a run that is still in flight, regardless of whether the
+    // new caller asked to resume in the foreground or background. This guard
+    // must precede beginResumeArtifact and every record mutation: replacing the
+    // attempt or controller would orphan the live run beyond abortAll()/stop.
+    if (record.status === "running" || record.status === "queued") return undefined;
+
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
     // "running" — or "queued" when at the concurrency limit. Previously
@@ -1120,17 +1329,7 @@ export class AgentManager {
     // returned before its background branch, and resume() only ever awaited
     // inline), so a resumed agent always blocked the caller until it finished.
     if (options?.isBackground) {
-      // Never re-enter a run that is still in flight. Detaching means the caller
-      // gets control back while the record stays "running", so nothing stops the
-      // model from resuming the same agent again. Starting a second run would
-      // overwrite record.abortController — orphaning the live run beyond the
-      // reach of `/agents` stop and abortAll() — double-count the pool slot, and
-      // then reject from session.prompt() with "Agent is already processing",
-      // whose settle path would abort the LIVE run's children and report a
-      // failure for a run that is still going. Refuse instead, leaving the
-      // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
-
+      this.beginResumeArtifact(record);
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
@@ -1167,18 +1366,42 @@ export class AgentManager {
     }
 
     // Foreground resume: run inline and return the settled record.
+    this.beginResumeArtifact(record);
     record.status = "running";
+    record.turnCount = 0;
     record.startedAt = Date.now();
+    this.markArtifactStarted(record);
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
 
+    // A resumed attempt must own its controller. The previous spawn's
+    // controller is already settled, and passing the caller's signal directly
+    // would let the runner observe an abort without updating the AgentRecord.
+    const abortController = new AbortController();
+    record.abortController = abortController;
+    let detachParentSignal: (() => void) | undefined;
+    if (signal) {
+      const onParentAbort = () => this.abort(id);
+      if (signal.aborted) onParentAbort();
+      else {
+        signal.addEventListener("abort", onParentAbort, { once: true });
+        detachParentSignal = () => signal.removeEventListener("abort", onParentAbort);
+      }
+    }
+
+    const wasStopped = (): boolean => record.status === "stopped";
     try {
       const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
         },
+        onTurnEnd: (turnCount) => {
+          record.turnCount = turnCount;
+          options?.onTurnEnd?.(turnCount);
+        },
+        onTextDelta: options?.onTextDelta,
         onAssistantUsage: (usage) => {
           addUsage(record.lifetimeUsage, usage);
           this.onUsage?.(record, usage);
@@ -1189,23 +1412,33 @@ export class AgentManager {
           this.onCompact?.(record, info);
           options?.onCompaction?.(info);
         },
-        signal,
+        signal: abortController.signal,
       });
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
+      // A manager.abort() or parent abort can race a non-cooperative
+      // resumeAgent implementation. Preserve the externally-owned stopped
+      // state while still retaining the text produced before the stop.
+      if (!wasStopped()) {
+        // Same contract as the spawn path (#144): a failed final turn is an
+        // error, not a completion — but the resumed text stays available.
+        record.status = failure ? "error" : "completed";
+        if (failure) record.error = failure;
+      }
       record.result = text;
-      record.completedAt = Date.now();
+      record.completedAt ??= Date.now();
     } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+      if (!wasStopped()) {
+        record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+      }
+      record.completedAt ??= Date.now();
+    } finally {
+      detachParentSignal?.();
     }
 
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+    this.finalizeResultArtifact(record);
 
     return record;
   }
@@ -1227,7 +1460,9 @@ export class AgentManager {
     if (!record.session) return;
 
     record.status = "running";
+    record.turnCount = 0;
     record.startedAt = Date.now();
+    this.markArtifactStarted(record);
     if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
 
@@ -1260,6 +1495,7 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
+      this.finalizeResultArtifact(record);
       if (occupiesPoolSlot(record)) this.runningBackground--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
@@ -1270,6 +1506,11 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+      },
+      onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         this.onUsage?.(record, usage);
@@ -1415,6 +1656,7 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      this.finalizeResultArtifact(record);
       return true;
     }
 
@@ -1433,6 +1675,7 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    this.artifactAttempts.delete(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
@@ -1454,6 +1697,8 @@ export class AgentManager {
       handle: record.handle,
       alias: record.alias,
       id: record.id,
+      artifactId: record.artifactId,
+      resultBodyEnabled: record.resultBodyEnabled,
       type: record.type,
       description: record.description,
       sessionFile: record.sessionFile,
@@ -1513,6 +1758,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        this.finalizeResultArtifact(record);
         count++;
       }
     }
@@ -1559,7 +1805,26 @@ export class AgentManager {
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
-    const sessions = [...this.agents.values()].map(record => record.session);
+    const records = [...this.agents.entries()];
+    const sessions = records.map(([, record]) => record.session);
+    // A shutdown abort marks running records stopped, but their run promise may
+    // settle only after this method returns. Keep only those pending artifact
+    // contexts alive until their startup/run settle path has finalized them;
+    // clearing the map here would turn the late manifest into "skipped". This
+    // deliberately does not await agent work, so shutdown remains bounded by
+    // child-session teardown rather than provider cooperation.
+    for (const [id, record] of records) {
+      const startup = this.startups.get(id);
+      const run = record.promise;
+      if (record.artifactStatus !== "pending" || (!startup && !run)) {
+        this.artifactAttempts.delete(id);
+        continue;
+      }
+      const settled = startup
+        ? startup.catch(() => {}).then(() => record.promise?.catch(() => {}))
+        : run!.catch(() => {});
+      void settled.finally(() => this.artifactAttempts.delete(id));
+    }
     this.agents.clear();
     this.startups.clear();
     if (pi) {

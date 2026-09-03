@@ -151,39 +151,29 @@ describe("worktree isolation e2e (real git, real pi-mono, faux model)", () => {
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });
 
-  it("downgrades to the main checkout when the project set worktreeIsolation: false", async () => {
+  it("runs a normal main-checkout child when the project disables the worktree capability", async () => {
     const repo = initGitRepo();
     repos.push(repo);
     mkdirSync(join(repo, ".pi"), { recursive: true });
     writeFileSync(join(repo, ".pi", "subagents.json"), JSON.stringify({ worktreeIsolation: false }));
 
-    // The caller passes `isolation: "worktree"` even though the setting drops
-    // the parameter from the schema — exactly what a model holding a cached tool
-    // spec does, and the case the downgrade (rather than a throw) exists for.
-    //
-    // Mutation note: the resolver gate (invocation-config) and the manager gate
-    // (agent-manager) are redundant on THIS path, so removing either one alone
-    // leaves this test green — verified, not assumed. That is the point of the
-    // second gate, which exists for cross-extension RPC, where options skip the
-    // resolver entirely. This test pins the behaviour and goes red when both are
-    // gone; each gate is pinned individually by its own unit test.
+    // The disabled setting removes the isolation parameter and guidance. This
+    // normal tool call therefore makes no isolation request; privileged RPC or
+    // registry callers that still pass one are covered by the manager's
+    // fail-closed unit tests.
     run = await runPrintMode({
       prompt: "Delegate the work.",
       cwd: repo,
-      respond: respondSpawning("worktree"),
+      respond: respondSpawning(undefined),
       live: false,
     });
 
     const result = agentResultText(run.parentSession);
     expect(result).toContain(CHILD_MARKER);
 
-    // Ran in the main checkout: the file is right there, and no branch was made.
     expect(existsSync(join(repo, MARKER_FILE))).toBe(true);
     expect(git(repo, "branch", "--list", "pi-agent-*")).toBe("");
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
-
-    // Silent by design — no per-result note, which is why the tool description
-    // drops the isolation bullet alongside the parameter (see index.ts).
     expect(result).not.toContain("Changes saved to branch");
   });
 });

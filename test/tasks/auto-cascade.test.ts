@@ -56,7 +56,7 @@ describe("Auto-cascade (enabled)", () => {
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     expect(rpc.spawned).toHaveLength(1);
 
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     await flush();
 
     expect(rpc.spawned).toHaveLength(2);
@@ -75,7 +75,7 @@ describe("Auto-cascade (enabled)", () => {
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"], model: "haiku", max_turns: 7 });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     await flush();
 
     expect(rpc.spawned[1].options.model).toBe("haiku");
@@ -92,7 +92,7 @@ describe("Auto-cascade (enabled)", () => {
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"], model: "first-model", max_turns: 3 });
     await mock.executeTool("TaskExecute", { task_ids: ["3"], model: "second-model", max_turns: 9 });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     await flush();
 
     expect(rpc.spawned[2].options.model).toBe("first-model");
@@ -109,14 +109,14 @@ describe("Auto-cascade (enabled)", () => {
     expect(rpc.spawned).toHaveLength(2);
 
     // A done, B still running — C must stay put.
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "a" });
+    rpc.complete("agent-1", "a");
     await flush();
     expect(rpc.spawned).toHaveLength(2);
     expect((await mock.executeTool("TaskGet", { taskId: "3" })).content[0].text)
       .toContain("Status: pending");
 
     // B done too — now C cascades.
-    mock.emitEvent("subagents:completed", { id: "agent-2", result: "b" });
+    rpc.complete("agent-2", "b");
     await flush();
     expect(rpc.spawned).toHaveLength(3);
   });
@@ -126,7 +126,7 @@ describe("Auto-cascade (enabled)", () => {
     await createAgentTask("Unrelated");
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+    rpc.complete("agent-1", "done");
     await flush();
 
     expect(rpc.spawned).toHaveLength(1);
@@ -145,7 +145,7 @@ describe("Auto-cascade (enabled)", () => {
     rpc.unsub();
     const failing = installSubagentsMock(mock.pi, { spawnError: "no capacity" });
     try {
-      mock.emitEvent("subagents:completed", { id: "agent-1", result: "done" });
+      rpc.complete("agent-1", "done");
       await flush();
 
       expect(failing.spawned).toHaveLength(0);
@@ -165,9 +165,9 @@ describe("Auto-cascade (enabled)", () => {
     await mock.executeTool("TaskUpdate", { taskId: "3", addBlockedBy: ["2"] });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    mock.emitEvent("subagents:completed", { id: "agent-1", result: "a" });
+    rpc.complete("agent-1", "a");
     await flush();
-    mock.emitEvent("subagents:completed", { id: "agent-2", result: "b" });
+    rpc.complete("agent-2", "b");
     await flush();
 
     expect(rpc.spawned).toHaveLength(3);
@@ -181,7 +181,7 @@ describe("Auto-cascade (enabled)", () => {
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    mock.emitEvent("subagents:failed", { id: "agent-1", error: "crashed", status: "error" });
+    rpc.fail("agent-1", "crashed");
     await flush();
 
     expect(rpc.spawned).toHaveLength(1);

@@ -109,6 +109,101 @@ describe("cross-extension RPC", () => {
       );
     });
 
+    it("does not allow RPC callers to override result-body privacy", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-privacy", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-privacy", type: "Explore", prompt: "private",
+        options: { resultBodyEnabled: true },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "Explore", "private", {},
+      );
+    });
+    it("returns the manager-stamped task execution ref", async () => {
+      const taskExecution = {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent" as const,
+      };
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({
+        taskExecutionRef: { ...taskExecution, executorId: "agent-42" },
+      });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-binding", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-binding",
+        type: "general-purpose",
+        prompt: "execute task",
+        options: { description: "task", isBackground: true, taskExecution },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: true,
+        data: {
+          id: "agent-42",
+          taskExecutionRef: { ...taskExecution, executorId: "agent-42" },
+        },
+      });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi,
+        ctx,
+        "general-purpose",
+        "execute task",
+        { description: "task", isBackground: true, taskExecution },
+      );
+    });
+
+    it.each([
+      ["missing attempt id", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        kind: "agent",
+      }],
+      ["caller-selected executor", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: "forged",
+      }],
+      ["executor field with undefined", {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: undefined,
+      }],
+    ])("rejects an invalid task execution binding: %s", async (_label, taskExecution) => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-invalid-binding", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-invalid-binding",
+        type: "general-purpose",
+        prompt: "execute task",
+        options: { taskExecution },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Invalid task execution binding",
+      });
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
     it("returns error when no active session", async () => {
       ctx = undefined;
       registerRpcHandlers(deps);
@@ -172,6 +267,29 @@ describe("cross-extension RPC", () => {
 
       await vi.waitFor(() => expect(rightReply).toHaveBeenCalled());
       expect(wrongReply).not.toHaveBeenCalled();
+    });
+
+    it("rejects legacy structuredOutput before session/model resolution or manager calls", async () => {
+      const getCtx = vi.fn(() => ctx);
+      deps = { ...deps, getCtx };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s7", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s7", type: "general-purpose", prompt: "x",
+        options: { structuredOutput: { type: "object" }, model: "missing/model" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error:
+          "options.structuredOutput is no longer supported; workflow children return text/Markdown. "
+          + "Migrate structured results to line-oriented text or Markdown.",
+      });
+      expect(getCtx).not.toHaveBeenCalled();
+      expect(manager.spawn).not.toHaveBeenCalled();
+      expect(manager.awaitStartup).not.toHaveBeenCalled();
     });
 
     it("unsub stops responding to spawns", async () => {

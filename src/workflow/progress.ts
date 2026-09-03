@@ -105,9 +105,15 @@ export interface WorkflowAgentEntry {
   lastProgressAt?: number;
   attempt?: number;
   lastAttemptReason?: AttemptReason;
+  /** Current bounded assistant output preview while the child is live. */
+  outputPreview?: string;
   promptPreview?: string;
   resultPreview?: string;
   tokens?: number;
+  /** Current live child activity; absent on normal terminal and journal rows. */
+  activity?: string;
+  /** Completed child `turn_end` events for this invocation. */
+  turnCount?: number;
   toolCalls?: number;
   durationMs?: number;
 }
@@ -322,14 +328,14 @@ export function buildPhaseGroups(
  * agents start, so the total does not visibly climb as they trickle in.
  */
 export function stats(progress: readonly WorkflowEntry[], agentCount = 0): WorkflowStats {
+  const { agents } = collapse(progress);
   let seen = 0;
   let done = 0;
   let failed = 0;
   let started = 0;
   let anyLive = false;
 
-  for (const entry of progress) {
-    if (entry.type !== "workflow_agent") continue;
+  for (const entry of agents) {
     seen++;
     if (entry.state === "done") {
       done++;
@@ -422,7 +428,9 @@ export function header(
   return {
     name: task.workflowName ?? meta?.name ?? task.summary ?? task.description ?? "workflow",
     subtext: meta?.description ?? task.description ?? task.summary ?? "",
-    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")} · ${formatDuration(elapsedMs(task, now))}${suffix}`,
+    stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")}${
+      task.status === "running" || task.status === "paused" ? " so far" : ""
+    } · ${formatDuration(elapsedMs(task, now))}${suffix}`,
   };
 }
 

@@ -40,6 +40,10 @@ import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import type { AgentRecord, ThinkingLevel } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
+import {
+  isSafeWorkflowReference,
+  type WorkflowChildAttemptUsage,
+} from "./attempt.js";
 import type { WorkflowGateResult, WorkflowHost, WorkflowSpawnResult } from "./runtime.js";
 import { resolveWorkflowSource } from "./saved.js";
 
@@ -117,40 +121,64 @@ function resolvedInfo(record: AgentRecord | undefined) {
   };
 }
 
-function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
-  const tokens = getLifetimeTotal(record.lifetimeUsage);
-  // Reported separately from `tokens`, which is the lifetime total. The script's
-  // `budget` counts *output* tokens, as Claude Code's does — billing the input
-  // and cache reads a fan-out re-sends would over-report it by an order of
-  // magnitude and make the documented guards useless.
-  const outputTokens = record.lifetimeUsage?.output ?? 0;
+function safeReference(value: string | undefined): string | undefined {
+  return value !== undefined && isSafeWorkflowReference(value) ? value : undefined;
+}
+
+function attemptUsage(
+  record: AgentRecord,
+  baseline: { toolUses: number; usage: NonNullable<AgentRecord["lifetimeUsage"]> },
+): WorkflowChildAttemptUsage {
+  const subtract = (current: number | undefined, start: number | undefined) =>
+    Math.max(0, (current ?? 0) - (start ?? 0));
+  return {
+    turns: record.turnCount ?? 0,
+    toolCalls: Math.max(0, record.toolUses - baseline.toolUses),
+    tokens: {
+      input: subtract(record.lifetimeUsage.input, baseline.usage.input),
+      output: subtract(record.lifetimeUsage.output, baseline.usage.output),
+      cacheWrite: subtract(record.lifetimeUsage.cacheWrite, baseline.usage.cacheWrite),
+      cacheRead: subtract(record.lifetimeUsage.cacheRead, baseline.usage.cacheRead),
+      cost: subtract(record.lifetimeUsage.cost, baseline.usage.cost),
+    },
+  };
+}
+
+function toSpawnResult(
+  record: AgentRecord,
+  baseline: { toolUses: number; usage: NonNullable<AgentRecord["lifetimeUsage"]> } = {
+    toolUses: 0,
+    usage: { input: 0, output: 0, cacheWrite: 0 },
+  },
+): WorkflowSpawnResult {
+  const usage = attemptUsage(record, baseline);
+  const tokens = getLifetimeTotal(usage.tokens);
   const cwd = childCwd(record);
   const common = {
+    ...(safeReference(record.id) !== undefined ? { recordId: safeReference(record.id) } : {}),
+    ...(safeReference(record.artifactId) !== undefined ? { artifactId: safeReference(record.artifactId) } : {}),
+    ...(safeReference(record.sourceAttemptId) !== undefined ? { sourceAttemptId: safeReference(record.sourceAttemptId) } : {}),
+    ...(record.invocation?.modelName !== undefined ? { model: record.invocation.modelName } : {}),
+    ...(record.invocation?.modelId !== undefined ? { modelId: record.invocation.modelId } : {}),
+    ...(record.invocation?.thinking !== undefined ? { thinking: record.invocation.thinking } : {}),
+    usage,
     ...(tokens > 0 ? { tokens } : {}),
-    ...(outputTokens > 0 ? { outputTokens } : {}),
-    ...(record.toolUses > 0 ? { toolCalls: record.toolUses } : {}),
+    ...(usage.tokens.output > 0 ? { outputTokens: usage.tokens.output } : {}),
+    ...(usage.toolCalls > 0 ? { toolCalls: usage.toolCalls } : {}),
+    turnCount: usage.turns,
     ...(cwd !== undefined ? { cwd } : {}),
   };
 
-  if (succeeded(record)) {
-    return {
-      ...common,
-      ok: true,
-      // The schema'd payload when there is one: `result` is prose, and for a
-      // worktree child it has had the branch note appended, so it would not
-      // parse. A child asked for a schema that produced none never reaches
-      // here — `runAgent` reports that through `failure`.
-      text: record.structuredJson ?? record.result ?? "",
-      ...(record.structuredRetried ? { structuredRetried: true } : {}),
-    };
-  }
-  // "stopped" is someone reaching in and stopping this child — /agents, the
-  // fleet list, a workflow abort. That is the same thing the workflows dialog's
-  // skip action means, so it renders as skipped rather than failed.
+  if (succeeded(record)) return { ...common, ok: true, text: record.result ?? "" };
   if (record.status === "stopped") {
     return { ...common, ok: false, skipped: true, error: record.error ?? "Stopped." };
   }
-  return { ...common, ok: false, error: record.error ?? `Agent ${record.status}.` };
+  return {
+    ...common,
+    ok: false,
+    ...(record.status === "aborted" ? { killed: true } : {}),
+    error: record.error ?? `Agent ${record.status}.`,
+  };
 }
 
 /** Shell used to run a `gate` command, mirroring how a user would type it. */
@@ -161,6 +189,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
   const { pi, ctx, manager } = deps;
   /** Runtime agent id → the manager record it spawned. Never pruned mid-run. */
   const records = new Map<string, string>();
+  /** Settled records retained by this run so resume can report before awaiting. */
+  const settledRecords = new Map<string, AgentRecord>();
   /**
    * scopeModels warnings already toasted, so a fan-out that pins one
    * out-of-scope agent file raises one notification rather than one per child.
@@ -310,6 +340,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // cast asserts what the boundary has already checked. Left unset,
             // the agent definition's `thinking` (then the parent's) still wins —
             // same precedence as `model` above.
+            ...(request.sourceAttemptId !== undefined ? { sourceAttemptId: request.sourceAttemptId } : {}),
             ...(request.effort !== undefined ? { thinkingLevel: request.effort as ThinkingLevel } : {}),
             // Seeded with the REQUEST, not the outcome. The manager overwrites
             // the effective half at session creation; without a seed there is
@@ -326,8 +357,14 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             },
             // Fires once the child's session exists, which is where the model
             // and the clamped thinking level first become knowable.
-            onSessionCreated: () => { sessionReady = true; reportResolved(); },
-            ...(request.schema !== undefined ? { structuredOutput: request.schema } : {}),
+            onSessionCreated: () => {
+              sessionReady = true;
+              request.onSessionReady?.();
+              reportResolved();
+            },
+            onTurnEnd: request.onTurnEnd,
+            onToolActivity: request.onToolActivity,
+            onTextDelta: request.onTextDelta,
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
             ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),
@@ -345,6 +382,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             reportResolved();
           },
         );
+        settledRecords.set(request.agentId, record);
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child
@@ -361,27 +399,35 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id !== undefined) manager.abort(id);
     },
 
-    async resumeAgent(agentId, prompt, onResolved) {
+    async resumeAgent(agentId, prompt, onResolved, onSessionReady, onTurnEnd, onToolActivity, onTextDelta) {
       const id = records.get(agentId);
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
-      const record = await manager.resume(id, prompt, deps.signal);
+      const existing = settledRecords.get(agentId);
+      // The resumed row is rebuilt from scratch. Report the retained identity
+      // before awaiting its next turn so status, model, output, and turns remain
+      // live throughout the continuation rather than appearing only at settle.
+      // The manager remains authoritative for session expiry; test/RPC adapters
+      // may not expose a session object even when their resume path is valid.
+      onResolved?.({ recordId: id });
+      const info = resolvedInfo(existing);
+      if (info !== undefined) onResolved?.(info);
+      if (existing?.session !== undefined) onSessionReady?.();
+      const baseline = existing === undefined
+        ? { toolUses: 0, usage: { input: 0, output: 0, cacheWrite: 0 } }
+        : { toolUses: existing.toolUses, usage: { ...existing.lifetimeUsage } };
+      const record = await manager.resume(id, prompt, deps.signal, { onTurnEnd, onToolActivity, onTextDelta });
       if (record === undefined) {
         return {
           ok: false,
           error: `Agent ${id} has no session left to resume — records are dropped ten minutes after they finish.`,
         };
       }
-      // The resumed row is built from scratch, so it has to be told the same
-      // thing the first one was — the child's session already exists, so this is
-      // simply read back rather than waited for. The id goes first for the same
-      // reason it does on the spawn path: it is knowable even when the rest is
-      // not.
-      onResolved?.({ recordId: id });
-      const info = resolvedInfo(record);
-      if (info !== undefined) onResolved?.(info);
-      return toSpawnResult(record);
+      settledRecords.set(agentId, record);
+      return {
+        ...toSpawnResult(record, baseline),
+      };
     },
 
     /**

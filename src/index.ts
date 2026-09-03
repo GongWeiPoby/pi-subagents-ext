@@ -10,7 +10,6 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -19,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
-import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AgentManager, isTopLevelAgent, resolveResultBodyEnabled } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -33,11 +32,13 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { formatArtifactWriteError, sanitizeArtifactText, WORKFLOW_AGGREGATE_ERROR_DISABLED, writeWorkflowAggregateArtifact } from "./result-artifact.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { registerTasks, type WorkflowTaskOutputSnapshot } from "./tasks/index.js";
+import type { TaskExecutionRef, TaskWorkflowAggregateMetadata } from "./tasks/types.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -62,6 +63,7 @@ import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./ui/conversation-viewe
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
+import { confirmWorkflowApproval } from "./ui/workflow-approval-dialog.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -70,6 +72,7 @@ import {
   hasNestedWorkflowCall,
   validateDirectWorkflowApprovalCompleteness,
 } from "./workflow/approval.js";
+import { aggregateWorkflowCoverage, cloneWorkflowChildAttempt } from "./workflow/attempt.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
 import type { FleetWorkflow } from "./workflow/fleet.js";
@@ -81,7 +84,7 @@ import { registerWorkflowPlaybookTools } from "./workflow/playbook-tools.js";
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowAttempt, updateWorkflowProgressBatch, type WorkflowTask, workflowNotificationPreview, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -91,11 +94,6 @@ import { escapeXml } from "./xml.js";
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
-}
-
-function workflowAuthorizationDigest(script: string, args: unknown): string {
-  const canonicalArgs = args === undefined ? "undefined" : JSON.stringify(args);
-  return createHash("sha256").update(script).update("\0").update(canonicalArgs).digest("hex");
 }
 
 export function renderRunningAgentStatus(
@@ -319,12 +317,13 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
-  registerTasks(pi, {
+  const taskExecutions = registerTasks(pi, {
     workflowOutput: {
       get: workflowTaskOutputSnapshot,
       list: currentWorkflowRunIds,
       wait: waitForWorkflowTaskOutput,
       consume: consumeWorkflowTaskOutput,
+      stop: stopWorkflowTaskOutput,
     },
   });
 
@@ -585,6 +584,7 @@ export default function (pi: ExtensionAPI) {
       durationMs,
       tokens,
       usage,
+      ...(record.taskExecutionRef !== undefined ? { taskExecutionRef: record.taskExecutionRef } : {}),
     };
   }
 
@@ -712,9 +712,16 @@ export default function (pi: ExtensionAPI) {
     // Like the tool's own, it is a prediction — editing the agent file mid-run
     // leaves the displayed ceiling stale.
     const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns));
+    const resultBodyEnabled = typeof options?.resultBodyEnabled === "boolean"
+      ? options.resultBodyEnabled
+      : resolveResultBodyEnabled(dispatch.type);
     // Repaints are left to the manager's `onStart` callback, which already starts
     // the widget/fleet timers for agents that enter this way.
-    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks });
+    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, {
+      ...options,
+      ...callbacks,
+      resultBodyEnabled,
+    });
     agentActivity.set(id, state);
     return id;
   };
@@ -735,6 +742,9 @@ export default function (pi: ExtensionAPI) {
     // conversation. Only the mention dispatcher may set it, and only from a
     // path this extension itself recorded — never from anything a caller sent.
     delete safeOptions.resumeSessionFile;
+    delete safeOptions.sourceAttemptId;
+    delete safeOptions.sourceAgentId;
+    delete safeOptions.resultBodyEnabled;
     // Bypasses handle allocation, so a forged value would duplicate a live
     // agent's name and make `@handle` ambiguous. Same rule: dispatcher only.
     delete safeOptions.reclaim;
@@ -814,8 +824,18 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    // Some hosts switch sessions without first emitting session_before_switch.
+    // Only treat a different concrete session id as that fallback transition;
+    // repeated starts for the same session must preserve its live workflows.
+    if (activeWorkflowSessionId !== undefined && activeWorkflowSessionId !== sessionId) {
+      await stopWorkflowControllersBeforeSwitch();
+      workflowTasks.clear();
+      workflowTaskSessionIds.clear();
+      scheduler.stop();
+    }
     currentCtx = ctx;
-    activeWorkflowSessionId = ctx.sessionManager.getSessionId();
+    activeWorkflowSessionId = sessionId;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -874,9 +894,6 @@ export default function (pi: ExtensionAPI) {
     // Last, and only here: CLI flag values are applied by the host AFTER every
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
-    // A ready WorkflowPlan authorizes its exact one-use planRef only. Session
-    // changes must not carry that capability into a different conversation.
-    plannedWorkflowScripts.clear();
     resolveWorkflowCollisions(ctx);
     runWorkflowFlag(ctx);
   });
@@ -962,7 +979,6 @@ export default function (pi: ExtensionAPI) {
         // downstream consumer keys off and a resume must not re-open it.
         const config = getAgentConfig(record.type);
         const resumedRecord = await startBackgroundResume(ctx, record, mention.message, {
-          outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
           maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
         });
         ctx.ui.notify(
@@ -1019,6 +1035,9 @@ export default function (pi: ExtensionAPI) {
           description: entry.description,
           reclaim: { handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
+          sourceAttemptId: entry.artifactId,
+          sourceAgentId: entry.id,
+          resultBodyEnabled: entry.resultBodyEnabled,
           isBackground: true,
         });
         // The agent may still be starting — wait, so a startup failure lands in
@@ -1118,14 +1137,13 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("session_before_switch", () => {
-    invalidateWorkflowLifecycle();
+  pi.on("session_before_switch", async () => {
+    await stopWorkflowControllersBeforeSwitch();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.clearCompleted(true);
     workflowTasks.clear();
     workflowTaskSessionIds.clear();
-    plannedWorkflowScripts.clear();
     widget.update();
     fleet.update();
     scheduler.stop();
@@ -1139,7 +1157,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
-    invalidateWorkflowLifecycle();
+    await stopWorkflowControllersBeforeSwitch();
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
@@ -1189,10 +1207,10 @@ export default function (pi: ExtensionAPI) {
   // the steer and resume branches — reads this instead of the mode.
   function isAgentMentionsEnabled(): boolean { return agentMentionMode !== "off"; }
 
-  // Project/global default for writing the subagent .output transcript lives in
-  // output-file.ts (both spawn paths read it). A custom agent's
-  // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
-  // is silent, this default applies. Read live at spawn time.
+  // Project/global default for subagent .output transcripts and optional result
+  // bodies lives in output-file.ts. A custom agent's `output_transcript`
+  // frontmatter overrides it per Agent; workflows capture the project value at
+  // run start. Read live when the owning run starts.
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -1315,9 +1333,12 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     existing: AgentRecord,
     prompt: string,
-    opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
+    opts: { maxTurns?: number; toolCallId?: string },
   ): Promise<AgentRecord | undefined> {
     const id = existing.id;
+    const outputTranscript = typeof existing.resultBodyEnabled === "boolean"
+      ? existing.resultBodyEnabled
+      : resolveResultBodyEnabled(existing.type);
     const joinMode = resolveJoinMode(defaultJoinMode, true);
     // Assigned unconditionally: the completion notification carries this as
     // `<tool-use-id>`, so a mention-resume (which passes none) has to CLEAR the
@@ -1328,9 +1349,11 @@ export default function (pi: ExtensionAPI) {
     // Reuse the agent's transcript rather than starting a fresh one: the
     // path is deterministic per agent+session, so writing an initial entry
     // would truncate the previous run's turns (see ensureOutputFile).
-    if (opts.outputTranscript) {
+    if (outputTranscript) {
       existing.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
       ensureOutputFile(existing.outputFile);
+    } else {
+      existing.outputFile = undefined;
     }
     // Anchor streaming past the turns already on disk, captured BEFORE the
     // run starts. The resumed prompt lands as an ordinary user message at
@@ -1879,7 +1902,7 @@ Terse command-style prompts produce shallow, generic work.
       // default applies. `attachTranscript` below is the SOLE gate — every
       // downstream consumer keys off record.outputFile being set, so no spawn
       // path can re-enable the transcript by accident.
-      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
+      const outputTranscript = resolveResultBodyEnabled(subagentType);
       const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
         if (!rec || !outputTranscript) return;
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
@@ -2032,7 +2055,6 @@ Terse command-style prompts produce shallow, generic work.
           }
 
           const record = await startBackgroundResume(ctx, existing, params.prompt, {
-            outputTranscript,
             maxTurns: effectiveMaxTurns,
             toolCallId,
           });
@@ -2100,6 +2122,7 @@ Terse command-style prompts produce shallow, generic work.
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          resultBodyEnabled: outputTranscript,
           ...bgCallbacks,
         });
 
@@ -2254,6 +2277,7 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          resultBodyEnabled: outputTranscript,
           // Deliberately does NOT set fgId: that drives agentActivity, the
           // widget and the `finally` cleanup below, none of which should see an
           // agent that has no session and may never get one.
@@ -2348,9 +2372,51 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
   const workflowTaskSessionIds = new Map<string, string | undefined>();
   const workflowTaskGenerations = new WeakMap<WorkflowTask, number>();
+  const workflowTaskRuns = new WeakMap<WorkflowTask, Promise<void>>();
   const workflowOutputWaiters = new Map<string, Set<() => void>>();
   const heldWorkflowNotifications = new Map<string, WorkflowTask>();
   const consumedWorkflowOutputs = new WeakSet<WorkflowTask>();
+
+  const WORKFLOW_PERSISTED_ERROR_MAX_LENGTH = 512;
+  function workflowPersistenceCwds(task: Pick<WorkflowTask, "cwd"> | undefined, ctx: ExtensionContext): string[] {
+    return [ctx.cwd, task?.cwd]
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+      .filter((cwd, index, all) => all.indexOf(cwd) === index)
+      .sort((left, right) => right.length - left.length);
+  }
+
+  function scrubWorkflowPersistenceText(
+    task: Pick<WorkflowTask, "cwd"> | undefined,
+    ctx: ExtensionContext,
+    value: string,
+  ): string {
+    let scrubbed = value;
+    for (const cwd of workflowPersistenceCwds(task, ctx)) scrubbed = scrubbed.replaceAll(cwd, "<cwd>");
+    return sanitizeArtifactText(scrubbed);
+  }
+
+  function boundedWorkflowPersistenceError(
+    task: Pick<WorkflowTask, "cwd"> | undefined,
+    ctx: ExtensionContext,
+    value: string,
+  ): string | undefined {
+    const summary = scrubWorkflowPersistenceText(task, ctx, value).split("\n", 1)[0].trim();
+    if (!summary) return undefined;
+    return summary.length > WORKFLOW_PERSISTED_ERROR_MAX_LENGTH
+      ? `${summary.slice(0, WORKFLOW_PERSISTED_ERROR_MAX_LENGTH - 3)}...`
+      : summary;
+  }
+
+  function workflowPersistenceError(task: Pick<WorkflowTask, "cwd" | "resultBodyEnabled" | "status" | "error">, ctx: ExtensionContext): string | undefined {
+    if (!task.resultBodyEnabled) {
+      return task.status === "failed" || task.status === "killed"
+        ? WORKFLOW_AGGREGATE_ERROR_DISABLED
+        : undefined;
+    }
+    return task.error === undefined
+      ? undefined
+      : boundedWorkflowPersistenceError(task, ctx, task.error);
+  }
 
   function isCurrentWorkflowTask(task: WorkflowTask): boolean {
     return workflowTasks.get(task.id) === task
@@ -2373,7 +2439,22 @@ Terse command-style prompts produce shallow, generic work.
       totalTokens: task.totalTokens,
       totalToolCalls: task.totalToolCalls,
       elapsedMs: elapsedMs(task, Date.now()),
-      ...(settled ? { output: workflowResultText(task) } : {}),
+      taskExecutionRef: task.taskExecutionRef === undefined ? undefined : { ...task.taskExecutionRef },
+      attempts: task.workflowAttempts.map(cloneWorkflowChildAttempt),
+      coverage: aggregateWorkflowCoverage(task.workflowAttempts),
+      resultBodyEnabled: task.resultBodyEnabled,
+      ...(task.artifactSessionId !== undefined
+        ? {
+            aggregateArtifactId: `workflow-${task.id}`,
+            aggregateArtifactStatus: task.aggregateArtifactStatus ?? "pending",
+          }
+        : { aggregateArtifactStatus: task.aggregateArtifactStatus ?? "skipped" }),
+      ...(task.evidenceIncomplete !== undefined ? { evidenceIncomplete: task.evidenceIncomplete } : {}),
+      ...(settled && task.resultBodyEnabled
+        ? { output: workflowResultText(task) }
+        : settled && task.status !== "completed"
+          ? { output: WORKFLOW_AGGREGATE_ERROR_DISABLED }
+          : {}),
       ...(task.scriptPath !== undefined ? { scriptPath: task.scriptPath } : {}),
     };
   }
@@ -2392,7 +2473,7 @@ Terse command-style prompts produce shallow, generic work.
     for (const runId of [...workflowOutputWaiters.keys()]) finishWorkflowOutputWaiters(runId);
   }
 
-  /** Invalidate detached workflow delivery before aborting its worker threads. */
+  /** Invalidate detached workflow delivery before aborting its workers. */
   function invalidateWorkflowLifecycle(): void {
     workflowSessionGeneration++;
     activeWorkflowSessionId = undefined;
@@ -2400,6 +2481,17 @@ Terse command-style prompts produce shallow, generic work.
     heldWorkflowNotifications.clear();
     finishAllWorkflowOutputWaiters();
     for (const task of workflowTasks.values()) task.abortController.abort();
+  }
+
+  /** Abort every live controller and wait for its worker to terminate. */
+  async function stopWorkflowControllersBeforeSwitch(): Promise<void> {
+    const active = [...workflowTasks.values()].filter(task =>
+      task.status === "running" || task.status === "paused",
+    );
+    invalidateWorkflowLifecycle();
+    await Promise.all(active.map(task => workflowTaskRuns.get(task)).filter(
+      (run): run is Promise<void> => run !== undefined,
+    ));
   }
 
   function waitForWorkflowTaskOutput(
@@ -2444,6 +2536,27 @@ Terse command-style prompts produce shallow, generic work.
     cancelNudge(runId);
   }
 
+  async function stopWorkflowTaskOutput(
+    runId: string,
+    _outcome: { status: "completed" | "pending"; error?: string } = { status: "pending" },
+  ): Promise<boolean> {
+    const task = workflowTasks.get(runId);
+    if (!task || (task.status !== "running" && task.status !== "paused")) return false;
+    // The task adapter reserves the requested Todo status before entering this
+    // controller stop. This layer only aborts and awaits the controller; trying
+    // to prepare again would create a second owner for the same reservation.
+    // A Todo status change is already the caller-visible outcome. Suppress the
+    // controller's separate completion nudge before aborting it, so a
+    // replacement attempt is not followed by an old-workflow notification.
+    consumedWorkflowOutputs.add(task);
+    heldWorkflowNotifications.delete(runId);
+    cancelNudge(runId);
+    task.abortController.abort();
+    const run = workflowTaskRuns.get(task);
+    if (run) await run;
+    return true;
+  }
+
   /**
    * Workflow runs as the fleet list wants them.
    *
@@ -2471,6 +2584,86 @@ Terse command-style prompts produce shallow, generic work.
     }));
   }
 
+  function settleWorkflowTaskBinding(task: WorkflowTask, ctx: ExtensionContext): void {
+    const ref = task.taskExecutionRef;
+    if (!ref) return;
+    const aggregateMetadata: TaskWorkflowAggregateMetadata = {
+      artifactId: `workflow-${task.id}`,
+      artifactStatus: task.aggregateArtifactStatus ?? "skipped",
+      coverage: aggregateWorkflowCoverage(persistedWorkflowAttempts(task)),
+      resultBodyEnabled: task.resultBodyEnabled,
+      status: task.status as "completed" | "failed" | "killed",
+      taskBinding: { ...ref },
+      ...(task.evidenceIncomplete !== undefined ? { evidenceIncomplete: task.evidenceIncomplete } : {}),
+    };
+    const metadataCommitted = taskExecutions.updateStop(ref, { metadata: { workflowAggregate: aggregateMetadata } });
+    if (!metadataCommitted) {
+      taskExecutions.update(ref, { metadata: { workflowAggregate: aggregateMetadata } });
+    }
+    const result = task.resultBodyEnabled
+      ? scrubWorkflowPersistenceText(task, ctx, workflowResultText(task))
+      : undefined;
+    const error = workflowPersistenceError(task, ctx);
+    if (task.status === "completed") {
+      taskExecutions.settle(ref, {
+        status: "completed",
+        ...(result !== undefined ? { result } : {}),
+      });
+      return;
+    }
+    if (task.status === "failed" || task.status === "killed") {
+      taskExecutions.settle(ref, {
+        status: "pending",
+        error: error ?? `Workflow ${task.status}`,
+      });
+    }
+  }
+
+  function persistedWorkflowAttempts(task: WorkflowTask): WorkflowTask["workflowAttempts"] {
+    if (task.resultBodyEnabled) return task.workflowAttempts;
+    return task.workflowAttempts.map(({ error: _error, ...attempt }) => attempt);
+  }
+
+  function writeWorkflowAggregate(task: WorkflowTask, ctx: ExtensionContext): void {
+    const sessionId = task.artifactSessionId;
+    if (sessionId === undefined) {
+      task.aggregateArtifactStatus = "skipped";
+      return;
+    }
+    const result = task.resultBodyEnabled
+      ? scrubWorkflowPersistenceText(task, ctx, workflowResultText(task))
+      : undefined;
+    const persistedResult = result;
+    const error = workflowPersistenceError(task, ctx);
+    const childAttempts = persistedWorkflowAttempts(task);
+    try {
+      const written = writeWorkflowAggregateArtifact({
+        taskDir: sessionTaskDir(ctx.cwd, sessionId),
+        artifactId: `workflow-${task.id}`,
+        workflowId: task.id,
+        workflowName: task.workflowName,
+        status: task.status as "completed" | "failed" | "killed",
+        startedAt: task.startTime,
+        completedAt: task.endTime ?? Date.now(),
+        coverage: aggregateWorkflowCoverage(childAttempts),
+        childAttempts,
+        evidenceIncomplete: task.evidenceIncomplete,
+        resultSummary: task.resultBodyEnabled ? persistedResult ?? "No output." : "Output persistence disabled.",
+        result,
+        includeBody: task.resultBodyEnabled,
+        taskBinding: task.taskExecutionRef,
+        error,
+      });
+      task.aggregateArtifactPath = written.manifestPath;
+      task.aggregateArtifactBodyPath = written.bodyPath;
+      task.aggregateArtifactStatus = written.status;
+      task.aggregateArtifactError = written.error;
+    } catch (error) {
+      task.aggregateArtifactStatus = "failed";
+      task.aggregateArtifactError = formatArtifactWriteError("workflow aggregate artifact write failed", error);
+    }
+  }
+
   /**
    * Run a task to completion against the real manager, settling the record
    * either way. Never rejects: a run that cannot start (bad `meta`, oversized
@@ -2491,6 +2684,9 @@ Terse command-style prompts produce shallow, generic work.
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
         }),
+        onAttempt: attempt => {
+          updateWorkflowAttempt(task, attempt);
+        },
         onProgress: entries => {
           updateWorkflowProgressBatch(task, entries);
           // Event refreshes never advance the frame; they keep a paused tree
@@ -2509,8 +2705,12 @@ Terse command-style prompts produce shallow, generic work.
         },
       });
       completeWorkflowTask(task, result);
+      writeWorkflowAggregate(task, ctx);
+      settleWorkflowTaskBinding(task, ctx);
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
+      writeWorkflowAggregate(task, ctx);
+      settleWorkflowTaskBinding(task, ctx);
     }
   }
 
@@ -2531,7 +2731,7 @@ Terse command-style prompts produce shallow, generic work.
       // extension-owned until a later agent_settled instead of handing it to
       // pi-agent-core's abort-clearable followUp queue.
       if (!workflowParentIsIdle()) return;
-      const result = workflowResultText(task);
+      const resultPreview = workflowNotificationPreview(task, 500);
       pi.sendMessage<NotificationDetails>({
         customType: "subagent-notification",
         content: formatWorkflowNotification(task),
@@ -2545,8 +2745,8 @@ Terse command-style prompts produce shallow, generic work.
           turnCount: 0,
           totalTokens: task.totalTokens,
           durationMs: elapsedMs(task, Date.now()),
-          error: task.error,
-          resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
+          error: task.resultBodyEnabled ? task.error : undefined,
+          resultPreview,
         },
       }, { deliverAs: "followUp", triggerTurn: true });
       heldWorkflowNotifications.delete(task.id);
@@ -2576,19 +2776,6 @@ Terse command-style prompts produce shallow, generic work.
     for (const task of heldWorkflowNotifications.values()) scheduleWorkflowNotification(task);
   });
 
-  const plannedWorkflowScripts = new Map<string, { digest: string; script: string }>();
-  const authorizePlannedWorkflowScript = (script: string): string => {
-    const digest = workflowAuthorizationDigest(script, undefined);
-    const reference = `wfp_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
-    plannedWorkflowScripts.set(reference, { digest, script });
-    while (plannedWorkflowScripts.size > 128) {
-      const oldest = plannedWorkflowScripts.keys().next().value;
-      if (oldest === undefined) break;
-      plannedWorkflowScripts.delete(oldest);
-    }
-    return reference;
-  };
-
   // Defined unconditionally, registered only when the feature is on — the same
   // shape the Agent tool uses. Keeping the definition out of the `if` means the
   // switch changes exactly one thing: whether pi is ever told about the tool.
@@ -2598,18 +2785,11 @@ Terse command-style prompts produce shallow, generic work.
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
-      "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
+      "Use SubagentWorkflow only after the user explicitly asks for deterministic workflow orchestration, invokes a deterministic workflow skill/command, or names a saved JavaScript workflow. Once that prerequisite is met, prefer it when runtime discovery, loops, staged text handoffs, or independently verified findings require scripted control; otherwise use Agent directly.",
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
     parameters: Type.Object({
-      planRef: Type.Optional(
-        Type.String({
-          pattern: "^wfp_[a-f0-9]{24}$",
-          description:
-            "Opaque one-use execution reference returned by an approved WorkflowPlan. Use it exactly as returned and do not combine it with script, scriptPath, name, args, or resumeFromRunId.",
-        }),
-      ),
       script: Type.Optional(
         Type.String({
           maxLength: 524288,
@@ -2626,6 +2806,13 @@ Terse command-style prompts produce shallow, generic work.
         Type.String({
           description:
             "Name of a saved workflow — `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Mutually exclusive with `script` and `scriptPath`.",
+        }),
+      ),
+      task_id: Type.Optional(
+        Type.String({
+          minLength: 1,
+          description:
+            "Bind this workflow controller to one pending structured Todo. Workflow children do not inherit the binding.",
         }),
       ),
       args: Type.Optional(
@@ -2686,22 +2873,20 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      const rawTaskId = (params as Record<string, unknown>).task_id;
+      if (rawTaskId !== undefined && (typeof rawTaskId !== "string" || rawTaskId.trim() === "")) {
+        return textResult("`task_id` must identify one structured task. No run was started.");
+      }
+      const taskId = typeof rawTaskId === "string" ? rawTaskId.trim() : undefined;
+      if ((params as Record<string, unknown>).planRef !== undefined) {
+        return textResult(
+          "`planRef` is no longer supported. Pass `script`, `scriptPath`, or `name` directly; "
+          + "interactive runs use the current workflow approval flow. No run was started.",
+        );
+      }
       const suppliedSources = [params.script, params.scriptPath, params.name].filter((value) => value !== undefined);
       if (suppliedSources.length > 1) {
         return textResult("Provide only one workflow source: `script`, `scriptPath`, or `name`.");
-      }
-      if (params.planRef !== undefined && (suppliedSources.length > 0 || params.args !== undefined || params.resumeFromRunId !== undefined)) {
-        return textResult("`planRef` cannot be combined with script, scriptPath, name, args, or resumeFromRunId.");
-      }
-      const plannedEntry = params.planRef !== undefined
-        ? plannedWorkflowScripts.get(params.planRef)
-        : undefined;
-      const plannedScript = plannedEntry?.script;
-      if (params.planRef !== undefined) {
-        plannedWorkflowScripts.delete(params.planRef);
-        if (plannedEntry === undefined) {
-          return textResult("Workflow plan reference is unknown, expired, or already consumed.");
-        }
       }
 
       const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
@@ -2715,12 +2900,10 @@ Terse command-style prompts produce shallow, generic work.
       // common case is an edited script, but "run that again, cheaply" should
       // not require repeating a path the run already knows.
       const resolved = resolveWorkflowScript(
-        plannedScript !== undefined
-          ? { script: plannedScript }
-          : params.script === undefined && params.scriptPath === undefined && params.name === undefined
+        params.script === undefined && params.scriptPath === undefined && params.name === undefined
             && resumeFrom !== undefined
-            ? { scriptPath: resumeFrom.scriptPath }
-            : params,
+          ? { scriptPath: resumeFrom.scriptPath }
+          : params,
         ctx.cwd,
       );
       if (!resolved.ok) return textResult(resolved.message);
@@ -2735,10 +2918,6 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(err instanceof Error ? err.message : String(err));
       }
 
-      const planned = params.planRef !== undefined && plannedEntry !== undefined;
-      if (planned && workflowAuthorizationDigest(resolved.script, undefined) !== plannedEntry.digest) {
-        return textResult("Workflow plan reference does not match its retained execution script.");
-      }
       const selectedDirectSource = params.name !== undefined
         ? { kind: "name" as const, label: `saved workflow: ${params.name}` }
         : params.scriptPath !== undefined
@@ -2747,12 +2926,17 @@ Terse command-style prompts produce shallow, generic work.
             ? { kind: "inline" as const, label: "inline script" }
             : { kind: "path" as const, label: `resumed script path: ${resolved.scriptPath ?? resumeFrom?.scriptPath ?? "unknown"}` };
       const nestedWorkflowCall = hasNestedWorkflowCall(resolved.script);
-      if (!planned && selectedDirectSource.kind !== "name" && nestedWorkflowCall) {
+      if (nestedWorkflowCall && ctx.hasUI) {
         return textResult(
-          "Direct inline/path scripts with nested workflow behavior cannot be approved from a top-level preview. Use a saved named workflow for trusted composition, or validate the orchestration through WorkflowPlan.",
+          "Interactive workflows with nested workflow() behavior cannot be approved from a top-level preview, including saved named parents. Flatten or split the orchestration so every child prompt, gate, and isolation option is visible in one approval.",
         );
       }
-      if (!planned && ctx.hasUI) {
+      if (selectedDirectSource.kind !== "name" && nestedWorkflowCall) {
+        return textResult(
+          "Direct inline/path scripts with nested workflow() behavior are not supported. Use a saved named workflow only from a trusted headless automation boundary, or flatten/split the orchestration.",
+        );
+      }
+      if (ctx.hasUI) {
         const completeness = validateDirectWorkflowApprovalCompleteness(resolved.script);
         if (!completeness.ok) {
           if (completeness.kind === "indirection") {
@@ -2777,17 +2961,35 @@ Terse command-style prompts produce shallow, generic work.
           meta,
           script: resolved.script,
           source: selectedDirectSource.label,
-        });
+        }) + (taskId !== undefined ? `\n\nTodo binding\n- Task #${taskId}` : "");
         if (approvalText.length > 48_000) {
           return textResult(
-            "Workflow behavior summary exceeds 48000 characters. Validate it through WorkflowPlan or split the workflow before running it.",
+            "Workflow behavior summary exceeds 48000 characters. Split or rewrite the workflow before running it.",
           );
         }
-        const approved = await ctx.ui.confirm("Run workflow?", approvalText);
+        const approved = await confirmWorkflowApproval(ctx.ui, "Run workflow?", approvalText);
         if (!approved) return textResult("Workflow was not approved. No run was started.");
       }
 
+      const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
       const runId = workflowRunId();
+      const sessionId = ctx.sessionManager.getSessionId();
+      const artifactSessionId = ctx.sessionManager.getSessionFile?.() ? sessionId : undefined;
+      let taskExecutionRef: TaskExecutionRef | undefined;
+      if (taskId !== undefined) {
+        const claim = taskExecutions.claim(taskId, "workflow");
+        if (!claim) {
+          return textResult(
+            `Task #${taskId} is not pending or already has an execution. No workflow was started.`,
+          );
+        }
+        taskExecutionRef = taskExecutions.bind(claim, runId);
+        if (!taskExecutionRef) {
+          taskExecutions.rollback(claim, "workflow controller could not bind its task claim");
+          return textResult(`Task #${taskId} changed before the workflow controller bound. No run was started.`);
+        }
+      }
+
       // Every invocation lands on disk next to the agent transcripts, so
       // iterating is edit-the-file-then-rerun-with-scriptPath rather than
       // re-emitting the whole source. The journal sits beside it under the same
@@ -2795,7 +2997,7 @@ Terse command-style prompts produce shallow, generic work.
       let savedPath: string | undefined;
       let journalPath: string | undefined;
       try {
-        const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
+        const dir = sessionTaskDir(ctx.cwd, sessionId);
         savedPath = join(dir, `${runId}.workflow.js`);
         writeFileSync(savedPath, resolved.script, "utf-8");
         journalPath = join(dir, `${runId}.workflow.jsonl`);
@@ -2805,22 +3007,34 @@ Terse command-style prompts produce shallow, generic work.
         console.warn(`[pi-subagents] could not persist workflow script: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      const replay = resumeFrom !== undefined ? readJournal(resumeFrom.journalPath) : undefined;
-
-      const task = createWorkflowTask({
-        id: runId,
-        script: resolved.script,
-        scriptPath: resolved.scriptPath ?? savedPath,
-        args: params.args,
-        meta,
-        toolCallId,
-        sessionId: ctx.sessionManager.getSessionId(),
-        sessionGeneration: workflowSessionGeneration,
-        ...(journalPath !== undefined ? { journalPath } : {}),
-        ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
-      });
+      let task: WorkflowTask;
+      try {
+        task = createWorkflowTask({
+          id: runId,
+          script: resolved.script,
+          scriptPath: resolved.scriptPath ?? savedPath,
+          args: params.args,
+          meta,
+          toolCallId,
+          taskExecutionRef,
+          sessionId,
+          cwd: ctx.cwd,
+          artifactSessionId,
+          sessionGeneration: workflowSessionGeneration,
+          resultBodyEnabled: getOutputTranscriptDefault(),
+          ...(journalPath !== undefined ? { journalPath } : {}),
+          ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (taskExecutionRef) {
+          const safeMessage = boundedWorkflowPersistenceError(undefined, ctx, message) ?? "Workflow could not start.";
+          taskExecutions.settle(taskExecutionRef, { status: "pending", error: safeMessage });
+        }
+        return textResult(`Workflow could not start: ${message}`);
+      }
       workflowTasks.set(runId, task);
-      workflowTaskSessionIds.set(runId, ctx.sessionManager.getSessionId());
+      workflowTaskSessionIds.set(runId, sessionId);
       workflowTaskGenerations.set(task, workflowSessionGeneration);
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
@@ -2831,7 +3045,11 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background, like Claude Code: the id comes back now and the run keeps
       // going without the tool call.
-      void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
+      const run = runWorkflowTask(ctx, task);
+      workflowTaskRuns.set(task, run);
+      void run
+        .then(() => notifyWorkflowFinished(task))
+        .finally(() => workflowTaskRuns.delete(task));
 
       return {
         content: [{
@@ -2853,14 +3071,11 @@ Terse command-style prompts produce shallow, generic work.
     },
   });
 
-  if (isWorkflowsEnabled()) {
-    pi.registerTool(workflowTool);
-    registerWorkflowPlaybookTools(pi, {
-      authorizeScript: authorizePlannedWorkflowScript,
-      worktreeAllowed: isWorktreeIsolationEnabled(),
-    });
-    registerWorkflowPlaybookSaveTool(pi);
-  }
+  // Markdown Playbooks are adaptive coordinator guidance and remain available
+  // independently of the deterministic JavaScript runtime switch/collisions.
+  registerWorkflowPlaybookTools(pi);
+  registerWorkflowPlaybookSaveTool(pi);
+  if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
 
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.
@@ -2908,17 +3123,6 @@ Terse command-style prompts produce shallow, generic work.
       if (verdict.kind === "none") return;
       if (verdict.kind === "report") {
         warn(verdict.message);
-        if (verdict.withdrawCompanions) {
-          const companionNames = new Set<string>([
-            SUBAGENT_TOOL_NAMES.PLAYBOOK,
-            SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
-            SUBAGENT_TOOL_NAMES.PLAN,
-          ]);
-          const active = pi.getActiveTools();
-          if (active.some(name => companionNames.has(name))) {
-            pi.setActiveTools(active.filter(name => !companionNames.has(name)));
-          }
-        }
         return;
       }
 
@@ -2928,14 +3132,8 @@ Terse command-style prompts produce shallow, generic work.
       warn(verdict.message);
 
       const active = pi.getActiveTools();
-      const workflowToolNames = new Set<string>([
-        SUBAGENT_TOOL_NAMES.PLAYBOOK,
-        SUBAGENT_TOOL_NAMES.PLAYBOOK_SAVE,
-        SUBAGENT_TOOL_NAMES.PLAN,
-      ]);
-      if (verdict.withdraw) workflowToolNames.add(SUBAGENT_TOOL_NAMES.WORKFLOW);
-      if (active.some(name => workflowToolNames.has(name))) {
-        pi.setActiveTools(active.filter(name => !workflowToolNames.has(name)));
+      if (verdict.withdraw && active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
+        pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
       }
     } catch {
       // getAllTools/setActiveTools are unavailable in some hosts (print mode,
@@ -3001,13 +3199,17 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
+    const sessionId = ctx.sessionManager.getSessionId();
     const task = createWorkflowTask({
       id: workflowRunId(),
       script,
       scriptPath: path,
       meta,
-      sessionId: ctx.sessionManager.getSessionId(),
+      sessionId,
+      cwd: ctx.cwd,
+      artifactSessionId: ctx.sessionManager.getSessionFile?.() ? sessionId : undefined,
       sessionGeneration: workflowSessionGeneration,
+      resultBodyEnabled: getOutputTranscriptDefault(),
     });
     workflowTasks.set(task.id, task);
     workflowTaskSessionIds.set(task.id, task.sessionId);
@@ -3018,13 +3220,18 @@ Terse command-style prompts produce shallow, generic work.
 
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    const run = runWorkflowTask(ctx, task);
+    workflowTaskRuns.set(task, run);
+    void run.then(() => {
       if (!isCurrentWorkflowTask(task)) return;
       finishWorkflowOutputWaiters(task.id);
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout). Hold the model-facing result briefly so a blocking
       // TaskOutput resumed above can consume it before next-turn delivery.
-      pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
+      pi.appendEntry<WorkflowEntryData>(
+        WORKFLOW_ENTRY_TYPE,
+        workflowEntryData(task, task.resultBodyEnabled),
+      );
       scheduleNudge(task.id, () => {
         if (!isCurrentWorkflowTask(task) || consumedWorkflowOutputs.has(task)) return;
         pi.sendMessage({
@@ -3035,7 +3242,7 @@ Terse command-style prompts produce shallow, generic work.
       });
       widget.update();
       fleet.update();
-    });
+    }).finally(() => workflowTaskRuns.delete(task));
   }
 
   // ---- get_subagent_result tool ----
@@ -3658,6 +3865,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // cancel at all. It is also one human action that cannot fan out, which
       // is what the limit exists to bound. It still counts once started.
       bypassQueue: true,
+      resultBodyEnabled: getOutputTranscriptDefault(),
     });
 
     if (record.status === "error") {
@@ -3928,7 +4136,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "outputTranscript",
           label: "Output transcript",
-          description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
+          description: "Write subagent .output transcripts and optional Agent/workflow result bodies by default. Agent output_transcript frontmatter overrides Agents.",
           currentValue: getOutputTranscriptDefault() ? "on" : "off",
           values: ["on", "off"],
         },

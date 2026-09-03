@@ -17,7 +17,18 @@ import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type FleetWorkflow, type FleetWorkflowAgent, type FleetWorkflowPhase, fleetWorkflowElapsed } from "../workflow/fleet.js";
-import { type AgentActivity, formatCost, type Theme, workflowStateGlyph } from "./agent-widget.js";
+import {
+  type AgentActivity,
+  buildInvocationTags,
+  executionActivityText,
+  executionStatParts,
+  formatCost,
+  formatSessionTokens,
+  formatTokens,
+  getPromptModeLabel,
+  type Theme,
+  workflowStateGlyph,
+} from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 import { BRAILLE_SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "./spinner.js";
 
@@ -599,7 +610,9 @@ export class FleetList {
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${disclosure} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = fleetWorkflowElapsed(workflow, Date.now());
-    const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
+    const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}${
+      workflow.status === "running" || workflow.status === "paused" ? " so far" : ""
+    }`;
     const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
@@ -631,18 +644,49 @@ export class FleetList {
     const selected = rosterIndex === sel;
     const frame = BRAILLE_SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % BRAILLE_SPINNER_FRAMES.length];
     const glyph = workflowStateGlyph(agent.state, frame, theme);
-    const type = renderAgentName(agent.agentType, theme, selected
-      ? { fallbackColor: "text", bold: hasAgentBadge(agent.agentType) }
+    const record = agent.recordId !== undefined ? this.manager.getRecord(agent.recordId) : undefined;
+    const agentType = record?.type ?? agent.agentType;
+    const type = renderAgentName(agentType, theme, selected
+      ? { fallbackColor: "text", bold: hasAgentBadge(agentType) }
       : { fallbackColor: "muted" });
+    const modeLabel = getPromptModeLabel(agentType);
+    const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const label = selected ? theme.fg("text", agent.label) : agent.label;
     const model = agent.model ? theme.fg("dim", ` · ${agent.model}`) : "";
     const phaseRail = phaseHasLaterSibling ? "│  " : "   ";
-    const left = `  ${this.bullet(rosterIndex, sel, theme)}   ${phaseRail}${hasLaterSibling ? "├─" : "└─"} ${glyph} ${type}  ${label}${model}`;
+    const identity = `  ${this.bullet(rosterIndex, sel, theme)}   ${phaseRail}${hasLaterSibling ? "├─" : "└─"} ${glyph} ${type}  ${label}`;
+    const fullIdentity = `${identity}${modeTag}${model}`;
+    const preferredIdentityWidth = Math.max(24, Math.floor(width * 0.7));
+    const left = visibleWidth(fullIdentity) <= preferredIdentityWidth ? fullIdentity : identity;
     const elapsed = agent.startedAt === undefined
-      ? "queued"
+      ? undefined
       : formatFleetElapsed((agent.completedAt ?? Date.now()) - agent.startedAt);
-    const stats = `${elapsed} · ${formatFleetTokens(agent.tokens)}`;
-    return rightAlign(left, theme.fg(selected ? "text" : "dim", stats), width);
+    const tokens = record ? getLifetimeTotal(record.lifetimeUsage) : agent.tokens;
+    const invocation = buildInvocationTags(record?.invocation);
+    // FleetView is a dense one-line roster: show the state, not the streamed
+    // text tail, so right alignment can never erase the selectable identity.
+    const activity = agent.activity === "responding"
+      ? "responding"
+      : agent.activity
+        ? executionActivityText({ activity: agent.activity })
+        : undefined;
+    const parts = executionStatParts({
+      thinking: invocation.tags.find(tag => tag.startsWith("thinking: ")),
+      turnCount: agent.turnCount ?? record?.turnCount,
+      maxTurns: record?.invocation?.maxTurns,
+      toolUses: record?.toolUses ?? agent.toolUses,
+      tokenText: tokens > 0
+        ? record
+          ? formatSessionTokens(tokens, null, theme, record.compactionCount)
+          : formatTokens(tokens)
+        : undefined,
+      costText: this.showCost() && record ? formatCost(getLifetimeCost(record.lifetimeUsage)) : undefined,
+      elapsed,
+    });
+    const stats = [...(activity ? [activity] : []), ...parts].join(" · ");
+    const minimumIdentityWidth = Math.min(visibleWidth(left), preferredIdentityWidth);
+    const boundedStats = truncateToWidth(stats, Math.max(0, width - minimumIdentityWidth - 1), "…");
+    return rightAlign(left, theme.fg(selected ? "text" : "dim", boundedStats), width);
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {

@@ -168,6 +168,15 @@ describe("extractMeta — rejection", () => {
       .toThrow(/`meta.name` is required/);
   });
 
+  it.each([
+    ["name", "name: 'bad\\x1b[2J', description: 'b'"],
+    ["description", "name: 'a', description: 'bad\\u202e'"],
+    ["phase title", "name: 'a', description: 'b', phases: [{ title: 'bad\\x1b]52;c;x\\x07' }]"],
+  ])("rejects terminal controls decoded inside %s", (_field, meta) => {
+    expect(() => extractMeta(`export const meta = { ${meta} }\nreturn 1`))
+      .toThrow(/unsafe terminal control characters/);
+  });
+
   it("rejects a non-object meta", () => {
     expect(() => extractMeta("export const meta = 'nope'\nreturn 1"))
       .toThrow(/must be assigned an object literal/);

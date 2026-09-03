@@ -15,7 +15,15 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { TaskExecutionRef } from "../tasks/types.js";
 import { escapeXml } from "../xml.js";
+import {
+  aggregateWorkflowCoverage,
+  cloneWorkflowChildAttempt,
+  snapshotWorkflowChildAttempt,
+  type WorkflowChildAttempt,
+  type WorkflowCoverageAggregate,
+} from "./attempt.js";
 import { type FleetWorkflowPhase, workflowFleetPhases } from "./fleet.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
@@ -41,6 +49,9 @@ export interface WorkflowTask {
   /** The `tool_use_id` of the call that started this, when one did. */
   toolCallId?: string;
 
+  /** Structured Todo execution owned by this workflow controller. */
+  taskExecutionRef?: TaskExecutionRef;
+
   /**
    * Pause, skip and retry, once the run is up.
    *
@@ -61,6 +72,17 @@ export interface WorkflowTask {
   /** How many agents came back from {@link replay} instead of being spawned. */
   replayedCount: number;
 
+  /** Physical child invocation snapshots, retained separately from UI progress. */
+  workflowAttempts: WorkflowChildAttempt[];
+  /** Captured result-body privacy choice for this workflow run. */
+  resultBodyEnabled: boolean;
+  /** Internal aggregate artifact locator and write status. */
+  aggregateArtifactPath?: string;
+  aggregateArtifactBodyPath?: string;
+  aggregateArtifactStatus?: "complete" | "metadata-only" | "failed" | "skipped";
+  aggregateArtifactError?: string;
+  /** The killed run exceeded its bounded child-evidence drain window. */
+  evidenceIncomplete?: boolean;
   /** The append-only event log, in emission order. */
   workflowProgress: WorkflowEntry[];
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */
@@ -88,6 +110,10 @@ export interface WorkflowTask {
 
   /** Session that owns this run; detached completion must never cross it. */
   sessionId?: string;
+  /** Working directory captured when this workflow was started. */
+  cwd?: string;
+  /** Persisted parent session eligible to own internal result artifacts. */
+  artifactSessionId?: string;
   /** Monotonic activation generation, invalidated before every switch. */
   sessionGeneration: number;
   /** The script's return value, once the run produced one. */
@@ -102,12 +128,16 @@ export function createWorkflowTask(init: {
   args?: unknown;
   meta?: WorkflowMeta;
   toolCallId?: string;
+  taskExecutionRef?: TaskExecutionRef;
   startTime?: number;
   journalPath?: string;
   replay?: readonly WorkflowJournalEntry[];
   resumedFrom?: string;
   sessionId?: string;
+  cwd?: string;
+  artifactSessionId?: string;
   sessionGeneration?: number;
+  resultBodyEnabled?: boolean;
 }): WorkflowTask {
   return {
     type: "local_workflow",
@@ -119,12 +149,17 @@ export function createWorkflowTask(init: {
     meta: init.meta,
     workflowName: init.meta?.name,
     toolCallId: init.toolCallId,
+    taskExecutionRef: init.taskExecutionRef,
     journalPath: init.journalPath,
     replay: init.replay,
     resumedFrom: init.resumedFrom,
     sessionId: init.sessionId,
+    cwd: init.cwd,
+    artifactSessionId: init.artifactSessionId,
     sessionGeneration: init.sessionGeneration ?? 0,
     replayedCount: 0,
+    workflowAttempts: [],
+    resultBodyEnabled: init.resultBodyEnabled ?? true,
     workflowProgress: [],
     progressVersion: 0,
     agentCount: 0,
@@ -137,6 +172,18 @@ export function createWorkflowTask(init: {
     startTime: init.startTime ?? Date.now(),
     totalPausedMs: 0,
   };
+}
+
+/** Apply or replace one physical child attempt without collapsing retry history. */
+export function updateWorkflowAttempt(task: WorkflowTask, attempt: WorkflowChildAttempt): void {
+  const snapshot = snapshotWorkflowChildAttempt(attempt);
+  const index = task.workflowAttempts.findIndex(candidate =>
+    candidate.logicalChildIndex === snapshot.logicalChildIndex
+    && candidate.logicalChildId === snapshot.logicalChildId
+    && candidate.physicalAttempt === snapshot.physicalAttempt,
+  );
+  if (index === -1) task.workflowAttempts.push(snapshot);
+  else task.workflowAttempts[index] = snapshot;
 }
 
 /**
@@ -224,8 +271,10 @@ export function completeWorkflowTask(
   task.workflowName ??= result.meta.name;
   task.agentCount = Math.max(task.agentCount, result.agentCount);
   task.replayedCount = result.replayedCount;
+  task.workflowAttempts = (result.attempts ?? []).map(cloneWorkflowChildAttempt);
   task.value = result.value;
   task.error = result.error;
+  task.evidenceIncomplete = result.evidenceIncomplete;
   task.endTime = now;
   task.fleetPhases = workflowFleetPhases(task.workflowProgress, task.meta, false, now);
 }
@@ -254,8 +303,15 @@ export function workflowResultText(task: WorkflowTask): string {
   return JSON.stringify(task.value, null, 2);
 }
 
-/**
- * Resolve a `resumeFromRunId` against the runs this session has seen.
+export const WORKFLOW_RESULT_BODY_DISABLED = "Output persistence disabled.";
+
+/** Preview used by model-facing completion details without changing the full notification format. */
+export function workflowNotificationPreview(task: WorkflowTask, maxLength: number): string {
+  const result = task.resultBodyEnabled ? workflowResultText(task) : WORKFLOW_RESULT_BODY_DISABLED;
+  return result.length > maxLength ? `${result.slice(0, maxLength)}…` : result;
+}
+
+/** Resolve a `resumeFromRunId` against the runs this session has seen.
  *
  * Same-session only, and deliberately so: the journal lives beside the
  * session's task files, and a run id from another session would silently find
@@ -285,10 +341,10 @@ export function resolveResumeTarget(
           : "Nothing has run yet — call this without `resumeFromRunId`."),
     };
   }
-  if (prior.status === "running") {
+  if (prior.status === "running" || prior.status === "paused") {
     return {
       ok: false,
-      message: `Workflow "${id}" is still running. Stop it from /agents → Workflows before resuming it.`,
+      message: `Workflow "${id}" is still ${prior.status}. Stop it from /agents → Workflows before resuming it.`,
     };
   }
   if (prior.journalPath === undefined) {
@@ -307,6 +363,24 @@ export function resolveResumeTarget(
 /** `<task-notification>`, in the same shape a finished background agent sends. */
 export function formatWorkflowNotification(task: WorkflowTask, now = Date.now()): string {
   const totals = stats(task.workflowProgress, task.agentCount);
+  if (!task.resultBodyEnabled) {
+    const coverage = aggregateWorkflowCoverage(task.workflowAttempts);
+    const safeStatus = task.status === "completed" ? "Done" : task.status === "killed" ? "Stopped" : "Error";
+    const coverageText = formatWorkflowCoverage(coverage);
+    const artifactLocator = task.aggregateArtifactPath ?? "unavailable";
+    return [
+      `<task-notification>`,
+      `<task-id>${task.id}</task-id>`,
+      task.toolCallId ? `<tool-use-id>${escapeXml(task.toolCallId)}</tool-use-id>` : null,
+      `<status>${escapeXml(safeStatus)}</status>`,
+      `<summary>Workflow result body omitted because output persistence is disabled.</summary>`,
+      `<coverage>${coverageText}</coverage>`,
+      `<artifact>${escapeXml(artifactLocator)}</artifact>`,
+      `<result>${WORKFLOW_RESULT_BODY_DISABLED}</result>`,
+      `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
+      `</task-notification>`,
+    ].filter(Boolean).join("\n");
+  }
   const status =
     task.status === "completed" ? "Done"
     : task.status === "killed" ? "Stopped"
@@ -325,4 +399,14 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");
+}
+
+function formatWorkflowCoverage(coverage: WorkflowCoverageAggregate): string {
+  return [
+    `logical=${coverage.coveredLogicalChildCount}/${coverage.logicalChildCount}`,
+    `physical=${coverage.physical.completed}/${coverage.physical.total}`,
+    `failed=${coverage.physical.failed}`,
+    `pending=${coverage.pendingLogicalChildCount}`,
+    `status=${coverage.coverage}`,
+  ].join(" ");
 }

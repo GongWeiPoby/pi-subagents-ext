@@ -39,13 +39,21 @@ function unphasedEntry(index: number, partial: Partial<WorkflowAgentEntry> = {})
 describe("collapse", () => {
   it("keeps the last entry written for an index", () => {
     const progress: WorkflowEntry[] = [
-      agentEntry({ index: 0, state: "start", label: "first" }),
-      agentEntry({ index: 0, state: "done", label: "first", resultPreview: "ok" }),
+      agentEntry({ index: 0, state: "start", label: "first", activity: "starting", turnCount: 1 }),
+      agentEntry({
+        index: 0,
+        state: "done",
+        label: "first",
+        resultPreview: "ok",
+        turnCount: 2,
+      }),
     ];
     const { agents } = collapse(progress);
     expect(agents).toHaveLength(1);
     expect(agents[0].state).toBe("done");
     expect(agents[0].resultPreview).toBe("ok");
+    expect(agents[0].turnCount).toBe(2);
+    expect(agents[0].activity).toBeUndefined();
   });
 
   it("orders agents by index regardless of arrival order", () => {
@@ -269,6 +277,16 @@ describe("stats", () => {
     expect(result).toMatchObject({ done: 1, failedCount: 1, started: 2, running: false });
   });
 
+  it("counts only the latest snapshot for each agent index", () => {
+    const result = stats([
+      agentEntry({ index: 0, state: "start", activity: "waiting for model" }),
+      agentEntry({ index: 0, state: "progress", activity: "responding", turnCount: 1 }),
+      agentEntry({ index: 0, state: "done", turnCount: 1 }),
+    ]);
+
+    expect(result).toMatchObject({ done: 1, failedCount: 0, total: 1, started: 1, running: false });
+  });
+
   it("does not count a queued-but-unstarted agent as started", () => {
     const result = stats([agentEntry({ index: 0, state: "start", queuedAt: 5 })]);
     expect(result.started).toBe(0);
@@ -356,14 +374,14 @@ describe("header", () => {
       agentEntry({ index: 1, state: "progress" }),
     ]);
     const line = header(task, meta, groups, 7, 73_000);
-    expect(line.stats).toBe("1/7 agents · 1m12s");
+    expect(line.stats).toBe("1/7 agents so far · 1m12s");
     expect(line.name).toBe("review-changes");
     expect(line.subtext).toBe("review the diff");
   });
 
   it("singularizes a lone agent", () => {
     const groups = buildPhaseGroups([agentEntry({ index: 0, state: "done" })]);
-    expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent · 1s");
+    expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent so far · 1s");
   });
 
   it.each([
@@ -377,9 +395,16 @@ describe("header", () => {
     expect(line.stats.endsWith(suffix)).toBe(true);
   });
 
-  it("adds no suffix while running", () => {
+  it("marks running and paused totals as discovered so far, but not settled totals", () => {
     const groups = buildPhaseGroups([agentEntry({ index: 0, state: "done" })]);
-    expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent · 1s");
+    expect(header(task, meta, groups, 1, 2000).stats).toContain("agent so far");
+    expect(header({ ...task, status: "paused" }, meta, groups, 1, 2000).stats).toContain("agent so far");
+    expect(header({ ...task, status: "completed" }, meta, groups, 1, 2000).stats).not.toContain("so far");
+  });
+
+  it("adds no terminal suffix while running", () => {
+    const groups = buildPhaseGroups([agentEntry({ index: 0, state: "done" })]);
+    expect(header(task, meta, groups, 1, 2000).stats).toBe("1/1 agent so far · 1s");
   });
 
   it("prefers the task's workflow name over meta", () => {

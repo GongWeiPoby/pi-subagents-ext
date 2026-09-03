@@ -44,14 +44,85 @@ describe("validateDirectWorkflowApprovalCompleteness", () => {
     expectRejectedPreflight(script, "cannot be previewed statically");
   });
 
-  it("allows a dynamic schema expression when its property is explicit", () => {
+  it("rejects a legacy schema option before confirmation", () => {
     expect(validateDirectWorkflowApprovalCompleteness(
       "agent('inspect', { label: 'inspect', schema: REPORT_SCHEMA });",
-    )).toEqual({ ok: true });
+    )).toEqual({
+      ok: false,
+      kind: "options",
+      message: "agent() opts.schema is no longer supported; workflow children return text/Markdown.",
+    });
   });
 });
 
 describe("formatDirectWorkflowApproval", () => {
+  it("puts a readable flow at the confirmation suffix", () => {
+    const summary = formatDirectWorkflowApproval({
+      args: undefined,
+      meta: { name: "review", description: "检查本次改动是否安全" },
+      source: "inline script",
+      script: [
+        "await parallel([",
+        '  () => agent("检查逻辑错误", { label: "正确性检查" }),',
+        '  () => agent("检查测试覆盖", { label: "测试检查" }),',
+        "]);",
+        'await agent("汇总两个检查结果", { label: "汇总结论" });',
+      ].join("\n"),
+    });
+
+    const approvalMarker = "Approval summary\n";
+    const approvalIndex = summary.indexOf(approvalMarker);
+    const approval = summary.slice(approvalIndex + approvalMarker.length);
+    expect(summary).toMatch(/^Technical details\nWorkflow: review\n/);
+    expect(summary.slice(0, approvalIndex)).toContain("Omitted capabilities:\n- not declared by a direct script\n");
+    expect(summary.indexOf(approvalMarker)).toBe(summary.lastIndexOf(approvalMarker));
+    expect(approval.startsWith("Goal\n  检查本次改动是否安全\n\nFlow\n")).toBe(true);
+    expect(approval).toContain("parallel");
+    expect(approval).toContain("[正确性检查] 检查逻辑错误");
+    expect(approval).toContain("[测试检查] 检查测试覆盖");
+    expect(approval).toContain("[汇总结论] 汇总两个检查结果");
+    expect(approval).toContain("This is a simplified static view");
+    expect(summary).toContain("Agent call sites:\n- 1. 正确性检查");
+  });
+
+  it("does not turn conditional call sites into a guaranteed sequence and surfaces fixed gates", () => {
+    const summary = formatDirectWorkflowApproval({
+      args: undefined,
+      meta: { name: "conditional", description: "Run one conditional review" },
+      source: "inline script",
+      script: [
+        "if (condition) {",
+        '  await agent("Review A", { label: "A", gate: "rm -rf build" });',
+        "} else {",
+        '  await agent("Review B", { label: "B", isolation: "worktree" });',
+        "}",
+      ].join("\n"),
+    });
+    const approval = summary.split("Approval summary\n")[1] ?? "";
+
+    expect(approval).toContain("Static call sites; runtime branches may skip or reorder them:");
+    expect(approval).not.toContain("START");
+    expect(approval).not.toContain("     v");
+    expect(approval).toContain("Result handoff");
+    expect(approval).toContain("Data handoffs are script-defined and not statically proven.");
+    expect(approval).toContain("- A: gate rm -rf build");
+    expect(approval).toContain("- B: isolation worktree");
+    expect(approval).not.toContain("No high-impact keywords, gates, or worktree isolation detected");
+  });
+
+  it("shows the runtime fallback when no call sites can be discovered", () => {
+    const summary = formatDirectWorkflowApproval({
+      args: undefined,
+      meta: { name: "dynamic", description: "Run dynamic work" },
+      source: "inline script",
+      script: "return callbacks.map(callback => callback());",
+    });
+    const approval = summary.split("Approval summary\n")[1] ?? "";
+
+    expect(approval).toContain("Flow\n  Steps are determined at runtime.");
+    expect(approval).toContain("No high-impact keywords, gates, or worktree isolation detected");
+  });
+
   it("finds injected calls inside template interpolations", () => {
     const summary = formatDirectWorkflowApproval({
       args: undefined,
@@ -146,7 +217,7 @@ describe("formatDirectWorkflowApproval", () => {
       source: "inline script",
       script: [
         "await parallel([",
-        '  () => agent("Inspect routes", { label: "inspect", schema: { type: "object" } }),',
+        '  () => agent("Inspect routes", { label: "inspect" }),',
         '  () => agent("Check tests", { label: "tests" }),',
         "]);",
         'await agent("Synthesize branch results", { label: "synthesis" });',
@@ -159,7 +230,7 @@ describe("formatDirectWorkflowApproval", () => {
     expect(map).toContain("runtime fan-out/control flow may differ");
     expect(map).toContain("Handoffs: script-defined; handoff not statically proven.");
     expect(map).toContain("parallel() [barrier; parallel branches]");
-    expect(map).toContain("+-- [inspect] Inspect routes [output=structured (schema)]");
+    expect(map).toContain("+-- [inspect] Inspect routes [output=text]");
     expect(map).toContain("+-- [tests] Check tests [output=text]");
     expect(map).toContain("2. [synthesis] Synthesize branch results [output=text]");
     expect(map.indexOf("parallel()")).toBeLessThan(map.indexOf("[synthesis]"));
@@ -225,19 +296,6 @@ describe("formatDirectWorkflowApproval", () => {
     });
 
     expect(summary).toContain("gate: npm test");
-  });
-
-  it("shows an identifier schema as configured and dynamic rather than absent", () => {
-    const summary = formatDirectWorkflowApproval({
-      args: undefined,
-      meta: { name: "schema", description: "dynamic schema" },
-      source: "inline script",
-      script: "agent('Inspect', { label: 'inspect', schema: REPORT_SCHEMA });",
-    });
-
-    expect(summary).toContain("[output=structured (schema)]");
-    expect(summary).toContain("structured output: configured (dynamic expression: REPORT_SCHEMA)");
-    expect(summary).not.toContain("structured output: none");
   });
 
   it("renders unresolved behavior fields as dynamic/unknown", () => {

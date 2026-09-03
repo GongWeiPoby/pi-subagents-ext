@@ -98,6 +98,189 @@ describe("TaskStore — shared file access", () => {
     expect(new TaskStore(file).get("1")?.status).toBe("in_progress");
   });
 
+  it("atomically updates an unbound claim but refuses after that claim binds", () => {
+    const owner = new TaskStore(file);
+    const concurrent = new TaskStore(file);
+    owner.create("Starting", "original");
+    const claim = owner.claimPending("1", {
+      kind: "workflow",
+      taskAttemptId: "task-attempt",
+      attemptId: "workflow-attempt",
+    })!.execution!;
+
+    const cancelled = concurrent.update("1", {
+      status: "pending",
+      subject: "Cancelled before bind",
+    }, claim);
+    expect(cancelled.casMatched).toBe(true);
+    expect(owner.get("1")).toMatchObject({
+      status: "pending",
+      subject: "Cancelled before bind",
+      execution: undefined,
+    });
+
+    const replacementClaim = owner.claimPending("1", {
+      kind: "agent",
+      taskAttemptId: "replacement-task-attempt",
+      attemptId: "replacement-agent-attempt",
+    })!.execution!;
+    const replacementRef = concurrent.bindExecution(replacementClaim, "replacement-agent")!;
+
+    const stale = owner.update("1", {
+      status: "completed",
+      subject: "Must not overwrite replacement",
+    }, replacementClaim);
+    expect(stale.casMatched).toBe(false);
+    expect(owner.get("1")).toMatchObject({
+      status: "in_progress",
+      subject: "Cancelled before bind",
+      execution: replacementRef,
+    });
+  });
+
+  it("claims, binds, and settles one executor with attempt-aware CAS", () => {
+    const first = new TaskStore(file);
+    const second = new TaskStore(file);
+    first.create("Execute once", "d");
+
+    const claimed = first.claimPending("1", {
+      kind: "agent",
+      taskAttemptId: "task-attempt-1",
+      attemptId: "child-attempt-1",
+    });
+    const claim = claimed?.execution;
+    expect(claim).toBeDefined();
+    expect(second.claimPending("1")).toBeUndefined();
+
+    const ref = second.bindExecution(claim!, "agent-1");
+    expect(ref).toMatchObject({
+      taskId: "1",
+      taskAttemptId: "task-attempt-1",
+      attemptId: "child-attempt-1",
+      kind: "agent",
+      executorId: "agent-1",
+    });
+    expect(first.bindExecution(claim!, "agent-2")).toBeUndefined();
+    expect(first.settleExecution({ ...ref!, executorId: "agent-2" }, {
+      status: "completed",
+      result: "forged",
+    })).toBe(false);
+    expect(second.settleExecution(ref!, { status: "completed", result: "done" })).toBe(true);
+    expect(first.get("1")).toMatchObject({ status: "completed", metadata: { result: "done" } });
+    expect(first.settleExecution(ref!, { status: "pending", error: "late" })).toBe(false);
+  });
+
+  it("rejects old attempt settlement and stopped output after reset and reclaim", () => {
+    const store = new TaskStore(file);
+    store.create("Retry", "d");
+    const oldClaim = store.claimPending("1", {
+      kind: "agent",
+      taskAttemptId: "task-attempt-old",
+      attemptId: "child-attempt-old",
+    })!.execution!;
+    const oldRef = store.bindExecution(oldClaim, "agent-old")!;
+
+    const stopToken = store.prepareExecutionStop(oldRef, "pending")!;
+    expect(store.finalizeExecutionStop(oldRef, stopToken, { status: "pending" }).casMatched).toBe(true);
+    const newClaim = store.claimPending("1", {
+      kind: "agent",
+      taskAttemptId: "task-attempt-new",
+      attemptId: "child-attempt-new",
+    })!.execution!;
+    const newRef = store.bindExecution(newClaim, "agent-new")!;
+
+    expect(store.settleExecution(oldRef, { status: "completed", result: "late success" })).toBe(false);
+    expect(store.settleExecution(oldRef, { status: "pending", error: "late failure" })).toBe(false);
+    expect(store.recordSettledExecutionResult(oldRef, "late stopped output")).toBe(false);
+    expect(store.get("1")).toMatchObject({
+      status: "in_progress",
+      execution: newRef,
+    });
+    expect(store.settleExecution(newRef, { status: "completed", result: "current" })).toBe(true);
+    expect(store.get("1")?.metadata.result).toBe("current");
+  });
+
+  it("keeps a terminal stop reserved until its token owner finalizes", () => {
+    const owner = new TaskStore(file);
+    const concurrent = new TaskStore(file);
+    owner.create("Reserved", "original", undefined, { keep: "original" });
+    const claim = owner.claimPending("1", {
+      kind: "workflow",
+      taskAttemptId: "task-attempt",
+      attemptId: "workflow-attempt",
+    })!.execution!;
+    const ref = owner.bindExecution(claim, "wf_controller")!;
+    const token = owner.prepareExecutionStop(ref, "pending")!;
+
+    expect(concurrent.update("1", { status: "completed" }).casMatched).toBe(false);
+    expect(concurrent.update("1", {
+      subject: "concurrent subject",
+      metadata: { concurrent: true },
+    }).casMatched).toBe(false);
+    expect(concurrent.updateExecution(ref, { status: "completed" })).toBe(false);
+    expect(concurrent.finalizeExecutionStop(ref, "wrong-token", { status: "pending" }).casMatched).toBe(false);
+    expect(concurrent.delete("1")).toBe(false);
+    expect(concurrent.clearAll()).toBe(0);
+    expect(concurrent.claimPending("1", { kind: "agent" })).toBeUndefined();
+    expect(concurrent.get("1")).toMatchObject({
+      status: "pending",
+      subject: "Reserved",
+      execution: ref,
+      executionStop: { token, status: "pending" },
+      metadata: { keep: "original" },
+    });
+
+    const finalized = owner.finalizeExecutionStop(ref, token, {
+      status: "pending",
+      subject: "owner subject",
+      description: "owner description",
+      metadata: { owner: true },
+    });
+    expect(finalized.casMatched).toBe(true);
+    expect(owner.get("1")).toMatchObject({
+      status: "pending",
+      subject: "owner subject",
+      description: "owner description",
+      execution: undefined,
+      executionStop: undefined,
+      metadata: { keep: "original", owner: true },
+    });
+    expect(concurrent.claimPending("1", { kind: "agent" })).toBeDefined();
+  });
+
+  it("does not clear a completed stop reservation", () => {
+    const owner = new TaskStore(file);
+    const concurrent = new TaskStore(file);
+    owner.create("Reserved completed", "d");
+    const claim = owner.claimPending("1", { kind: "agent" })!.execution!;
+    const ref = owner.bindExecution(claim, "agent-1")!;
+    const token = owner.prepareExecutionStop(ref, "completed")!;
+
+    expect(concurrent.clearCompleted()).toBe(0);
+    expect(concurrent.get("1")).toMatchObject({
+      status: "completed",
+      execution: ref,
+      executionStop: { token },
+    });
+    expect(owner.finalizeExecutionStop(ref, token, { status: "completed" }).casMatched).toBe(true);
+    expect(concurrent.clearCompleted()).toBe(1);
+  });
+
+  it("rejects malformed and cross-store execution refs", () => {
+    const first = new TaskStore(file);
+    first.create("Protected", "d");
+    const claim = first.claimPending("1", { kind: "workflow" })!.execution!;
+    const ref = first.bindExecution(claim, "wf_controller")!;
+
+    const otherFile = join(dir, "other.json");
+    const other = new TaskStore(otherFile);
+    other.create("Other", "d");
+    expect(other.settleExecution(ref, { status: "completed" })).toBe(false);
+    expect(first.settleExecution({ ...ref, attemptId: "" }, { status: "completed" })).toBe(false);
+    expect(first.settleExecution({ ...ref, kind: "invalid" } as never, { status: "completed" })).toBe(false);
+    expect(first.get("1")?.status).toBe("in_progress");
+  });
+
   it("does not delete tasks another instance wrote after this one became empty", () => {
     const stale = new TaskStore(file);
     const writer = new TaskStore(file);

@@ -226,34 +226,60 @@ describe("effective-vs-requested disclosure", () => {
     expect(formatThinking(agentEntry({ index: 0 }))).toBeUndefined();
   });
 
-  it("keeps the thinking level off the tight card row", () => {
+  it("includes the thinking level through the shared ordinary-agent stat formatter", () => {
     // It lives in the dialog's detail pane instead: `thinking: medium` on every
     // row of a fan-out is width the description needs more.
     expect(
       agentStatSegments(agentEntry({ index: 0, agentType: "Explore", model: "haiku", thinking: "low" })),
-    ).toEqual(["Explore", "haiku"]);
+    ).toEqual(["haiku", "thinking: low"]);
   });
 });
 
 describe("stat segments", () => {
-  it("appends agentType, model, tokens, toolCalls, durationMs in that order", () => {
+  it("uses the shared model, thinking, turns, tool uses, tokens, duration order", () => {
     expect(
       agentStatSegments(
         agentEntry({
           index: 0,
           agentType: "Explore",
           model: "haiku",
+          activity: "tool: read",
+          turnCount: 3,
           tokens: 18_400,
           toolCalls: 12,
           durationMs: 42_000,
         }),
       ),
-    ).toEqual(["Explore", "haiku", "18.4k", "12 tool calls", "42s"]);
+    ).toEqual(["haiku", "↻3", "12 tool uses", "18.4k token", "42.0s"]);
+  });
+
+  it("shows only positive turns", () => {
+    expect(agentStatSegments(agentEntry({ index: 0, turnCount: 0 }))).toEqual([]);
+    expect(agentStatSegments(agentEntry({ index: 0, turnCount: 2 }))).toEqual(["↻2"]);
   });
 
   it("omits every stat that is absent", () => {
     expect(agentStatSegments(agentEntry({ index: 0 }))).toEqual([]);
-    expect(agentStatSegments(agentEntry({ index: 0, toolCalls: 1 }))).toEqual(["1 tool call"]);
+    expect(agentStatSegments(agentEntry({ index: 0, toolCalls: 1 }))).toEqual(["1 tool use"]);
+  });
+
+  it("renders a bounded live output line beneath a running child only", () => {
+    const running = card({
+      progress: [agentEntry({
+        index: 0,
+        label: "writer",
+        state: "progress",
+        activity: "responding",
+        outputPreview: "partial answer",
+      })],
+    });
+    expect(running.find(line => line.includes("partial answer"))).toContain("⎿");
+
+    const done = card({
+      progress: [agentEntry({ index: 0, label: "writer", state: "done", resultPreview: "final answer" })],
+      task: { status: "completed", startTime: START },
+    });
+    expect(done.join("\n")).not.toContain("final answer");
   });
 
   it("merges the fallback model into the model segment", () => {
@@ -283,7 +309,9 @@ describe("stat segments", () => {
         ],
       }),
     );
-    expect(rows[1].trimEnd()).toBe("  └─ ✔ review:bugs · Explore · haiku · 18.4k · 12 tool calls · 42s");
+    expect(rows[1].trimEnd()).toBe(
+      "  └─ ✔ review:bugs · Explore · haiku · 12 tool uses · 18.4k token · 42.0s",
+    );
   });
 
   it("aligns stats into one column across groups", () => {
@@ -341,7 +369,7 @@ describe("header", () => {
       progress: [{ type: "workflow_phase", index: 0, title: "Review" }, ...sevenAgents],
       now: START + 72_000,
     });
-    expect(header).toContain("3/7 agents · 1m12s");
+    expect(header).toContain("3/7 agents so far · 1m12s");
     expect(header).not.toMatch(/phase/i);
     expect(header).not.toMatch(/1\/1|\d+ phases?/);
   });
@@ -368,7 +396,8 @@ describe("header", () => {
     ];
     for (const [status, suffix] of suffixes) {
       const [header] = card({ progress: sevenAgents, task: { status, startTime: START } });
-      expect(header, status).toContain(`3/7 agents · 1s${suffix}`);
+      const dynamic = status === "running" || status === "paused" ? " so far" : "";
+      expect(header, status).toContain(`3/7 agents${dynamic} · 1s${suffix}`);
     }
   });
 
@@ -384,7 +413,7 @@ describe("header", () => {
   it("right-aligns the stats to the card width", () => {
     const lines = card({ progress: sevenAgents, width: 60 });
     expect(visibleWidth(lines[0])).toBe(60);
-    expect(lines[0].endsWith("3/7 agents · 1s")).toBe(true);
+    expect(lines[0].endsWith("3/7 agents so far · 1s")).toBe(true);
   });
 });
 
@@ -439,7 +468,7 @@ describe("width", () => {
       width: 34,
       task: { status: "running", workflowName: "a-workflow-name-far-too-long-to-fit", startTime: START },
     });
-    expect(lines[0]).toContain("0/1 agent · 1s");
+    expect(lines[0]).toContain("0/1 agent so far · 1s");
     expect(lines[0]).toContain("…");
     expect(visibleWidth(lines[0])).toBe(34);
   });

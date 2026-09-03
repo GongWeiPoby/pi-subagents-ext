@@ -119,6 +119,138 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
+describe("AgentManager — invocation turn counts", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("rejects legacy structuredOutput before creating a record or calling the runner", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockClear();
+
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      structuredOutput: { type: "object" },
+    } as never)).toThrow("options.structuredOutput is no longer supported");
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("stamps its generated id onto a TaskExecute claim", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const taskExecution = {
+      storeId: "store-1",
+      taskId: "7",
+      taskAttemptId: "task-attempt-1",
+      attemptId: "agent-attempt-1",
+      kind: "agent" as const,
+    };
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      taskExecution,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.taskExecutionRef).toEqual({ ...taskExecution, executorId: id });
+    await record.promise;
+  });
+
+  it("rejects a TaskExecute claim whose executor was caller-selected", () => {
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      taskExecution: {
+        storeId: "store-1",
+        taskId: "7",
+        taskAttemptId: "task-attempt-1",
+        attemptId: "agent-attempt-1",
+        kind: "agent",
+        executorId: "forged",
+      },
+    })).toThrow("Invalid task execution binding");
+    expect(manager.listAgents()).toEqual([]);
+  });
+
+  it("stores the latest fresh count on completed and error records", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options: any) => {
+      const running = manager.listAgents()[0];
+      expect(running.turnCount).toBe(0);
+      options.onTurnEnd?.(1);
+      options.onTurnEnd?.(2);
+      return {
+        responseText: "partial",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+        failure: "provider failed",
+      };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.turnCount).toBe(2);
+  });
+
+  it("retains the latest fresh count when stopped", async () => {
+    manager = new AgentManager();
+    let finish!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
+      options.onTurnEnd?.(1);
+      options.onTurnEnd?.(2);
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    expect(manager.abort(id)).toBe(true);
+    finish({ responseText: "partial", session: mockSession(), aborted: true, steered: false });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.turnCount).toBe(2);
+  });
+
+  it("resets a foreground resume and stores only its own turns", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options: any) => {
+      options.onTurnEnd?.(1);
+      options.onTurnEnd?.(2);
+      return { responseText: "first", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.turnCount).toBe(2);
+
+    const forwarded = vi.fn();
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options: any) => {
+      expect(manager.getRecord(id)!.turnCount).toBe(0);
+      options.onTurnEnd?.(1);
+      return { text: "second" };
+    });
+
+    const record = await manager.resume(id, "continue", undefined, { onTurnEnd: forwarded });
+    expect(record?.turnCount).toBe(1);
+    expect(forwarded).toHaveBeenCalledWith(1);
+  });
+});
+
 describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -882,10 +1014,7 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.getRecord(queuedId)!.status).toBe("completed");
   });
 
-  it("keeps a structured payload parseable when the worktree note is appended", async () => {
-    // `record.result` is prose for a reader and picks up a branch note on the
-    // way out. A schema'd payload living in the same field would stop parsing
-    // for every `agent({ schema, isolation: "worktree" })` call.
+  it("appends the worktree note to the text result", async () => {
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
     const wt = { path: "/wt/a", branch: "pi-agent-a", baseSha: "abc", workPath: "/wt/a" };
     vi.mocked(createWorktree).mockResolvedValueOnce(wt as never);
@@ -895,8 +1024,7 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
       session: mockSession(),
       aborted: false,
       steered: false,
-      structuredJson: '{"answer":"42"}',
-    } as never);
+    });
 
     manager = new AgentManager();
     const id = manager.spawn(mockPi, mockCtx, "X", "go", {
@@ -905,10 +1033,7 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     await manager.awaitStartup(id);
     await vi.waitFor(() => expect(manager.getRecord(id)!.status).toBe("completed"));
 
-    const record = manager.getRecord(id)!;
-    expect(JSON.parse(record.structuredJson!)).toEqual({ answer: "42" });
-    // The note still reaches the prose, which is where a human reads it.
-    expect(record.result).toContain("Changes saved to branch");
+    expect(manager.getRecord(id)!.result).toContain("Changes saved to branch");
   });
 
   it("a stop that lands during the copy discards the worktree instead of running", async () => {
@@ -1078,20 +1203,19 @@ describe("AgentManager — worktreeIsolation: false refuses worktrees", () => {
     vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(true);
   });
 
-  it("creates no worktree for an RPC-shaped spawn when the project disabled it", async () => {
+  it("rejects an RPC-shaped worktree spawn when the project disabled it", async () => {
     const { createWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockClear();
     vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(false);
 
     manager = new AgentManager();
-    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
       isolation: "worktree",
-    });
+    })).toThrow('Cannot run with isolation: "worktree" — worktree isolation is disabled by project settings.');
 
-    // Downgraded, not rejected — the user opted out, so the call still runs.
     expect(createWorktree).not.toHaveBeenCalled();
-    expect(manager.getRecord(id)!.worktree).toBeUndefined();
+    expect(manager.listAgents()).toEqual([]);
   });
 
   it("does not mask a genuine worktree failure while enabled", async () => {
@@ -2135,6 +2259,29 @@ describe("AgentManager — background resume", () => {
     // Internal record bookkeeping still runs alongside the forwarded callbacks.
     expect(manager.getRecord(id)!.toolUses).toBe(1);
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+  });
+
+  it("a background resume resets on start and retains its own count on error", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled(manager);
+    manager.getRecord(id)!.turnCount = 4;
+    const forwarded = vi.fn();
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options: any) => {
+      expect(manager.getRecord(id)!.turnCount).toBe(0);
+      options.onTurnEnd?.(1);
+      options.onTurnEnd?.(2);
+      return { text: "partial", failure: "provider failed" };
+    });
+
+    const record = await manager.resume(id, "again", undefined, {
+      isBackground: true,
+      onTurnEnd: forwarded,
+    });
+    await record!.promise;
+
+    expect(record?.status).toBe("error");
+    expect(record?.turnCount).toBe(2);
+    expect(forwarded.mock.calls.map(call => call[0])).toEqual([1, 2]);
   });
 
   it("queues a background resume when the concurrency pool is full", async () => {

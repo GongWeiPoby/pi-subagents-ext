@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { WorkflowChildAttempt } from "../src/workflow/attempt.js";
 import type { WorkflowJournalEntry } from "../src/workflow/journal.js";
-import { buildPhaseGroups, type WorkflowAgentEntry, type WorkflowEntry } from "../src/workflow/progress.js";
+import {
+  buildPhaseGroups,
+  collapse,
+  displayState,
+  type WorkflowAgentEntry,
+  type WorkflowEntry,
+} from "../src/workflow/progress.js";
 import {
   assertBoundarySafe,
   type RunWorkflowOptions,
@@ -57,6 +64,12 @@ function run(body: string, options: Omit<RunWorkflowOptions, "script">): Promise
 
 const agentEntries = (progress: readonly WorkflowEntry[]): WorkflowAgentEntry[] =>
   progress.filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+
+const latestAttempts = (attempts: readonly WorkflowChildAttempt[]): WorkflowChildAttempt[] =>
+  [...new Map(attempts.map(attempt => [
+    `${attempt.logicalChildIndex}:${attempt.physicalAttempt}`,
+    attempt,
+  ])).values()];
 
 describe("the worker source itself", () => {
   it("parses as JavaScript", async () => {
@@ -252,6 +265,213 @@ describe("script globals", () => {
     expect(result.value).toEqual([null, "fine"]);
     const failed = agentEntries(result.progress).find(e => e.state === "error");
     expect(failed?.error).toBe("child exploded");
+  });
+});
+
+describe("physical attempt telemetry", () => {
+  it("emits queued, running and completed snapshots for a live success", async () => {
+    const seen: WorkflowChildAttempt[] = [];
+    const usage = {
+      turns: 2,
+      toolCalls: 3,
+      tokens: { input: 11, output: 7, cacheWrite: 5, cacheRead: 2, cost: 0.25 },
+    };
+    const { host } = stubHost(() => ({
+      ok: true,
+      text: "done",
+      recordId: "record-1",
+      artifactId: "artifact-1",
+      sourceAttemptId: "source-1",
+      usage,
+    }));
+
+    const result = await run('return await agent("go");', {
+      host,
+      onAttempt(attempt) {
+        seen.push(attempt);
+        if (attempt.status === "completed") attempt.usage!.tokens.input = 999;
+      },
+    });
+
+    expect(seen.map(attempt => attempt.status)).toEqual(["queued", "running", "completed"]);
+    expect(result.attempts).toEqual([expect.objectContaining({
+      logicalChildIndex: 0,
+      logicalChildId: "workflow-child-0",
+      physicalAttempt: 1,
+      status: "completed",
+      invocation: "spawn",
+      recordId: "record-1",
+      artifactId: "artifact-1",
+      sourceAttemptId: "source-1",
+      usage,
+    })]);
+    expect(result.attempts?.[0].usage?.tokens.input).toBe(11);
+  });
+
+  it.each([
+    ["ordinary failure", () => ({ ok: false as const, error: "child failed" })],
+    ["pre-spawn rejection", () => { throw new Error("startup failed"); }],
+  ])("settles an %s as a failed physical attempt and returns null", async (_name, reply) => {
+    const seen: WorkflowChildAttempt[] = [];
+    const { host } = stubHost(reply);
+
+    const result = await run('return await agent("go");', {
+      host,
+      onAttempt: attempt => seen.push(attempt),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.value).toBeNull();
+    expect(seen.map(attempt => attempt.status)).toEqual(["queued", "running", "failed"]);
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "failed",
+      error: _name === "ordinary failure" ? "child failed" : "startup failed",
+    })]);
+  });
+
+  it("settles a user skip as skipped while the script receives null", async () => {
+    let control: WorkflowControl | undefined;
+    let started!: () => void;
+    const startedPromise = new Promise<void>(resolve => { started = resolve; });
+    let settle!: (result: WorkflowSpawnResult) => void;
+    const seen: WorkflowChildAttempt[] = [];
+    const host: WorkflowHost = {
+      spawnAgent() {
+        started();
+        return new Promise(resolve => { settle = resolve; });
+      },
+      abortAgent() {
+        settle({ ok: false, skipped: true, error: "Stopped." });
+      },
+    };
+    const done = run('return await agent("go");', {
+      host,
+      onControl: value => { control = value; },
+      onAttempt: attempt => seen.push(attempt),
+    });
+
+    await startedPromise;
+    expect(control?.skip(0)).toBe(true);
+    const result = await done;
+
+    expect(result.value).toBeNull();
+    expect(seen.map(attempt => attempt.status)).toEqual(["queued", "running", "skipped"]);
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "skipped",
+      skipped: true,
+      error: "Stopped.",
+    })]);
+  });
+
+  it("retains the replaced attempt and links a retry to its artifact", async () => {
+    let control: WorkflowControl | undefined;
+    const requests: WorkflowSpawnRequest[] = [];
+    const releases: ((result: WorkflowSpawnResult) => void)[] = [];
+    const seen: WorkflowChildAttempt[] = [];
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        requests.push(request);
+        request.onResolved?.({ recordId: request.agentId });
+        return new Promise(resolve => { releases.push(resolve); });
+      },
+      abortAgent() {
+        releases[0]?.({
+          ok: false,
+          killed: true,
+          error: "replaced",
+          recordId: "record-1",
+          artifactId: "artifact-1",
+          usage: { turns: 1, toolCalls: 2, tokens: { input: 10, output: 4, cacheWrite: 1 } },
+        });
+      },
+    };
+    const done = run('return await agent("go");', {
+      host,
+      onControl: value => { control = value; },
+      onAttempt: attempt => seen.push(attempt),
+    });
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(control?.retry(0)).toBe(true);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1].sourceAttemptId).toBe("artifact-1");
+    releases[1]?.({
+      ok: true,
+      text: "done",
+      recordId: "record-2",
+      artifactId: "artifact-2",
+      sourceAttemptId: "artifact-1",
+      usage: { turns: 2, toolCalls: 1, tokens: { input: 8, output: 3, cacheWrite: 0 } },
+    });
+
+    const result = await done;
+    expect(result.value).toBe("done");
+    expect(result.attempts).toEqual([
+      expect.objectContaining({
+        physicalAttempt: 1,
+        status: "killed",
+        artifactId: "artifact-1",
+        usage: { turns: 1, toolCalls: 2, tokens: { input: 10, output: 4, cacheWrite: 1 } },
+      }),
+      expect.objectContaining({
+        physicalAttempt: 2,
+        status: "completed",
+        invocation: "retry",
+        artifactId: "artifact-2",
+        sourceAttemptId: "artifact-1",
+        usage: { turns: 2, toolCalls: 1, tokens: { input: 8, output: 3, cacheWrite: 0 } },
+      }),
+    ]);
+    expect(latestAttempts(seen)).toEqual(result.attempts);
+  });
+
+  it("records journal replay as a zero-usage replayed attempt", async () => {
+    const journal: WorkflowJournalEntry[] = [];
+    const first = stubHost(() => ({ ok: true, text: "cached" }));
+    await run('return await agent("go");', {
+      host: first.host,
+      journal: { append: entry => journal.push(entry) },
+    });
+    const replay = stubHost();
+    const seen: WorkflowChildAttempt[] = [];
+
+    const result = await run('return await agent("go");', {
+      host: replay.host,
+      journal: { entries: journal },
+      onAttempt: attempt => seen.push(attempt),
+    });
+
+    expect(replay.calls).toHaveLength(0);
+    expect(result.replayedCount).toBe(1);
+    expect(seen.map(attempt => attempt.status)).toEqual(["queued", "replayed"]);
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "replayed",
+      invocation: "replay",
+      cached: true,
+      usage: { turns: 0, toolCalls: 0, tokens: { input: 0, output: 0, cacheWrite: 0 } },
+    })]);
+  });
+
+  it("drops unsafe result references without preventing settlement", async () => {
+    const { host } = stubHost(() => ({
+      ok: true,
+      text: "done",
+      recordId: "../record",
+      artifactId: "artifact/path",
+      sourceAttemptId: "source\u0000id",
+      usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 4 } },
+    }));
+
+    const result = await run('return await agent("go");', { host });
+
+    expect(result.status).toBe("completed");
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "completed",
+      usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 4 } },
+    })]);
+    expect(result.attempts?.[0]).not.toHaveProperty("recordId");
+    expect(result.attempts?.[0]).not.toHaveProperty("artifactId");
+    expect(result.attempts?.[0]).not.toHaveProperty("sourceAttemptId");
   });
 });
 
@@ -586,21 +806,27 @@ describe("caps and validation", () => {
 });
 
 describe("abort", () => {
-  it("terminates the run and aborts every in-flight child", async () => {
+  it("keeps an aborted running attempt killed while enriching its late child metadata", async () => {
     const controller = new AbortController();
-    const { host, aborted } = stubHost(() => new Promise<WorkflowSpawnResult>(() => {}));
+    const aborted: string[] = [];
+    const seen: WorkflowChildAttempt[] = [];
+    let release!: (result: WorkflowSpawnResult) => void;
+    let started!: () => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    const host: WorkflowHost = {
+      spawnAgent() {
+        started();
+        return new Promise(resolve => { release = resolve; });
+      },
+      abortAgent(agentId) {
+        aborted.push(agentId);
+      },
+    };
 
-    let started = () => {};
-    const running = new Promise<void>(resolve => {
-      started = resolve;
-    });
-
-    const promise = run('await agent("hangs forever");\nreturn "unreachable";', {
+    const promise = run('await agent("hangs");\nreturn "unreachable";', {
       host,
       signal: controller.signal,
-      onProgress(entries) {
-        if (entries.some(e => e.type === "workflow_agent" && e.startedAt != null)) started();
-      },
+      onAttempt: attempt => seen.push(attempt),
     });
 
     await running;
@@ -609,7 +835,307 @@ describe("abort", () => {
 
     expect(result.status).toBe("killed");
     expect(result.error).toBe("Workflow aborted.");
+    expect(result.attempts).toEqual([expect.objectContaining({ status: "killed" })]);
+    expect(result.evidenceIncomplete).toBe(true);
     expect(aborted).toEqual(["wf-agent-0"]);
+    const killedAt = result.attempts![0].completedAt!;
+
+    release({
+      ok: false,
+      killed: true,
+      error: "child aborted after cleanup",
+      recordId: "record-late",
+      artifactId: "artifact-late",
+      sourceAttemptId: "source-late",
+      usage: { turns: 2, toolCalls: 3, tokens: { input: 13, output: 5, cacheWrite: 2 } },
+    });
+    await vi.waitFor(() => expect(latestAttempts(seen)).toEqual([expect.objectContaining({
+      status: "killed",
+      recordId: "record-late",
+      artifactId: "artifact-late",
+      sourceAttemptId: "source-late",
+      error: "child aborted after cleanup",
+      usage: { turns: 2, toolCalls: 3, tokens: { input: 13, output: 5, cacheWrite: 2 } },
+    })]));
+    expect(latestAttempts(seen)[0].completedAt).toBeGreaterThanOrEqual(killedAt);
+    expect(result.status).toBe("killed");
+  });
+
+  it("drains a child settlement within the bounded window before snapshotting", async () => {
+    const controller = new AbortController();
+    let release!: (result: WorkflowSpawnResult) => void;
+    let started!: () => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    const host: WorkflowHost = {
+      spawnAgent() {
+        started();
+        return new Promise(resolve => { release = resolve; });
+      },
+      abortAgent() {
+        release({
+          ok: false,
+          killed: true,
+          error: "child stopped",
+          recordId: "record-drained",
+          artifactId: "artifact-drained",
+          usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 0 } },
+        });
+      },
+    };
+
+    const promise = run('await agent("drain me");', { host, signal: controller.signal });
+    await running;
+    controller.abort();
+    const result = await promise;
+
+    expect(result.status).toBe("killed");
+    expect(result.evidenceIncomplete).toBeUndefined();
+    expect(result.attempts).toEqual([expect.objectContaining({
+      status: "killed",
+      recordId: "record-drained",
+      artifactId: "artifact-drained",
+      usage: { turns: 1, toolCalls: 1, tokens: { input: 2, output: 3, cacheWrite: 0 }, },
+    })]);
+  });
+
+  it("marks both running and semaphore-queued attempts killed on abort", async () => {
+    const controller = new AbortController();
+    const seen: WorkflowChildAttempt[] = [];
+    let release!: (result: WorkflowSpawnResult) => void;
+    let queued!: () => void;
+    const queuedPromise = new Promise<void>(resolve => { queued = resolve; });
+    const host: WorkflowHost = {
+      spawnAgent() {
+        return new Promise(resolve => { release = resolve; });
+      },
+      abortAgent() {
+        release({ ok: false, killed: true, error: "aborted" });
+      },
+    };
+    const promise = run(
+      'return await parallel([() => agent("running"), () => agent("queued")]);',
+      {
+        host,
+        signal: controller.signal,
+        concurrency: 1,
+        onAttempt(attempt) {
+          seen.push(attempt);
+          if (attempt.logicalChildIndex === 1 && attempt.status === "queued") queued();
+        },
+      },
+    );
+
+    await queuedPromise;
+    controller.abort();
+    const result = await promise;
+
+    expect(result.status).toBe("killed");
+    expect(result.attempts).toEqual([
+      expect.objectContaining({ logicalChildIndex: 0, status: "killed", startedAt: expect.any(Number) }),
+      expect.objectContaining({ logicalChildIndex: 1, status: "killed" }),
+    ]);
+    expect(result.attempts?.[1]).not.toHaveProperty("startedAt");
+    expect(latestAttempts(seen).map(attempt => attempt.status)).toEqual(["killed", "killed"]);
+  });
+
+  describe("turn count progress", () => {
+    it("bounds and throttles live output, then flushes before terminal settlement", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          let full = "";
+          for (let index = 0; index < 100; index++) {
+            const delta = `${index}\u001b[31m-token \u202e\u009b`;
+            full += delta;
+            request.onTextDelta?.(delta, full);
+          }
+          return { ok: true, text: "final answer" };
+        },
+        abortAgent() {},
+      };
+
+      const result = await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+      const outputRows = rows.filter(row => row.outputPreview !== undefined);
+
+      expect(outputRows).toHaveLength(2);
+      expect(outputRows.at(-1)?.activity).toBe("responding");
+      expect(outputRows.at(-1)?.outputPreview?.length).toBeLessThanOrEqual(200);
+      expect(outputRows.at(-1)?.outputPreview).toMatch(/^…/);
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u001b");
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u202e");
+      expect(outputRows.at(-1)?.outputPreview).not.toContain("\u009b");
+      expect(rows.length).toBeLessThan(10);
+      expect(result.progress.at(-1)).toMatchObject({ state: "done", resultPreview: "final answer" });
+      expect(result.progress.at(-1)).not.toHaveProperty("outputPreview");
+      expect(result.progress.at(-1)).not.toHaveProperty("activity");
+    });
+
+    it("emits the complete live activity sequence and clears activity on completion", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onSessionReady?.();
+          request.onToolActivity?.({ type: "start", toolName: "read" });
+          request.onToolActivity?.({ type: "end", toolName: "read" });
+          request.onTurnEnd?.(1);
+          return { ok: true, text: "done" };
+        },
+        abortAgent() {},
+      };
+
+      await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+
+      expect(rows.map(row => row.activity)).toEqual([
+        undefined,
+        "starting",
+        "waiting for model",
+        "tool: read",
+        "waiting for model",
+        "waiting for model",
+        undefined,
+      ]);
+      expect(rows.at(-1)).toMatchObject({
+        state: "done",
+        turnCount: 1,
+      });
+      expect(rows.at(-1)).not.toHaveProperty("activity");
+    });
+
+    it("does not let a pending output snapshot overwrite newer tool activity", async () => {
+      vi.useFakeTimers();
+      try {
+        const seen: WorkflowEntry[][] = [];
+        let started!: () => void;
+        const startedPromise = new Promise<void>(resolve => { started = resolve; });
+        let finish!: (result: WorkflowSpawnResult) => void;
+        const host: WorkflowHost = {
+          spawnAgent(request) {
+            request.onTextDelta?.("first ", "first ");
+            request.onTextDelta?.("second", "first second");
+            request.onToolActivity?.({ type: "start", toolName: "read" });
+            started();
+            return new Promise(resolve => { finish = resolve; });
+          },
+          abortAgent() {},
+        };
+        const promise = run('return await agent("go");', {
+          host,
+          onProgress(entries) { seen.push([...entries]); },
+        });
+        await startedPromise;
+        await vi.advanceTimersByTimeAsync(1_000);
+        const live = collapse(seen.flat()).agents[0];
+        expect(live.activity).toBe("tool: read");
+        expect(live.outputPreview).toBe("first second");
+
+        finish({ ok: true, text: "done" });
+        await promise;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["done", { ok: true, text: "done" }],
+      ["error", { ok: false, error: "failed" }],
+    ] as const)("emits live counts and retains the latest count on %s", async (state, reply) => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          return reply;
+        },
+        abortAgent() {},
+      };
+
+      const result = await run('return await agent("go");', {
+        host,
+        onProgress(entries) { seen.push([...entries]); },
+      });
+      const rows = seen.flat().filter((entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent");
+
+      expect(rows.filter(row => row.turnCount !== undefined).map(row => row.turnCount)).toEqual([1, 2, 2]);
+      expect(rows.at(-1)).toMatchObject({ state, turnCount: 2 });
+      expect(result.progress.at(-1)).toMatchObject({ turnCount: 2 });
+    });
+
+    it("retains the latest live count when a running child is interrupted", async () => {
+      const controller = new AbortController();
+      let counted!: () => void;
+      const countSeen = new Promise<void>(resolve => { counted = resolve; });
+      const host: WorkflowHost = {
+        spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          counted();
+          return new Promise<WorkflowSpawnResult>(() => {});
+        },
+        abortAgent() {},
+      };
+
+      const promise = run('return await agent("go");', { host, signal: controller.signal });
+      await countSeen;
+      controller.abort();
+      const result = await promise;
+      const row = collapse(result.progress).agents[0];
+
+      expect(result.status).toBe("killed");
+      expect(row.turnCount).toBe(2);
+      expect(displayState(row, false)).toBe("interrupted");
+    });
+
+    it("passes a fresh callback to resume rows", async () => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          request.onTurnEnd?.(1);
+          request.onTurnEnd?.(2);
+          return { ok: true, text: "first" };
+        },
+        async resumeAgent(_id, _prompt, _onResolved, onSessionReady, onTurnEnd, onToolActivity, onTextDelta) {
+          onSessionReady?.();
+          onToolActivity?.({ type: "start", toolName: "read" });
+          onToolActivity?.({ type: "end", toolName: "read" });
+          onTextDelta?.("partial ", "partial ");
+          onTextDelta?.("response", "partial response");
+          onTurnEnd?.(1);
+          return { ok: true, text: "second" };
+        },
+        abortAgent() {},
+      };
+
+      await run(
+        'await agent("go", { label: "impl" });\nreturn await agent("again", { resume: "impl" });',
+        { host, onProgress(entries) { seen.push([...entries]); } },
+      );
+      const resumed = seen.flat().filter(
+        (entry): entry is WorkflowAgentEntry => entry.type === "workflow_agent" && entry.index === 1,
+      );
+
+      expect(resumed.map(row => row.activity)).toEqual([
+        undefined,
+        "starting",
+        "waiting for model",
+        "tool: read",
+        "waiting for model",
+        "responding",
+        "waiting for model",
+        "waiting for model",
+        undefined,
+      ]);
+      expect(resumed.some(row => row.outputPreview === "partial response")).toBe(true);
+      expect(resumed.filter(row => row.turnCount !== undefined).map(row => row.turnCount)).toEqual([1, 1, 1]);
+      expect(resumed.at(-1)).toMatchObject({ state: "done", turnCount: 1 });
+    });
   });
 
   // #168 in a workflow: a row must name the model the child ACTUALLY ran on, not
@@ -803,6 +1329,7 @@ describe("run control", () => {
     const host: WorkflowHost = {
       spawnAgent(request) {
         started.push(request.agentId);
+        request.onResolved?.({ recordId: request.agentId });
         return new Promise<WorkflowSpawnResult>(resolve => {
           release.set(request.agentId, resolve);
         });
@@ -893,6 +1420,44 @@ describe("run control", () => {
     // Never handed to the host at all, and the script saw a null for it.
     expect(stub.started()).toEqual(["wf-agent-0"]);
     expect(result.value).toBe('["first",null]');
+  });
+
+  it("refuses retry while startup has not exposed an abortable manager record", async () => {
+    let control: WorkflowControl | undefined;
+    let started!: () => void;
+    let finish!: () => void;
+    const startedPromise = new Promise<void>(resolve => { started = resolve; });
+    const calls: WorkflowSpawnRequest[] = [];
+    const aborted: string[] = [];
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        calls.push(request);
+        started();
+        return new Promise<WorkflowSpawnResult>(resolve => {
+          finish = () => {
+            request.onResolved?.({ recordId: "record-1" });
+            resolve({ ok: true, text: "startup completed", recordId: "record-1" });
+          };
+        });
+      },
+      abortAgent(agentId) {
+        aborted.push(agentId);
+      },
+    };
+    const done = run('return await agent("go");', {
+      host,
+      onControl: value => { control = value; },
+    });
+
+    await startedPromise;
+    expect(control?.retry(0)).toBe(false);
+    expect(aborted).toEqual([]);
+    finish();
+
+    const result = await done;
+    expect(calls).toHaveLength(1);
+    expect(result.value).toBe("startup completed");
+    expect(result.attempts).toEqual([expect.objectContaining({ status: "completed" })]);
   });
 
   it("retries a running agent into the same call", async () => {
@@ -1099,125 +1664,58 @@ describe("the budget global", () => {
 });
 
 /* ------------------------------------------------------------------------- *
- * agent({ schema })
+ * unsupported agent({ schema }) migration
  * ------------------------------------------------------------------------- */
 
-describe("structured output", () => {
-  const FINDINGS = {
-    type: "object",
-    properties: { findings: { type: "array", items: { type: "string" } } },
-    required: ["findings"],
-  };
-  const schemaLiteral = JSON.stringify(FINDINGS);
+describe("unsupported structured output", () => {
+  const migrationError = "agent() opts.schema is no longer supported; workflow children return text/Markdown.";
 
-  it("hands the script an object, not a string", async () => {
-    // The whole point of the option. `instanceof` is the assertion that matters:
-    // it only holds if the value was parsed *inside* the script's own realm.
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":["a","b"]}' }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\n`
-        + "return JSON.stringify([typeof r, r instanceof Object, r.findings instanceof Array, r.findings.length]);",
-      { host: stub.host },
-    );
-
-    expect(result.status).toBe("completed");
-    expect(JSON.parse(result.value as string)).toEqual(["object", true, true, 2]);
-  });
-
-  it("passes the compiled schema to the host", async () => {
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":[]}' }));
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, { host: stub.host });
-
-    expect(stub.calls[0].schema).toBeDefined();
-    expect(stub.calls[0].schema?.schema).toEqual(FINDINGS);
-  });
-
-  it("fails the call when the host returns prose instead", async () => {
-    // A host that ignores `schema` must fail loudly. The runtime is the one
-    // place that can promise the script the shape it asked for.
-    const stub = stubHost(() => ({ ok: true, text: "I found two things." }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\nreturn r === null;`,
-      { host: stub.host },
-    );
-
-    expect(result.value).toBe(true);
-    expect(agentEntries(result.progress).at(-1)).toMatchObject({ state: "error" });
-    expect(String(agentEntries(result.progress).at(-1)?.error)).toMatch(/not JSON|did not match/);
-  });
-
-  it("fails the call when the answer parses but does not match", async () => {
-    const stub = stubHost(() => ({ ok: true, text: '{"wrong":1}' }));
-    const result = await run(
-      `const r = await agent('go', { schema: ${schemaLiteral} });\nreturn r === null;`,
-      { host: stub.host },
-    );
-
-    expect(result.value).toBe(true);
-    expect(String(agentEntries(result.progress).at(-1)?.error)).toMatch(/findings/);
-  });
-
-  it("rejects a schema that cannot be one, before spending a model call", async () => {
-    for (const bad of ["5", "'x'", "[]", "{ type: 'array' }"]) {
-      const stub = stubHost();
-      const result = await run(`return await agent('go', { schema: ${bad} });`, { host: stub.host });
-      expect(result.status, `schema ${bad}`).toBe("failed");
-      expect(result.error).toMatch(/schema/);
-      expect(stub.calls, `schema ${bad}`).toHaveLength(0);
-    }
-  });
-
-  it("refuses schema together with resume", async () => {
-    // A resumed child re-prompts a session whose tool set was fixed when it
-    // started, so it has no StructuredOutput tool to answer through.
+  it("rejects schema before resume conflicts or host calls", async () => {
     const stub = stubHost();
     const result = await run(
-      "await agent('first', { label: 'a' });\n"
-        + `return await agent('again', { resume: 'a', schema: ${schemaLiteral} });`,
+      "return await agent('go', { resume: 'missing', schema: { type: 'object' } });",
       { host: stub.host },
     );
 
     expect(result.status).toBe("failed");
-    expect(result.error).toMatch(/mutually exclusive/);
+    expect(result.error).toBe(migrationError);
+    expect(stub.calls).toHaveLength(0);
+  });
+});
+
+describe("terminal-safe workflow progress strings", () => {
+  it.each([
+    ["label", 'return await agent("go", { label: "\\x1b[2Jforged" });'],
+    ["phase", 'phase("\\u202eforged"); return "done";'],
+  ])("rejects an unsafe %s before host execution", async (_field, body) => {
+    const stub = stubHost();
+    const result = await run(body, { host: stub.host });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("unsafe terminal control characters");
+    expect(stub.calls).toEqual([]);
   });
 
-  it("gives a schema call its own journal key", async () => {
-    const plain: WorkflowJournalEntry[] = [];
-    await run("return await agent('go');", {
+  it("escapes a derived label decoded from an unsafe prompt", async () => {
+    const result = await run('return await agent("before\\x1b[2Jafter");', {
       host: stubHost().host,
-      journal: { append: entry => plain.push(entry) },
     });
+    const row = collapse(result.progress).agents[0];
 
-    const schemad: WorkflowJournalEntry[] = [];
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, {
-      host: stubHost(() => ({ ok: true, text: '{"findings":[]}' })).host,
-      journal: { append: entry => schemad.push(entry) },
-    });
-
-    // Same prompt, different contract — a resume must not replay one as the other.
-    expect(schemad[0].key).not.toBe(plain[0].key);
+    expect(row.label).toBe("before\\u001b[2Jafter");
+    expect(row.label).not.toContain("\u001b");
   });
 
-  it("declines a replayed answer that no longer matches", async () => {
-    // The key covers a schema that changed; this covers a journal that was
-    // edited, or torn mid-write. Either would hand the script a null from an
-    // entry the journal claims succeeded.
-    const stub = stubHost(() => ({ ok: true, text: '{"findings":["fresh"]}' }));
-    const stale: WorkflowJournalEntry[] = [];
-    await run(`return await agent('go', { schema: ${schemaLiteral} });`, {
-      host: stubHost(() => ({ ok: true, text: '{"findings":["old"]}' })).host,
-      journal: { append: entry => stale.push(entry) },
+  it("escapes unsafe log controls before they reach renderers", async () => {
+    const result = await run('log("before\\x1b[2J\\u202eafter"); return "done";', {
+      host: stubHost().host,
     });
-    stale[0] = { ...stale[0], text: "not json at all" };
+    const logs = result.progress.filter(entry => entry.type === "workflow_log");
 
-    const result = await run(`return (await agent('go', { schema: ${schemaLiteral} })).findings[0];`, {
-      host: stub.host,
-      journal: { entries: stale },
-    });
-
-    expect(result.value).toBe("fresh");
-    expect(result.replayedCount).toBe(0);
-    expect(stub.calls).toHaveLength(1);
+    expect(logs).toEqual([{
+      type: "workflow_log",
+      message: "before\\u001b[2J\\u202eafter",
+    }]);
   });
 });
 

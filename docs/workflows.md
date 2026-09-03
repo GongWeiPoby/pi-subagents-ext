@@ -1,448 +1,269 @@
 # Scripted workflows
 
-A workflow is a small JavaScript program that spawns and coordinates many subagents: fan out over a list, push every item through the same stages, verify each result, return a summary. It runs in the background and reports as it goes.
+For users who explicitly need deterministic JavaScript orchestration: loops, parallel fan-out, pipelines, retries, shell gates, or named composition. This guide covers `SubagentWorkflow`, its runtime, approval and status surfaces, and saved `.js` workflows.
 
-The thing worth understanding up front is that **you do not write these — the model does.** You describe the work; it emits the script; you keep the file and re-run it. This guide is about that loop.
-
-For the tool's parameter table and where it sits among the other tools, see [`README.md`](../README.md#subagentworkflow).
-
-For reusable adaptive Markdown guidance that the Planner turns into a one-run script, see [Adaptive workflow Playbooks](playbooks.md). A Playbook is the maintained source; this guide covers the temporary/deterministic JavaScript execution layer and legacy saved `.js` workflows.
+For reusable natural-language guidance that the main coordinator adapts with ordinary tools, skills, and `Agent` calls, see [Adaptive workflow Playbooks](playbooks.md). A Playbook is Markdown guidance, not a script and not an automatic invocation of this tool.
 
 ## What a workflow is
 
-Until workflows existed, the only way to run several agents at once was to name them one by one in a single message. That is fine for three agents you already know about. It does not work for *"audit every route file in this repo"*, where the list only exists once something has gone and looked.
+`SubagentWorkflow` runs a JavaScript program that coordinates many subagents. The script can discover a list through one child, loop over it, branch on text results, pipeline items through stages, retry a child, run shell gates, or compose a saved script. The script itself has no filesystem, network, or module access; all real work happens in its child agents or in host-provided gates.
 
-A script can loop, branch, and fan out over a list discovered at runtime. A batch of tool calls cannot. Each `agent()` call in the script spawns a real subagent with its own context window, its own tools, and its own model — the script is only the coordinator, and it has no filesystem or network of its own.
+Use the ordinary `Agent` tool for one delegated task or a small set of calls the main coordinator can choose directly. Use `SubagentWorkflow` only when the user explicitly asks for deterministic scripted control flow or a named JavaScript workflow. A Playbook may suggest a script when that is appropriate, but Markdown guidance never silently becomes generated JavaScript.
 
-Use the `Agent` tool for one delegated task, or a handful you can name up front. Reach for a workflow when the *number* of agents depends on something discovered at runtime, when work flows through stages, or when you want findings independently verified before you believe them. It costs a subprocess per agent, so it is not the thing to dress a single task up as.
+Every `agent()` child returns final text or Markdown. The script may deterministically return any JSON-shaped value, including an object, array, status, or path assembled from those text results. `agent({ schema })` is rejected; see [Migration](#migration). There is no structured child-result channel.
 
-## The lifecycle
+## Lifecycle
 
-### 1. Ask for one
+### 1. Ask for an explicit workflow
 
-There is no `/workflows` command. The tool is model-invoked, so you get a workflow by asking for one in the prompt — the same way you ask for anything else. What you say shapes what you get:
+There is no `/workflows` command. Ask the main model to use `SubagentWorkflow`, provide an inline script, point at a script path, or name a saved `.js` workflow. The model writes the script when the user asks for scripted orchestration; it should not use this tool merely because a Playbook was read.
 
-| What you say | What you get |
-|---|---|
-| "audit every route file for missing auth checks" | A discovery agent, then a fan-out over what it found |
-| "review the changed files for bugs, and verify each finding before reporting it" | Two stages, the second trying to refute the first |
-| "fix the failing test, and don't tell me it's done until `npm test` passes" | A `gate` on the fix agent, and a retry loop around it |
-| "use a workflow to …" | Forces the shape when the model would otherwise reach for plain `Agent` calls |
+A direct invocation supplies exactly one of `script`, `scriptPath`, or `name`, except that `resumeFromRunId` may reuse the previous run's source. Optional `task_id` binds the workflow controller to one pending structured Todo. It accepts one ID only; the workflow's child agents remain workflow-owned and do not receive that Todo reference. In a UI, every direct source and exact resume is shown in the current approval preview and requires direct confirmation; a requested Todo binding appears in that preview. Headless direct calls proceed under the automation caller's trust boundary.
 
-You do not have to say "workflow" — the model picks the tool — but saying it removes the ambiguity when the task is borderline.
+The approval preview is exact for the statically disclosed behavior. A bordered, larger fixed-height custom dialog keeps `Cancel` and `Approve` visible while the current view scrolls. The summary contains the goal, static call-site tree, runtime branch uncertainty, and repeated gate/worktree impact. Press `d` to switch to the independently scrollable technical appendix with complete prompts and literal options, then `d` again to return. Static `parallel()` and `pipeline()` structure is shown; arbitrary loops and branches are described as potentially changing call count or order rather than being presented as guaranteed execution.
 
-An adaptive run compiled by a ready `WorkflowPlan` carries a one-use authorization for its exact internally retained script-and-arguments digest and returns an opaque `planRef`; pass that reference to `SubagentWorkflow` unchanged. A valid `planRef` runs directly because it is one-use and digest-bound.
+UI-confirmed direct scripts are refused when the preview cannot faithfully disclose behavior: injected globals are aliased or indirectly called, local declarations shadow them, agent arguments use spreads or dynamic/computed/shorthand option keys, options are not literal objects, or behavior-affecting values are dynamic. Rewrite the script with direct injected-global calls and literal option objects. Parse failures also fail closed in the UI. These preview checks do not apply to headless automation. User prose, workflow names, and risk words never count as approval.
 
-Direct `script`, `scriptPath`, and named `.js` invocations use a different trust boundary. In a UI, every direct invocation is shown as a behavior summary with arguments and requires confirmation, including an exact `resumeFromRunId`; an ASCII-only static flow map appears near the top before the parameters and per-agent details. It labels sequential arrows as execution/control order rather than data dependencies, groups `parallel()` branches, identifies overlapping `pipeline()` stages and nested workflow sites, discloses text or structured outputs, and says downstream handoffs are script-defined and not statically proven unless safely established by the scanner. The map is based on static call sites, so runtime fan-out and control flow may differ. UI-confirmed direct scripts are refused when injected globals (`agent`, `parallel`, `pipeline`, `phase`, or `workflow`) are aliased, called through `.call`/`.apply`, used in computed/conditional/sequence callees, or shadowed by local declarations or parameters. They are also refused when agent arguments/options use spreads, a non-object options value, computed keys, methods, shorthand properties, or dynamic behavior fields, because the preview cannot faithfully disclose gates, isolation, resumes, or other behavior. Rewrite injected globals as direct identifier calls and use literal option objects with static string behavior fields. An explicit dynamic schema such as `schema: REPORT_SCHEMA` remains supported and is rendered as configured with its expression. User prose, workflow names, and risk keywords never imply authorization. Headless direct invocations skip these preview-completeness refusals because the automation caller is trusted, and exact-approved `planRef` runs are unaffected. Inline/path scripts that reference the injected `workflow` binding remain refused because their child behavior is not in the summary; AST detection covers aliases and indirect call forms and fails closed on parse errors. Saved named workflows may compose nested workflows through direct `workflow(...)` calls, but are still UI-confirmed or headless-allowed. `--subagents-workflow-file=` remains the explicit startup automation entry point.
+`SubagentWorkflow` can also be started by the explicit `--subagents-workflow-file=<path>` CLI flag. The flag is a trusted, user-selected startup automation boundary: it starts the script without opening the tool approval dialog.
 
 ### 2. Read what came back
 
-The tool returns immediately. The run continues in the background and notifies you when it is done. A tool-started completion is retained by this extension while the parent session is active; it is flushed after `agent_settled` reports the owning session idle, with idle checked again at the actual 200 ms send point. If a new turn began during that hold, the result stays retained for the next settle instead of entering pi's follow-up queue where an abort could clear it.
-
-When you explicitly need status or output, call `TaskOutput` with the returned `wf_*` ID. `block: false` reports the current running/paused/terminal state and counts immediately; `block: true` waits without polling until the run settles, times out, is aborted, or the session changes. A timeout or abort does not consume the future completion notification. Returning settled output does consume its held notification, so the result reaches the model once.
+The tool returns a workflow task ID immediately. The run continues in the background, updates its live card, and sends the normal completion notification when the owning parent session is ready. When `task_id` was supplied, the structured Todo is atomically claimed before the controller starts. A Todo already bound to `TaskExecute` or another workflow is refused, so no duplicate run starts. Workflow completion marks the Todo completed; workflow failure or kill returns it to pending with the error. `TaskUpdate` to pending/completed/deleted aborts this controller and waits for it to settle before applying the new status, so a replacement cannot run beside the old workflow. Session changes revoke the old claim and stop the controller before activating the next task store. Use `TaskOutput` with either the returned `wf_*` ID or the bound structured Todo ID to inspect or join the controller:
 
 ```text
-Workflow "auth-audit" started in the background.
+SubagentWorkflow started in the background.
 Task ID: wf_9f3ab21c04de
-Script: /var/folders/xy/…/pi-subagents-501/Users-me-project/<session>/tasks/wf_9f3ab21c04de.workflow.js
+Script: <session task path>/<run id>.workflow.js
 
 You will be notified when it finishes — do NOT poll or sleep waiting for it.
-To iterate, edit the script file and call SubagentWorkflow again with scriptPath.
 ```
 
-Three things in there matter.
+`TaskOutput({ task_id, block: false })` reports current state and counts. For a structured Todo ID it dispatches from the canonical workflow binding (and the protected settled workflow ID afterward), not from stale Agent metadata. `view: "summary"` is metadata-only and never reads a result body; it includes the task/executor binding, workflow status, bounded counters, coverage, aggregate artifact status, and privacy state. `view: "children"` lists at most 100 bounded workflow child attempts with status, invocation, safe references, usage, and sanitized errors. `view: "result"` explicitly reads only the persisted final workflow Markdown body and returns a character slice with `offset`, `limit`, total length, and `hasMore`. The default limit is 20,000 characters, the hard limit is 8 MiB, and an offset beyond the body returns an empty slice. The default view is unchanged when `view` is omitted.
 
-**`Task ID`** is what `resumeFromRunId` takes, what `/agents → Workflows` lists the run under, and what `TaskOutput({ task_id: "wf_…" })` accepts for an explicit status check or join.
+A settled bound or unbound workflow can be read live or after reload by its structured Todo or `wf_*` ID. The reader derives a fixed project/session location from a bounded readable suffix of `resolve(cwd)`, the resolved cwd's full SHA-256 hash, and the current parent session. This keeps different projects isolated even when their old separator-replacement names and session IDs collide; no old unhashed directory is consulted. It validates artifact/workflow identity and any Todo binding, requires regular bounded files, and verifies the body SHA-256 digest before returning sanitized Markdown with ordinary newlines preserved. It never accepts a path. A running/paused workflow or a privacy-on run whose aggregate artifact is not `complete` returns an explicit unavailable state before any body read and never leaks the in-memory result. Privacy-off reads return `Output persistence disabled.` and expose no workflow result, prompt, log, or child error text.
 
-**`Script`** is the file to edit. **It is a scratch file in your system temp directory, not in your project** — it will not survive a reboot or a temp sweep. If the workflow turns out to be worth keeping, copy it somewhere durable; see [Save it](#5-save-it). The path means something slightly different depending on how the run was started: for an inline script it is a copy the tool just wrote, and for a run started from `scriptPath` or `name` it is *your own file*, reported straight back.
+There is no standalone `ArtifactRead` tool: `TaskOutput({ view: "result" })` is the only body-read surface, and omitted/default and summary views do not read a body. Child attempts and coverage describe persisted execution records, not verification evidence or proof that the work is complete.
 
-**The last line is addressed to the model, not to you.** You do not call `SubagentWorkflow` yourself — you tell the model to re-run the workflow at that path.
+A timeout or abort does not consume the future notification. A successful explicit settled workflow body read consumes its held notification; summary/children views, privacy markers, and unavailable results do not.
 
-### 3. Watch it run
+The inline script is persisted in the session task directory so the model can edit and re-run it. It is scratch storage and may disappear with a reboot or temp cleanup. A named workflow reports its durable source path instead.
 
-Three surfaces, in increasing order of detail.
+#### Internal settlement aggregate
 
-A **card in the transcript**, updating as the run goes:
+When a workflow owned by a persisted parent session settles as completed, failed, or killed, the extension writes an internal schema-v1 aggregate manifest. The manifest records the workflow settle status, aggregate artifact status (`complete`, `metadata-only`, or `failed`), physical-attempt and latest-logical-child coverage, validated child record/artifact IDs, and the structured Todo binding when one exists. A writer failure is recorded on the workflow task but does not change the workflow's completed/failed/killed status or its Todo settlement.
+
+The aggregate's optional Markdown body contains the workflow's final returned/error text and follows the project `outputTranscript` privacy policy captured when that workflow run starts. With body persistence off, the manifest is metadata-only and uses the fixed `Output persistence disabled.` summary instead of retaining result text. A `--subagents-workflow-file` run applies the same captured policy to its custom session entry: privacy-on stores the complete progress snapshot, while privacy-off stores only structural phase/agent status and counters, the fixed summary, and the aggregate manifest locator. Child-derived labels, errors, logs, activity, and prompt/result/stream previews are omitted. Errors are bounded to one sanitized line and replace the parent cwd with `<cwd>`. A killed run waits only for a bounded child-settlement window; if accepted children remain unresolved, `evidenceIncomplete: true` records that limitation and coverage does not claim complete evidence. A workflow without a persisted parent session writes no aggregate. A complete body has a SHA-256 digest checked on reuse and before every explicit result slice; a changed body is rejected, but neither the digest nor the manifest makes the artifact immutable or tamper-proof.
+
+This aggregate is internal persistence, not verification evidence and not proof that a Todo, workflow child, test command, or task is complete. There is no standalone `ArtifactRead` tool; explicit `TaskOutput({ view: "result" })` uses only current-session IDs and a validated binding rather than exposing an arbitrary path. The ordinary completion notification reports the workflow's final result, and the default notification/UI surfaces do not automatically expose every child's full result body.
+
+### 3. Watch the run
+
+The inline workflow card shows the controller, dynamic child total, phases, child statuses, labels, effective model, turns, tool uses, tokens, and bounded current output:
 
 ```text
-▸ SubagentWorkflow  auth-audit                       3/7 agents · 1m12s
+▸ SubagentWorkflow  auth-audit                3/7 agents so far · 1m12s
   Find routes missing auth checks, then verify each finding
   ╭─ Scan
-  │ └─ ✔ discover        · Explore · haiku 4.5 · 26.4k · 8 tool calls · 25s
+  │ └─ ✓ discover        · Explore · ↻2 · 8 tool uses · 26.4k token · 25.0s
   ╰─ Audit
-    ├─ ✔ audit:src/a.ts  · Explore · haiku 4.5 · 18.4k · 12 tool calls · 42s
-    ├─ ⟳ audit:src/b.ts  · Explore · haiku 4.5 · 8 tool calls · 21s
+    ├─ ✓ audit:src/a.ts  · Explore · ↻3 · 12 tool uses · 18.4k token · 42.0s
+    ├─ ⟳ audit:src/b.ts  · Explore · ↻2 · 8 tool uses · 21.0s
+    │    ⎿  inspecting route guards…
     └─ ⟳ audit:src/c.ts
   ⎿  auditing 6 route files
 ```
 
-A **`workflow` row in FleetView** is a controller node. It starts collapsed; press `→` to expand it into `phase` rows and their workflow-agent children, or `←` to collapse. `Enter` on the workflow opens the same two-pane inspector `/agents → Workflows` does. `Enter` on a child opens the same live `ConversationViewer` used by an ordinary subagent. The child remains owned by the workflow: its stop/skip/retry actions stay in the workflow controller, while the child viewer is read-only with respect to those owner controls.
+The total says `agents so far` while running or paused because deterministic loops and branches can discover later children. Settled totals are final. The default workflow concurrency is 2, independent of the session background and foreground pools; excess child calls queue inside the workflow.
 
-Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
+The above-editor Agents widget puts workflow controllers before ordinary agents and renders workflow → phase → child trees under one 12-line budget. Live children reuse ordinary Agent status and activity wording, including model wait, active tools, responding output, positive `↻N` turns, context/compaction information when available, and bounded streaming output. A live child uses the ordinary two-line header plus `⎿` activity/output shape; terminal children use one row. Workflow and phase animation uses the shared 80 ms braille language. Paused workflow roots use `‖`; paused time is excluded from elapsed time. Finished workflows linger briefly.
 
-The **inspector**, at `/agents → Workflows` — two panes, two levels: phases on the left, that phase's agents on the right, and `⏎` to descend into one agent's prompt, activity and outcome. The detail pane has room for the canonical `provider/model-id` and the thinking level, including a level pi clamped (`thinking: low (asked max)`). The full key table is in [the README](../README.md#commands); the four that change the run rather than the view are:
+FleetView renders the same workflow controller and tree below the editor. Workflows start collapsed; `→` expands a controller into phases and children, `←` collapses it, and `Enter` opens the controller inspector or the selected child's ordinary live conversation viewer. Workflow children remain owned by the workflow and are not duplicated as top-level agents, notifications, mentions, lifecycle events, or session-pool entries. Their stop/skip/retry controls remain workflow-owned.
 
-| Key | |
+`/agents → Workflows` opens the two-pane inspector: phases on the left and the selected phase's children on the right. `Enter` opens a child detail view with its prompt, activity, current output, and outcome. `c` opens the same conversation viewer as FleetView. The direct run controls are:
+
+| Key | Behavior |
 |---|---|
-| `x` | Stop the run |
-| `p` | Pause — running agents finish, no new ones start, and held time comes off the clock |
-| `s` | **Skip** the selected agent: its `agent()` call returns `null` in the script |
-| `r` | **Retry** the selected agent: the child is stopped and the same call runs again |
+| `x` | Stop the workflow |
+| `p` | Pause or resume; running children finish, but no new children start |
+| `s` | Skip the selected queued/running child; its `agent()` call returns `null` |
+| `r` | Retry the selected running child once its host record is available; the same pending call receives the replacement result. A child still in startup cannot be stopped safely, so retry is rejected until that record exists |
+| `c` | Open the selected child's live conversation |
 
-`s` and `r` are not view filters. Skipping an agent puts a `null` into the data your script is assembling, exactly as a terminal failure would; the script carries on with a hole in its results.
+Skipping and terminal child failure both appear as `null` to the script. A script should filter or handle that result where a later stage needs a value. The workflow controls do not rewrite the script or invent a replacement call.
 
-The fifth key only shows you something:
+### 4. Edit, resume, and re-run
 
-| Key | |
-|---|---|
-| `c` | Open the selected agent's **conversation** — the same viewer a fleet-list row opens, over the dialog |
+Open the returned `Script:` path, edit it, and invoke `SubagentWorkflow` again with `scriptPath`. A normal run pays for every child again. `resumeFromRunId` replays the unchanged leading prefix of the previous run's journal and starts the first changed or failed call live, followed by the remaining calls.
 
-Because it changes nothing, `c` works at both levels and on an agent that has already settled — which is the usual case, since reading what a child did is most of why the inspector gets opened. The dialog hides itself while the conversation is up and comes back when you close it. A row with no child behind it yet (queued, or replayed from the resume journal) has no conversation to open and does not offer the key.
+Each settled child call is journaled beside the script as `<run id>.workflow.jsonl`. The journal is keyed to the current session and is a prefix cache, not a lookup table. It will not:
 
-A run's workflow agents are visible only as children of that controller, not as ordinary top-level agents. They remain filtered from standalone top-level rows, `/agents` menus, completion notifications and `@handle` resolution, but appear exactly once beneath the workflow controller in the above-editor Agents widget and FleetView. They remain outside the session `maxConcurrent` pools. The Fleet tree uses the workflow progress log, so queued/replayed children can still be shown even before a live record exists; a child without a live record can be selected but cannot open a conversation.
+- resume across sessions;
+- resume a live run;
+- replay a journaled failure; or
+- replay a run that used `agent({ resume })`, because a replayed child has no live conversation for a later continuation.
 
-### 4. Edit and re-run
+Replayed children are marked `from resume journal` in the card and inspector, and completion output counts them. A gate-rejected child remains resumable, so a script can tell the same child what failed and try again with its context intact. `resume` cannot be combined with a new child type, model, effort, isolation, or gate.
 
-Open the path from the `Script:` line, change it, and ask the model to run it again with `scriptPath`. That is the whole loop, and it is why the script is written to disk at all: iterating means editing a file, not asking the model to re-emit source it already produced.
+### 5. Save a deterministic script
 
-Re-running normally re-pays for every agent. `resumeFromRunId` avoids that:
+This section is for legacy deterministic `.js` workflows. To save reusable adaptive guidance, use `WorkflowPlaybookSave` and promote generalized Markdown after its direct confirmation; do not save generated JavaScript from a Playbook. See [WorkflowPlaybookSave](playbooks.md#workflowplaybooksave).
 
-> Its unchanged leading `agent()` calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live.
-
-Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
-
-Four things it will not do:
-
-- **Cross sessions.** The journal is keyed to the session that wrote it. Restart pi and the run id is dead — you get `No workflow run "<id>" in this session.`
-- **Resume a live run.** Stop it from `/agents → Workflows` first; while it is running you get `Workflow "<id>" is still running.`
-- **Replay a failure.** A journaled failure ends the prefix, so resuming a run that died at agent 5 retries exactly agent 5. That is the point.
-- **Replay a run that used `agent({ resume })` at all.** A replayed agent is text from a file rather than a live child, so there would be no conversation left for a later `resume` to continue.
-
-Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, reuses that run's script path. A resume may instead supply exactly one source. In a UI both exact and changed resumes require direct confirmation; headless resumes proceed under the automation-caller trust boundary.
-
-### 5. Save it
-
-This section covers legacy deterministic `.js` workflows. For an adaptive run guided by `WORKFLOW.md`, do not save generated JavaScript: ask the model to promote the generalized guidance through `WorkflowPlaybookSave`, which previews and confirms a project/global Markdown Playbook. See [Playbook promotion](playbooks.md#workflowplaybooksave).
-
-A script you will run more than once belongs somewhere durable. Copy it out of the temp directory into one of these, named `<name>.js`:
+Copy a script into one of these locations with a `.js` extension:
 
 | Location | Scope |
 |---|---|
-| `<project>/.pi/workflows/<name>.js` | This project. Checked in, if you want it shared |
-| `<project>/.agents/workflows/<name>.js` | This project, in the tool-agnostic directory |
-| `<agent dir>/workflows/<name>.js` | You, everywhere — follows you across projects |
+| `<project>/.pi/workflows/<name>.js` | Project |
+| `<project>/.agents/workflows/<name>.js` | Workspace |
+| `<agent dir>/workflows/<name>.js` | Global |
 
-First hit wins, in that order, so a project file shadows a same-named global one.
+Project `.pi` wins over workspace `.agents`, which wins over the global directory. A saved script must contain a pure-literal `export const meta = { name, description }` declaration. `name` and `description` are required; `phases` and `whenToUse` are optional. The metadata is read before execution so initial progress groups can render immediately. Nothing in the script is executed to decide whether it is a saved workflow.
 
-The file must carry an `export const meta = { name, description }` declaration. Those are ordinary directories that may hold anything, so that declaration is what marks a file as a workflow — name something else and you are told it is not a workflow rather than getting a parse error from halfway through it. Nothing in the file is executed to decide that.
+Invoke a saved script by asking the model to run it or by passing `name: "<name>"`. Interactive approval rejects any nested `workflow()` call because the top-level preview cannot disclose child behavior. Trusted headless automation may compose one level of saved workflows. `/agents → Workflows` lists current runs, not every saved file.
 
-Then invoke it by name: *"run the auth-audit workflow"*. The model passes `name: "auth-audit"` and the run reports that file back as its `Script:`, so the edit-and-re-run loop still works on it.
-
-**Nothing lists your saved workflows for you.** `/agents → Workflows` is a *run* inspector scoped to the current session, not a workflow browser — with five workflows saved on disk it will show you nothing. You reach a saved workflow by naming it to the model, or with [`--subagents-workflow-file=`](../README.md#cli-flags). Keeping the names memorable is on you.
-
-### 6. Parameterize it
-
-A workflow that hardcodes `src/routes/` is a one-off. Take the target from `args` instead, and it becomes reusable:
-
-```js
-export const meta = { name: 'audit', description: 'Audit a directory for missing auth checks' }
-
-const root = args?.root ?? 'src/'
-const listing = await agent(`List every file under ${root}. One path per line, nothing else.`)
-```
-
-`args` is whatever was passed to the tool, verbatim, and it must be JSON-shaped. Now *"run the audit workflow against src/api"* and *"…against src/admin"* are the same workflow.
-
-## A worked example
-
-The task: *"find routes that don't check auth, and don't just take the first answer — check each finding."*
-
-The model writes something like this, and the run starts:
-
-```js
-export const meta = {
-  name: 'auth-audit',
-  description: 'Find routes missing auth checks, then verify each finding',
-  phases: [{ title: 'Scan' }, { title: 'Audit' }, { title: 'Verify' }],
-}
-
-phase('Scan')
-const listing = await agent('List every route file under src/routes/. One path per line, nothing else.')
-const files = listing.split('\n').map(s => s.trim()).filter(Boolean)
-log(`auditing ${files.length} route files`)
-
-phase('Audit')
-const findings = await pipeline(
-  files,
-  file => agent(`Audit ${file} for missing auth checks. Report findings or "none".`, { label: `audit:${file}` }),
-  (found, file) => agent(`Try to REFUTE this finding about ${file}: ${found}`, { label: `verify:${file}`, phase: 'Verify' }),
-)
-
-return findings.filter(Boolean)
-```
-
-It works, but the result is a wall of prose you cannot sort — every verify agent answered in its own shape. So: edit the file, give the verify stage a `schema`, and return objects.
-
-```js
-const VERDICT = {
-  type: 'object',
-  properties: { file: { type: 'string' }, holds: { type: 'boolean' }, why: { type: 'string' } },
-  required: ['file', 'holds'],
-}
-
-const findings = await pipeline(
-  files,
-  file => agent(`Audit ${file} for missing auth checks. Report findings or "none".`, { label: `audit:${file}` }),
-  (found, file) => agent(`Try to REFUTE this finding about ${file}: ${found}`, { label: `verify:${file}`, phase: 'Verify', schema: VERDICT }),
-)
-
-return findings.filter(Boolean).filter(f => f.holds)
-```
-
-Only the second stage changed, so re-running with `resumeFromRunId` replays the whole `Scan` phase and every `audit:` call from the journal, and pays only for the verify agents. The notification says so: `… , 7 replayed from wf_9f3ab21c04de`.
-
-Then it earns its keep — copy it to `.pi/workflows/auth-audit.js`, swap `src/routes/` for `args?.root ?? 'src/routes/'`, and from then on it is *"run auth-audit against src/api"*.
-
-The finished script ships as [`examples/workflows/fan-out-audit.js`](../examples/workflows/fan-out-audit.js).
-
-## Writing the script yourself
-
-Occasionally you will want to write or heavily edit one. The rules are short.
-
-**`meta` must be a pure literal** — no variables, function calls, spreads, or template interpolation. It is read *before* the script runs, which is what lets the phases appear on screen from the first frame instead of materializing one at a time as agents happen to start. `name` and `description` are required; `phases` and `whenToUse` are optional.
-
-```js
-export const meta = {
-  name: 'my-workflow',
-  description: 'One line, shown on the card and in the permission prompt',
-  phases: [{ title: 'Scan', detail: 'grep for candidates' }, { title: 'Fix' }],
-}
-```
-
-**The body is an async function body.** Top-level `await` and a bare top-level `return` are both allowed — the runtime wraps it. (This is also why a workflow script is not valid standalone JavaScript, and why your editor may complain about the `return`.)
-
-**What you `return` crosses a JSON boundary.** It is checked for cycles, non-finite numbers, sparse arrays, symbol keys and exotic prototypes. Return something useful on its own — the caller sees your return value, not the individual agent outputs.
-
-## Reference
+## Script reference
 
 ### Tool parameters
 
 | Parameter | Type | Description |
 |---|---|---|
-| `planRef` | string | One-use opaque reference from an approved `WorkflowPlan`; mutually exclusive with `script`, `scriptPath`, `name`, `args`, and `resumeFromRunId` |
-| `script` | string | Inline source. Must begin with `export const meta = { name, description }` |
-| `scriptPath` | string | A script file, absolute or project-relative |
-| `name` | string | A saved workflow — `<name>.js` in one of the three directories above |
-| `args` | any | Handed to the script as the `args` global, verbatim. Must be JSON-shaped |
-| `resumeFromRunId` | string | Replay an earlier run in this session. Matches `^wf_[a-z0-9-]{6,}$` |
-| `title` / `description` | string | Accepted and ignored — for Claude Code parity, so a ported call does not fail. A workflow is named by its `meta` block |
+| `script` | string | Inline workflow source beginning with `export const meta = { name, description }` |
+| `scriptPath` | string | Absolute or project-relative workflow script path |
+| `name` | string | Saved `<name>.js` workflow from the project, workspace, or global roots |
+| `task_id` | string | Bind this controller to one pending structured Todo; children do not inherit the binding |
+| `args` | JSON-shaped value | Passed verbatim to the script as the `args` global |
+| `resumeFromRunId` | string | Replay the unchanged prefix of a completed run in this session |
+| `title` / `description` | string | Accepted and ignored for Claude Code parity; the script's `meta` names it |
 
-Use exactly one of `script`, `scriptPath`, or `name`. A source may be omitted only with `resumeFromRunId`, which reuses the prior path. `planRef` is the separate approved-plan source and cannot be combined with a direct source, `args`, or `resumeFromRunId`.
+Use exactly one source among `script`, `scriptPath`, and `name`. A resume may omit the source and reuse the previous script path. `task_id` is optional and accepts one structured Todo ID, not an array. `args` is optional and may be an object or array; pass actual JSON values rather than a JSON-encoded string.
 
 ### `agent(prompt, opts?)`
 
-Spawns one subagent and resolves to its final text — or, with `schema`, to a validated object.
-
-**Returns `null` if the agent failed terminally *or* if you skipped it from the inspector**, indistinguishably. Filter with `.filter(Boolean)` when a `null` would break a later stage, and be careful with in-script retry loops: retrying on `null` will re-run something you deliberately skipped.
+`agent()` spawns one child and resolves to its final text or Markdown, or `null` after terminal failure or an inspector skip. Every child result is text; the script can parse or transform that text deterministically and can return an object or other JSON-shaped summary itself.
 
 | Option | Type | Notes |
 |---|---|---|
-| `label` | string | Display name in the progress tree. Also the handle `resume` addresses |
-| `phase` | string | Put this agent in a named group, overriding the ambient `phase()`. **Use it inside `pipeline`/`parallel` stages**, where the ambient phase races |
-| `agentType` | string | Which agent definition to use. Defaults to `general-purpose`; built-ins are `general-purpose`, `Explore`, `Plan`, plus your custom agents |
-| `model` | string | `provider/modelId`, or fuzzy like `haiku` |
-| `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Omitted, the agent definition's own `thinking` decides, then the parent's |
-| `isolation` | `"worktree"` | Run in a throwaway git worktree. Only when agents write files in parallel and would collide — it costs setup time and disk per agent |
-| `gate` | string | A shell command run after the agent finishes; a non-zero exit fails the agent and its output becomes the error |
-| `resume` | string | Continue the child that ran under that label instead of starting fresh |
-| `schema` | object | A JSON Schema with an object root. Resolves to the validated object instead of text |
+| `label` | string | Display label and the name used by `resume` |
+| `phase` | string | Explicit progress group, useful inside `pipeline` or `parallel` stages |
+| `agentType` | string | Agent definition; defaults to `general-purpose` |
+| `model` | string | Provider/model ID or fuzzy model name |
+| `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `isolation` | `"worktree"` | Run the child in an isolated git worktree; changes are preserved on a branch when it settles |
+| `gate` | string | Run a shell command after the child and fail the call if it exits non-zero |
+| `resume` | string | Continue the child identified by its prior `label`; mutually exclusive with `agentType`, `model`, `effort`, `isolation`, and `gate` |
 
-Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to `general-purpose` silently.
-
-Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
+Any other option, including `schema`, is rejected before the child starts with an explicit migration error. See [Migration](#migration).
 
 ### `pipeline()` and `parallel()`
 
 ```js
-await pipeline(items, ...stages)   // no barrier between stages
-await parallel(thunks)             // barrier: waits for all of them
+await pipeline(items, ...stages)
+await parallel(thunks)
 ```
 
-**`pipeline` has no barrier.** Item A can be in stage 3 while item B is still in stage 1, so the total time is the slowest single *chain* rather than the sum of the slowest per stage. Each stage receives `(previousResult, originalItem, index)` — the original item and its index stay available in later stages, so you do not have to thread them through the return value. A stage that throws drops that one item to `null` and skips its remaining stages.
+`pipeline` sends each item through every stage independently with no barrier between stages. Item A can be in a later stage while item B is still in its first stage. Each stage receives `(previousResult, originalItem, index)`, and a thrown stage drops that item to `null` and skips its remaining stages.
 
-**`parallel` is a barrier.** It waits for everything before anything moves on, so if five agents run and the slowest takes three times the fastest, four sit finished doing nothing. A thunk that throws becomes `null` without taking its siblings down.
-
-Prefer `pipeline` unless a stage genuinely needs every prior result *together* — deduplicating across the whole set, deciding whether to continue at all, or a prompt that compares one result against all the others. Needing to flatten, map or filter is not such a case; do that inside a pipeline stage.
+`parallel` is a barrier: it waits for all thunks before the script continues. A thunk failure becomes `null` while fatal run errors, such as a cap breach or an unavailable nested workflow, propagate. Prefer `pipeline` when each item can advance independently; use `parallel` only when a later step genuinely needs all prior text together.
 
 ### `workflow(nameOrRef, args?)`
 
-Runs a saved workflow inline and returns its value. Pass a name, or `{ scriptPath }`. `args` becomes the child's `args` global.
+Runs a saved workflow inline and returns its script result. Pass a name or `{ scriptPath }`; the second argument becomes the child's `args`. The child shares the worker, concurrency cap, agent counter, abort signal, journal, and budget. Its progress renders as a separate workflow group. This is available only to trusted headless automation: interactive approval rejects nested behavior because it cannot preview the child. One level of nesting is allowed; a workflow called from a child throws.
 
-The child runs in the *same* worker and vm context under its own globals, so it shares this run's concurrency cap, agent counter, abort signal, journal and budget by construction — its agents are simply this run's agents, controllable from the same inspector. What it does not share is phase state: the child's phases render as their own `▸ <name>` group.
+### `phase()`, `log()`, `args`, and `budget`
 
-**One level only** — `workflow()` inside a child throws saying so. An unknown name, an unreadable path, a child carrying no `meta`, or a child that will not parse all throw into the calling script, so `try`/`catch` if you want to handle them. Capped at 256 nested calls per run.
+- `phase(title)` starts a progress group. Inside concurrent stages, prefer the `phase` option on each `agent()` call.
+- `log(message)` emits a progress line under the workflow tree.
+- `args` is the value passed to the tool.
+- `budget` is `{ total, spent(), remaining() }`; `total` is always `null` because pi has no token-target directive, `remaining()` is `Infinity`, and `spent()` reports this run's output tokens.
 
-### `phase()`, `log()`, `args`, `budget`
+### Determinism and return values
 
-- **`phase(title)`** — start a new progress group; subsequent `agent()` calls are grouped under it. Inside `pipeline`/`parallel` stages use the `phase` *option* instead, since the ambient phase races.
-- **`log(message)`** — a progress line under the tree, for you to read.
-- **`args`** — whatever was passed as the tool's `args`, verbatim; `undefined` if none.
-- **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` is real, and counts output tokens this run's agents have used.
+Scripts run in a worker thread and `node:vm` context. `Date.now()`, `new Date()` without arguments, and `Math.random()` throw because they would make journal replay diverge. `eval` and `Function(...)` throw because code generation is disabled. There is no filesystem, network, or module access. Values crossing the script boundary are checked for cycles, non-finite numbers, sparse arrays, symbol keys, and exotic prototypes.
 
-### Where files live
+The script's final value is checked at the host boundary and can be a JSON-shaped object, array, string, number, boolean, or `null`. This is separate from child output: children always return text/Markdown.
 
-| What | Where |
+### Files, caps, and settings
+
+| What | Location or value |
 |---|---|
-| An inline script, as run | `<tmp>/pi-subagents-<uid>/<encoded-cwd>/<session>/tasks/<run id>.workflow.js` |
-| The resume journal | the same directory, `<run id>.workflow.jsonl` |
-| Saved workflows | `.pi/workflows/` → `.agents/workflows/` → `<agent dir>/workflows/`, first hit wins |
-
-The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only the third is durable, and copying a script there is a manual step.
-
-### Limits and caps
-
-| Limit | Value |
-|---|---|
-| Agents running at once | `2` per workflow by default; excess calls queue |
-| Agents per run, total | 1000 |
-| Items per `parallel`/`pipeline` **call** | 4096 |
-| Nested `workflow()` calls per run | 256 |
+| Inline script | `<tmp>/pi-subagents-<uid>/<readable-resolved-cwd-suffix>-<sha256>/<session>/tasks/<run id>.workflow.js` |
+| Resume journal | Beside the script as `<run id>.workflow.jsonl` |
+| Default child concurrency | 2 per workflow |
+| Agents per run | 1000 |
+| Items per `parallel`/`pipeline` call | 4096 |
+| Nested `workflow()` calls | 256 |
 | Script length | 512 KiB |
 
-These are three different things and are easy to conflate: the default concurrency of 2 limits one workflow's simultaneous model calls, 1000 is a budget for the whole run, and 4096 is per call rather than per run. The limit is per workflow, so multiple workflows can still add their capacities. Excess items queue rather than melting the machine.
+`workflowsEnabled` is on by default and can be disabled in `subagents.json` or `/agents → Settings → Workflows`. Leaving it unset uses auto mode and stands down for the session if another extension provides `Workflow` or `SubagentWorkflow`. See [Persistent settings](../README.md#persistent-settings).
 
-Above 25 scheduled agents, or 1.5M tokens actual or projected, the card adds `⚠ Large workflow · /agents → Workflows to stop`.
+## Migration
 
-A run's default concurrency is 2 agents, independent of the session's `maxConcurrent` and `maxConcurrentForeground` pools — its agents do not enter either. Set a different `concurrency` only through the runtime API; workflow scripts cannot raise this limit. Per-agent model selection remains available with `agent(prompt, { model: "provider/model-id" })`, so cheap discovery stages and expensive verification stages can use different configured models.
+The removed structured child-result option is not accepted. Calls written as `agent(prompt, { schema: ... })` fail before any model call with:
 
-### Settings and the CLI flag
+```text
+agent() opts.schema is no longer supported; workflow children return text/Markdown.
+```
 
-`workflowsEnabled` is **on**; leaving it unset means *auto*, which is on unless another extension already offers a `Workflow` or `SubagentWorkflow` tool, in which case this one stands down for the session. Setting it explicitly pins it. See [Persistent settings](../README.md#persistent-settings).
-
-`pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
+Update the child prompt to request concise line-oriented text or Markdown, then parse that text in the script if deterministic extraction is required. For richer aggregation, keep the child response as Markdown and have the script return an object built from text, labels, counts, or statuses. Existing structured-result callers receive this explicit migration error rather than silently receiving a different value.
 
 ## Recipes
 
-The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in exactly one place: the tool description the model reads on every turn. It already knows them. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.
+### Fan out over a discovered list
 
-### Fan out over a list you don't have yet
+```js
+export const meta = { name: 'auth-audit', description: 'Find and verify auth gaps' }
+const listing = await agent('List route files under src/routes/. One path per line.')
+const files = listing.split('\n').map(line => line.trim()).filter(Boolean)
+return await pipeline(
+  files,
+  file => agent(`Audit ${file} for missing auth checks. Return Markdown.`, { label: `audit:${file}` }),
+  (finding, file) => agent(`Try to refute the finding for ${file}:\n${finding}`, { label: `verify:${file}`, phase: 'Verify' }),
+)
+```
 
-> *"audit every route file under src/routes for missing auth checks"*
+### Verify with a gate and retry context
 
-One discovery agent, then `pipeline` over what it returned. Recognize it by: a lone `await agent(...)` producing a string, a `.split('\n')`, then `pipeline(files, …)`.
+```js
+let fixed = await agent('Fix the failing test.', { label: 'fix', gate: 'npm test' })
+if (fixed === null) {
+  fixed = await agent('The test gate still fails. Fix the cause.', { label: 'fix', resume: 'fix' })
+  const verified = await agent('Run npm test and report the result. Change nothing.', {
+    label: 'verify',
+    gate: 'npm test',
+    effort: 'low',
+  })
+  return { passed: verified !== null, summary: fixed }
+}
+return { passed: true, summary: fixed }
+```
 
-See [`fan-out-audit.js`](../examples/workflows/fan-out-audit.js).
+### Combine text for one synthesis child
 
-### Get objects back instead of prose
-
-> *"…and give me the results as structured data I can sort by severity"*
-
-Recognize it by a `const SCHEMA = { type: 'object', … }` near the top and `schema: SCHEMA` on the `agent()` calls. Worth asking for whenever the script has to *do* anything with the results rather than hand them to you.
-
-See [`structured-findings.js`](../examples/workflows/structured-findings.js).
-
-### Verify by running, not by asking
-
-> *"fix it, and don't report success unless `npm test` passes"*
-
-Recognize it by `gate: 'npm test'` on the fix agent. An LLM judging whether a fix works is a weaker signal than the test suite; this is the difference between a result that is *verified* and one that is merely *claimed*.
-
-See [`gated-fix.js`](../examples/workflows/gated-fix.js).
-
-### Keep an agent's context instead of re-paying for it
-
-> *"if the tests still fail, tell the same agent what broke and let it try again"*
-
-Recognize it by `label: 'fix'` on the first call and `resume: 'fix'` on the second. A gate-rejected child stays resumable, which is what makes "here is what the tests said, fix it" a loop rather than a fresh start.
-
-Also in [`gated-fix.js`](../examples/workflows/gated-fix.js).
-
-### Several opinions, then a synthesis
-
-> *"review this from a correctness, security and performance angle, then reconcile them"*
-
-This is the case where a barrier is *earned* — the synthesis agent's prompt genuinely needs every review at once. Recognize it by `parallel([...])` followed by a single `agent()` that interpolates all of the results.
-
-See [`review-panel.js`](../examples/workflows/review-panel.js).
-
-### Reuse a workflow inside another
-
-> *"map the repo first, then run the audit against what it found"*
-
-Recognize it by `await workflow('repo-map', { … })`. Reach for it to reuse something already saved, not to structure one script — inline composition is cheaper.
-
-See [`compose.js`](../examples/workflows/compose.js).
+```js
+const reviews = await parallel([
+  () => agent('Review correctness and return Markdown.'),
+  () => agent('Review security and return Markdown.'),
+  () => agent('Review performance and return Markdown.'),
+])
+const combined = reviews.filter(Boolean).join('\n\n---\n\n')
+return await agent(`Deduplicate and synthesize these reviews:\n${combined}`)
+```
 
 ## Troubleshooting
 
-**The run failed with `… is unavailable in workflow scripts (breaks resume)`.**
-The script called `Date.now()`, `new Date()` or `Math.random()`. A script that varies run to run cannot be replayed from its journal, so these throw. Use the loop index for ids, pass timestamps in through `args`, or stamp them after the workflow returns. This most often bites pasted-in helper code, and it throws at the line that calls it — *after* you have already paid for the preceding agents.
+**`agent() opts.schema is no longer supported`.** The script uses the removed structured child-result option. Request text or Markdown and parse it in the script, or return a deterministic object assembled from text.
 
-**`The meta object must be a PURE LITERAL — no variables, function calls, spreads, or template interpolation.`**
-`meta` is evaluated before the script runs, in an empty context, so it cannot reference anything. Move the dynamic part into the body.
+**The script failed because `Date.now()`, `new Date()`, or `Math.random()` is unavailable.** Use the loop index for stable labels, pass a timestamp through `args`, or add timestamps after the workflow returns.
 
-**`agent() opts.<key> is not a recognised option.`**
-A typo, or an option from a different tool. The supported set is `label`, `phase`, `model`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`.
+**The meta object must be a pure literal.** `meta` is read before execution. Move variables, calls, spreads, and interpolation into the script body.
 
-**An agent ran as the wrong type and nothing said so.**
-An `agentType` that names no known agent falls back to `general-purpose` **silently** — unlike the `Agent` tool, which tells you. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
+**The script failed because an `agent()` call was not awaited.** A dropped `await` would let the script finish while a child was still running. Await every child call, including calls inside stage callbacks.
 
-**`agent()` returned `null`.**
-The agent failed terminally, or you skipped it with `s` in the inspector. These are indistinguishable to the script. With `schema`, it also covers a child that never produced a payload matching the schema.
+**The worktree isolation gate failed.** The target must be a Git repository with at least one commit and a working `git worktree add`. Isolation is a strict guarantee; the run does not silently continue in the shared checkout.
 
-**A `schema` call came back as `null` even though the agent clearly answered.**
-`schema` is pressure, not a guarantee. The child gets a `StructuredOutput` tool, `constrainedSampling` set to `strict: "prefer"`, and a validation-and-retry round trip — three soft pressures, where Claude Code has one hard one (it can force the tool call; this cannot, because `toolChoice` is not plumbed through pi's `AgentSession`). Keep schemas small and flat, and `.filter(Boolean)` after every schema stage.
+**The run appears queued.** Default workflow concurrency is two. A pause also prevents new children from starting while active children finish.
 
-**The run failed complaining about an un-awaited `agent()`.**
-A dropped `await`, usually inside a `pipeline` stage. The run would otherwise finish while children were still working and throw their results away, so it fails instead — immediately rather than draining, since an agent that ignores its abort signal would wedge the run forever.
+**The saved workflow cannot be found.** Check the three saved-workflow roots and ensure the file contains `export const meta = { name, description }`. A Markdown `WORKFLOW.md` is a Playbook and is loaded by `WorkflowPlaybook`, not by the JavaScript name loader.
 
-**`Cannot run with isolation: "worktree"`.**
-Not a git repo, no commits yet, or `git worktree add` failed. Isolation is a strict guarantee rather than a hint, so it fails loudly instead of quietly running in your main tree. Initialize git and commit at least once, or drop the option.
+**The workflow says the Todo is not pending or already has an execution.** The requested `task_id` is already in progress, completed, or bound to a different TaskExecute/workflow attempt. Inspect it with `TaskGet`/`TaskOutput`; reset it deliberately only when the current executor should be stopped. The reset waits for a workflow controller to settle before allowing a replacement claim, and any later stale callback is ignored.
 
-**`No saved workflow named "x". Looked in: …`**
-The file is not in any of the three directories, or it is there but carries no `export const meta =` declaration, so it is not recognized as a workflow. The message lists the directories it searched and any workflows it did find.
-
-**The run seems stuck with agents queued.**
-Concurrency is capped at 2 agents per workflow by default. Queued agents start as slots free. A pause (`p`) also holds new starts while running agents finish. Multiple workflow runs have separate caps, so several active runs can still create several concurrent provider requests.
-
-## What workflows can't do
-
-- **No filesystem, network or module access inside the script.** All real work happens in the agents it spawns, which have their normal tools.
-- **No `eval` or `Function(...)`** — code generation is off in the vm; they throw `EvalError`.
-- **No cross-session resume.** Journals are per session.
-- **No resume at all for `--subagents-workflow-file` runs** — that path never journals.
-- **No UI that lists or launches saved workflows.** The inspector shows this session's runs.
-- **No scheduled workflows.** The scheduler runs agents, not workflows.
-- **Results are not persisted** beyond the journal and the transcript card.
-- **No driving one from another extension.** A workflow cannot be started or steered over the `pi.events` bus, and its agents are invisible to the RPC surface — they emit no lifecycle events, and `subagents:rpc:stop` refuses them. See [`rpc.md`](rpc.md).
-
-The sandbox is a determinism and accident boundary, not a defence against a deliberately hostile script: the injected globals are host closures, and disabled code generation is what actually stops one being used to compile anything.
-
-## Coming from Claude Code
-
-This is a port of Claude Code's `Workflow` tool down to its state model, so **a script written for Claude Code runs here unchanged.** `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
-
-Identical: `agent()`, `pipeline()`, `parallel()`, `workflow()`, `phase()`, `log()`, `args`, `budget`; the `meta` block; `schema` returning a validated object; one-level `workflow()` nesting; the determinism throws.
-
-Different:
-
-- The tool is **`SubagentWorkflow`**, not `Workflow` — pi's tool registry is flat across extensions, and the winner of a name clash also overwrites the loser's description.
-- **`budget.total` is always `null`**, because pi has no token-target directive. Claude Code's `budget.total`-guarded patterns therefore run unchanged, just without firing.
-- **`schema` is pressured, not forced** — see the troubleshooting entry above.
-- If both extensions are loaded, this one **stands down** rather than offering the model two orchestrators.
-
-Additions on this side: `gate`, `resume`, `effort`, journal-backed `resumeFromRunId`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.
-
-## Examples
-
-Every file below is executed by `test/workflow-examples.test.ts` against a stub host on each CI run, so none of them can silently rot.
-
-| File | Demonstrates | Runs as-is? |
-|---|---|---|
-| [`fan-out-audit.js`](../examples/workflows/fan-out-audit.js) | Runtime fan-out, `pipeline`, `label`, per-stage `phase` | Yes — takes `args.root` |
-| [`structured-findings.js`](../examples/workflows/structured-findings.js) | `schema` on both stages, objects instead of prose | Yes |
-| [`gated-fix.js`](../examples/workflows/gated-fix.js) | `gate`, `isolation: "worktree"`, `resume` retry loop | Needs a real test command |
-| [`review-panel.js`](../examples/workflows/review-panel.js) | An earned `parallel` barrier, `effort` tiering, `model` | Yes |
-| [`compose.js`](../examples/workflows/compose.js) | `workflow()` nesting and `args` plumbing | Needs `lib/count-child.js` saved |
-
-Copy one into `.pi/workflows/` to make it yours.
+**A direct UI call is refused before approval.** Rewrite injected globals as direct identifier calls and use literal option objects without spreads, computed keys, shorthand properties, methods, or dynamic behavior fields. Headless automation does not use these UI completeness checks.

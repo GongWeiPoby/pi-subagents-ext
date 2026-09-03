@@ -1,34 +1,32 @@
 # Adaptive workflow Playbooks
 
 For users and project authors who want reusable workflow guidance without maintaining JavaScript orchestration scripts.
-This guide covers `WORKFLOW.md`, prompt resources, `WorkflowPlaybook`, `WorkflowPlan`, and confirmed promotion through `WorkflowPlaybookSave`; see [Scripted workflows](workflows.md) for the execution runtime itself.
+This guide covers `WORKFLOW.md`, prompt resources, `WorkflowPlaybook`, and confirmed promotion through `WorkflowPlaybookSave`; see [Scripted workflows](workflows.md) for deterministic JavaScript execution.
 
 ## Mental model
 
-Adaptive Playbooks separate reusable intent from one run's execution topology:
+An adaptive Playbook is Markdown guidance for the main coordinator AI. It describes the outcome, useful perspectives, evidence standards, and ways to adapt to the request. It is not a program, a checklist that must always run, or an execution graph.
 
 ```text
-Persona + request + project context
-  -> WORKFLOW.md coordinator guidance
-  -> structured WorkflowPlan for this run
-  -> temporary JavaScript
-  -> SubagentWorkflow runtime
-  -> successful pattern generalized by the model
-  -> confirmed WorkflowPlaybookSave (project or global)
+User request + current conversation + project context
+  -> WorkflowPlaybook lists/reads WORKFLOW.md guidance
+  -> main coordinator interprets the guidance and current evidence
+  -> main coordinator chooses Agent, ordinary tools, skills, and, when explicitly needed, SubagentWorkflow
+  -> main coordinator verifies results and synthesizes the answer
+  -> WorkflowPlaybookSave promotes generalized Markdown after confirmation
 ```
 
-The reusable source is Markdown. The generated JavaScript is an internal run artifact used by the existing deterministic worker runtime, journal, progress UI, gates, and worktree integration. It is never written into a reusable workflow directory by `WorkflowPlan`.
+The model adapts the guidance. Reading a Playbook does not launch agents, create tasks, or guarantee that every paragraph or prompt resource will be used. There is no separate planner, dependency compiler, generated adaptive JavaScript, or automatic persona/dependency closure.
 
 | Artifact | Responsibility |
 |---|---|
-| Persona | Current user role and preferences; a planning bias, not a stage list |
 | Agent `.md` | One executor's role, tools, model, skills, and system prompt |
-| Skill | How to perform a specialized capability |
-| `WORKFLOW.md` | How to reason about and coordinate a class of outcomes |
-| `prompts/*.md` | Optional reusable node prompt templates |
-| `WorkflowPlan` | This run's selected nodes, dependencies, omissions, confidence, and approvals |
-| Temporary JavaScript | Deterministic execution code consumed by `SubagentWorkflow` |
-| `WorkflowPlaybookSave` | Confirmed promotion of generalized Markdown and prompt resources |
+| Skill | A reusable specialized capability |
+| `WORKFLOW.md` | Markdown guidance for how the main coordinator should reason about and coordinate an outcome |
+| `prompts/*.md` | Optional reusable prompt material the coordinator may use, adapt, combine, or omit |
+| `WorkflowPlaybook` | Lists and reads Markdown guidance and prompt resources |
+| `WorkflowPlaybookSave` | Promotes generalized Markdown and prompt resources after direct confirmation |
+| `SubagentWorkflow` | A separate deterministic JavaScript runtime used only when the user explicitly needs scripted control flow |
 
 ## Discovery and precedence
 
@@ -39,21 +37,19 @@ A Playbook is a directory containing `WORKFLOW.md`:
 .pi/workflows/code-review/prompts/verify.md
 ```
 
-Playbooks are discovered in this order:
+Playbooks are loaded with this precedence:
 
 1. `<workspace>/.pi/workflows/<name>/WORKFLOW.md`
 2. `<workspace>/.agents/workflows/<name>/WORKFLOW.md`
 3. `<agentDir>/workflows/<name>/WORKFLOW.md`
 
-A higher-precedence Playbook replaces a same-named lower one. Project Playbooks can therefore specialize a global workflow without modifying the global source. Project and workspace Playbooks are exposed only when Pi reports the project as trusted; untrusted projects see global Playbooks only.
+A higher-precedence Playbook replaces a same-named lower one. Project and workspace Playbooks are exposed only when Pi reports the project as trusted; untrusted projects expose global Playbooks only. The `source` argument on `WorkflowPlaybook read` selects an exact source when needed.
 
-Legacy `<name>.js` saved workflows remain a separate catalogue and keep their existing behavior. Markdown Playbooks are never passed to the JavaScript loader. A `.js` file alone does not appear in `WorkflowPlaybook list`.
-
-Symlinked roots, Playbook directories, `WORKFLOW.md` files, and prompt resources are ignored. Names must be path-safe. Playbooks are size-bounded before reading; each root and Playbook has count/aggregate prompt limits, and catalogue tool output is truncated with an explicit marker.
+Symlinked roots, Playbook directories, `WORKFLOW.md` files, and prompt resources are ignored. Names must be path-safe. Playbooks and prompt output are size-bounded before reading; catalogue output is truncated with an explicit marker. Legacy saved `<name>.js` workflows are a separate catalogue and are not Markdown Playbooks.
 
 ## `WORKFLOW.md`
 
-Frontmatter contains stable facts needed for discovery and planning. The Markdown body is the coordinator prompt:
+Frontmatter contains stable discovery and display facts. The body is natural-language coordinator guidance:
 
 ```markdown
 ---
@@ -76,48 +72,46 @@ example: Review the current diff with target="HEAD"
 
 Review the requested change deeply enough for its actual scope and risk.
 
-# Context adaptation
+# Adaptation
 
-Inspect the target before choosing reviewers. A small local change may need one
-reviewer; a broad or risky change may need several independent perspectives.
+Inspect the target before choosing reviewers. Use one focused Agent call for a
+small change; use independent reviewers, ordinary tools, or relevant skills when
+the evidence shows broader risk. Verify high-impact findings before reporting.
 
 # Completion
 
-Finish when relevant surfaces are covered and high-impact findings have evidence.
+Finish when relevant surfaces are covered and findings have file and line evidence.
 ```
 
 Supported metadata:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `name` | Directory name | Stable catalogue identity |
-| `description` | `name` | One-line discovery summary |
-| `execution` | `adaptive` | `adaptive` or metadata-only `deterministic` marker |
+| `name` | Directory name | Stable catalogue identity; it must match the directory name when present |
+| `description` | `name` | One-line discovery summary, bounded to 1,000 characters |
+| `execution` | `adaptive` | `adaptive` or a metadata-only `deterministic` marker; it does not run anything |
 | `domains` | `[]` | Searchable domain labels |
 | `side_effects` | `unknown` | Human-readable impact classification |
-| `approval` | `adaptive` | Advisory planning metadata: `adaptive`, `required`, or `none`; it never changes `WorkflowPlan` confirmation behavior |
-| `inputs` | absent | Input documentation for the Planner |
+| `approval` | `adaptive` | Advisory metadata for readers and authors; it is not an authorization rule |
+| `inputs` | absent | Documentation for inputs the coordinator may receive |
 | `example` | absent | Generalized natural-language invocation example; required for tool-saved Playbooks |
 
-Do not encode a mandatory DAG in frontmatter. Fixed `stages`, condition expressions, and large routing tables would turn YAML into another rigid programming language. Put adaptation guidance and completion judgment in Markdown. Unknown `execution` or `approval` values cause the Playbook to be skipped with a warning instead of silently changing its behavior.
+Keep adaptation and completion judgment in the Markdown body. Do not encode a mandatory sequence, conditional routing table, fixed child list, or other programming language in frontmatter. Unknown `execution` or `approval` values cause the Playbook to be skipped with a warning.
 
 ## Prompt resources
 
-A Playbook may include direct `.md` children under `prompts/`:
+A Playbook may contain direct `.md` children under `prompts/`:
 
 ```text
 code-review/
   WORKFLOW.md
   prompts/
     discover.md
-    review.md
     verify.md
     synthesize.md
 ```
 
-Prompt resources are returned by `WorkflowPlaybook read`. They are templates for the Planner, not automatically scheduled nodes. The Planner may use one, adapt it, combine it with another, or omit it.
-
-Example:
+`WorkflowPlaybook read` returns these resources with the coordinator guidance. They are optional source material, not automatically scheduled work. The main coordinator decides whether to use one, adapt it to the current context, combine it with another resource, or omit it.
 
 ```markdown
 Review {{target}} through the {{lens}} lens.
@@ -128,7 +122,7 @@ Known context:
 Return only actionable findings supported by file and line evidence.
 ```
 
-Agent system prompts and node prompts remain separate. An Agent `.md` defines who performs work; a Playbook prompt defines the specific work needed in this run.
+Agent system prompts and Playbook prompt resources remain separate. An Agent `.md` defines who performs work; a Playbook resource helps the coordinator formulate the task for this run.
 
 ## `WorkflowPlaybook`
 
@@ -138,36 +132,29 @@ Discover the catalogue:
 { "action": "list" }
 ```
 
-Filter it:
+Filter by name, description, domain, or body text:
 
 ```json
 { "action": "list", "query": "review" }
 ```
 
-Read one Playbook and all prompt resources:
+Read one Playbook and all readable prompt resources:
 
 ```json
 { "action": "read", "name": "code-review" }
 ```
 
-Select one exact source when project precedence shadows the revision you need:
+Select an exact source when precedence hides another copy:
 
 ```json
 { "action": "read", "name": "code-review", "source": "global" }
 ```
 
-Playbooks guide planning. Reading one does not launch agents or create tasks.
+The result contains the Playbook metadata, coordinator prompt, and prompt resources. The main coordinator then decides what to do. A read never launches agents or creates tasks.
 
 ## `WorkflowPlaybookSave`
 
-A successful one-run plan stays temporary until the user explicitly asks to save or promote it. The main model first generalizes task-specific paths, names, platforms, environments, and commands into reusable inputs. It then calls `WorkflowPlaybookSave` with:
-
-- Stable discovery metadata and a Markdown coordinator prompt
-- Optional named `prompts/*.md` resources
-- Input documentation and a reusable natural-language invocation example
-- A user-visible `project` or `global` destination
-
-The tool shows the exact target and complete contents of every file before writing. The user confirms that preview directly; the model cannot assert approval in its arguments. Project scope writes `.pi/workflows/<name>/`, while global scope writes `<agentDir>/workflows/<name>/`. The tool does not write `.agents/workflows`, which remains a discoverable tool-agnostic location managed outside this promotion flow.
+Use this tool only when the user asks to save or promote reusable guidance. The main coordinator generalizes task-specific paths, names, platforms, environments, commands, and session details into documented inputs, then submits Markdown guidance and optional prompt resources.
 
 ```json
 {
@@ -185,86 +172,26 @@ The tool shows the exact target and complete contents of every file before writi
 }
 ```
 
-Project saves require a trusted project. All saves require an interactive/RPC approval UI and fail closed in headless sessions. The approval preview is size-bounded so a proposal cannot hide content outside the review surface.
+The tool previews the exact destination and complete contents of every proposed file, then calls the direct user confirmation UI. The model cannot assert approval in its arguments. Project scope writes `.pi/workflows/<name>/`; global scope writes `<agentDir>/workflows/<name>/`. The tool does not write `.agents/workflows`, which remains a discoverable workspace location managed outside this promotion flow. Saving fails closed without an interactive/RPC approval UI.
 
-Creating an existing name fails without changing files. To update one, first use `WorkflowPlaybook read` with `source: "project"` or `source: "global"`, then pass both `overwrite: true` and its exact `revision`. The source selector matters when a project Playbook shadows a same-named global one. A stale revision is rejected and must be re-read. The writer uses an owner-only per-target process lock under the agent directory, validates a temporary directory with the normal Playbook loader, then replaces the whole directory. Readers fall back to the last validated backup during the rename window, and interrupted replacements recover that backup; stale prompt files disappear only after a successful replacement.
+Project saves require a trusted project. Creating an existing name fails without changing files. To update one, first read the exact project or global source and pass `overwrite: true` with the exact `expectedRevision` returned by that read. A stale revision is rejected. The writer validates a temporary directory with the normal loader, uses an owner-only per-target process lock, atomically replaces the whole directory, and retains validated backup/recovery behavior during replacement. Outdated prompt files are removed only after a successful replacement.
 
-The save tool never accepts or emits JavaScript. Do not promote secrets, credentials, run/session IDs, temporary paths, or machine-specific absolute paths.
+Do not save secrets, credentials, run/session IDs, temporary paths, or machine-specific absolute paths. The save tool accepts and emits Markdown files, never generated JavaScript.
 
-## `WorkflowPlan`
+## Adaptive use
 
-`WorkflowPlan` validates one run's adaptive graph and compiles it into temporary JavaScript for `SubagentWorkflow`.
+Use the Playbook as context for the main coordinator, then inspect the actual target before selecting work. For a small change, one focused `Agent` call may be enough. For a broad or risky change, the coordinator may make several independent `Agent` calls, use ordinary `read`/`grep`/`bash` tools, preload or consult skills, or ask a child to verify a candidate finding. The choice is model-driven and evidence-based; the Playbook does not promise a particular number, order, or dependency shape.
 
-Important fields:
+A coordinator should:
 
-| Field | Meaning |
-|---|---|
-| `objective` | Outcome this run must achieve |
-| `playbook` | Optional Playbook that informed the plan |
-| `personas` | Inferred user contexts and roles |
-| `confidence` / `evidence` | Why the Planner believes its interpretation |
-| `nodes` | Selected executable work nodes |
-| `omitted` | Material capabilities deliberately not selected, with reasons |
+1. Identify the requested outcome and relevant inputs.
+2. Read the target and determine which surfaces and risks are actually present.
+3. Choose a proportionate mix of ordinary tools, skills, and Agent calls.
+4. Give each child a focused prompt, with the relevant context and evidence standard.
+5. Verify important findings independently, by tools or another Agent call when warranted.
+6. Synthesize the verified results in the main context, including meaningful uncertainty and coverage gaps.
 
-A node can declare:
-
-```json
-{
-  "id": "review",
-  "title": "Review correctness",
-  "capability": "code-review",
-  "prompt": "Review the current diff",
-  "agentType": "code-reviewer",
-  "phase": "Review",
-  "dependsOn": ["inspect"],
-  "effort": "high",
-  "skills": ["security-review"],
-  "approval": "adaptive",
-  "sideEffects": "read"
-}
-```
-
-The tool rejects duplicate/unsafe IDs, missing or self dependencies, cycles, empty prompts/capabilities, invalid confidence, excessive prompt volume, and compiled scripts that exceed the runtime bound. When the project disables `worktreeIsolation`, plans containing `isolation: worktree` are rejected rather than silently running writers in the shared checkout.
-
-Independent nodes in one topological layer compile to one `parallel()` call. Downstream prompts receive a JSON object containing prerequisite results. Ordinary child failures may therefore appear as `null`; Playbook prompts should disclose or handle missing coverage rather than assuming every child succeeded.
-
-## Approval
-
-Every `WorkflowPlan` is shown for direct user confirmation before any script is produced. This is deliberate: selected agents may have broad tools, so Playbook-level and node-level `approval` metadata plus `sideEffects` fields describe intent but are not accepted as the authorization boundary. `required`, `external`, shell gates, and conservatively inferred deploy/publish/destructive actions are highlighted in that same exact-plan view; `none` does not suppress it.
-
-For example:
-
-```json
-{
-  "objective": "Deploy production",
-  "nodes": [
-    {
-      "id": "deploy",
-      "title": "Deploy production",
-      "capability": "deploy",
-      "prompt": "Deploy the current build",
-      "approval": "required",
-      "sideEffects": "external"
-    }
-  ]
-}
-```
-
-`WorkflowPlan` shows the complete behavior-affecting approval view in a human-readable summary rather than generated JavaScript: prompts, gate commands, agent/model/effort, isolation, schema, skills, dependencies, and side effects. The preview places an exact dependency map near the top, before the node details; its arrows mean prerequisite result handoffs, and a node legend shows id, title, capability, and `output=text` or `output=structured (schema)`. It explains that failure or skip can yield `null` and that final results retain each node output. It calls the session UI confirmation directly and compiles that same in-memory plan only when the user accepts. The model cannot self-assert approval in tool arguments. Playbook `approval` metadata is advisory context for the Planner and catalogue reader only: `required`, `adaptive`, and `none` all follow the same mandatory `WorkflowPlan` confirmation path. Capability/prompt classification can add emphasis, but it never creates or removes confirmation. A declined plan, or any headless Plan call, remains `awaiting_approval` and contains no script.
-
-`approval: adaptive` and `approval: none` are planning metadata, not hidden runtime authorization rules. External effects and shell gates remain visible in the approval view even though every adaptive Plan is confirmed.
-
-## Execution handoff
-
-A ready `WorkflowPlan` returns:
-
-- An inspectable YAML summary without generated source
-- The normalized structured plan in tool details/session history
-- A one-use opaque `planRef` for the internally retained execution script
-
-The model passes that exact `planRef` to `SubagentWorkflow` on the next turn. It must not rewrite the generated script or save it under `.pi/workflows`, `.agents/workflows`, or the global workflow directory. A ready Plan grants a session-scoped, single-use authorization for the exact internally retained script-and-arguments digest, so a valid `planRef` executes directly without a second confirmation. `planRef` cannot be combined with `args`, `script`, `scriptPath`, `name`, or `resumeFromRunId`. Any altered execution must omit `planRef` and be submitted as a separate direct invocation: it is always confirmed when a UI exists, and allowed without UI in headless automation where the caller is the trust boundary. A declined or headless Plan grants no authorization.
-
-The `SubagentWorkflow` run then owns execution, journal replay, progress, pause/skip/retry controls, worktree cleanup, and completion notification exactly as before.
+For deterministic loops, parallel fan-out, pipelines, retries, shell gates, or named JavaScript composition, the user must explicitly ask for `SubagentWorkflow`; see [Scripted workflows](workflows.md). A Playbook may recommend that option, but it does not invoke or compile it automatically.
 
 ## Example
 
@@ -275,13 +202,13 @@ mkdir -p .pi/workflows/code-review
 cp -R examples/playbooks/code-review/. .pi/workflows/code-review/
 ```
 
-Then ask naturally for a code review. The Planner can discover and read the Playbook, select a review graph that fits the actual change, validate it with `WorkflowPlan`, and pass the resulting `planRef` to `SubagentWorkflow`.
+Then ask naturally for a code review. The main coordinator can read the Playbook, inspect the change, choose one or several Agent calls and relevant tools or skills, verify the evidence, and synthesize the answer.
 
-## Current MVP boundaries
+## Boundaries
 
-- The main conversation model is the Planner and promotion generalizer; there is no separate planner model setting yet.
-- Persona inference is model judgment recorded in `WorkflowPlan`, not a deterministic classifier.
-- Promotion saves a model-supplied generalized proposal after direct confirmation; it does not yet mine run journals or synthesize a draft automatically from a run ID.
-- Promotion supports create/update for project and global Playbooks; delete/rename management is not part of this milestone.
-- `WorkflowPlan` compiles and records plans but does not itself start `SubagentWorkflow`; the model performs the explicit next tool call.
-- Durable cross-process workflow recovery, quality-helper globals, model tiers, and shared run storage remain future integration work.
+- Markdown guidance is read by the main coordinator AI; it is not itself executable and not every instruction or prompt resource is necessarily used.
+- Playbook metadata describes discovery and intent. It does not authorize external, write, shell, or destructive actions.
+- `WorkflowPlaybookSave` promotes generalized Markdown only after direct confirmation; it does not mine journals or generate a JavaScript workflow.
+- Promotion supports create/update for project and global Playbooks; delete and rename management are not part of this surface.
+- Deterministic JavaScript remains available through the separate `SubagentWorkflow` tool for user-explicit orchestration.
+- Markdown Playbook read/save tools remain available when `workflowsEnabled` disables the deterministic JavaScript runtime or that runtime yields to another orchestrator.

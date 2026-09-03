@@ -14,7 +14,7 @@
  *   2. Execution — every example runs to completion against a stub host. This is
  *      the tier that earns its keep: it catches determinism violations, unknown
  *      `agent()` option keys (rejected by name at the call), cap violations,
- *      schema payloads the runtime rejects, and typos in the globals.
+ *      and typos in the globals.
  *
  *      It does NOT catch a dropped `await`. The un-awaited-launch check fires on
  *      launches still outstanding when the script ends, and this stub answers
@@ -62,14 +62,9 @@ const SAMPLE_ARGS: Record<string, unknown> = {
 /**
  * A host that answers every spawn plausibly and deterministically.
  *
- * Replies are keyed off the `label`, exactly as
- * `test/workflow-claude-code-compat.test.ts` does, rather than off the schema:
- * `request.schema` reaches the host already COMPILED, so sniffing it for
- * property names silently matches nothing and every schema-bearing call ends up
- * `null`. Labels are stable and are what the examples name their calls by.
- *
- * The payloads still have to satisfy the real schemas — the runtime validates
- * them — so a wrong shape here fails the example rather than passing quietly.
+ * Replies are keyed off the `label`, which is stable and is what the examples
+ * name their calls by. Text answers are intentionally line-oriented where an
+ * example needs data for later script code to consume.
  */
 function stubHost(options: { gateFailsFor?: string[] } = {}): {
   host: WorkflowHost;
@@ -85,34 +80,12 @@ function stubHost(options: { gateFailsFor?: string[] } = {}): {
       labels.set(request.agentId, request.label);
       const label = request.label;
 
-      // Only a call that ASKED for a schema gets JSON. Keying on the label
-      // alone would hand fan-out-audit's un-schema'd `verify:<file>` calls a
-      // JSON blob, since structured-findings labels its verifiers the same way.
-      if (request.schema !== undefined) {
-        // structured-findings: one finding per dimension.
-        if (label.startsWith("review:")) {
-          return {
-            ok: true,
-            text: JSON.stringify({ findings: [{ title: `${label} finding`, file: "a.ts", severity: "low" }] }),
-            outputTokens: 10,
-          };
-        }
-        // structured-findings: every finding holds up.
-        if (label.startsWith("verify:")) {
-          return { ok: true, text: JSON.stringify({ isReal: true, why: "reproduced" }), outputTokens: 10 };
-        }
-        // lib/count-child.js
-        if (label === "scan") {
-          return { ok: true, text: JSON.stringify({ files: ["a.ts", "b.ts"] }), outputTokens: 10 };
-        }
-        // Deliberately invalid: a new schema-bearing example with an unhandled
-        // label fails validation here rather than passing on an empty object.
-        return { ok: true, text: "{}", outputTokens: 10 };
-      }
-
-      // fan-out-audit: drives the fan-out width, so keep it small and stable.
+      // fan-out-audit and count-child consume deterministic line-oriented text.
       if (label === "discover") {
         return { ok: true, text: "src/routes/a.ts\nsrc/routes/b.ts", outputTokens: 10 };
+      }
+      if (label === "scan") {
+        return { ok: true, text: "a.ts\n\nb.ts\n", outputTokens: 10 };
       }
       return { ok: true, text: `ok:${label}`, outputTokens: 10 };
     },
@@ -156,7 +129,6 @@ describe("shipped example workflows", () => {
       "fan-out-audit.js",
       "gated-fix.js",
       "review-panel.js",
-      "structured-findings.js",
     ]);
     expect(childFiles).toEqual(["count-child.js"]);
   });
@@ -210,13 +182,16 @@ describe("shipped example workflows", () => {
       expect(result.value).toEqual(["ok:verify:src/routes/a.ts", "ok:verify:src/routes/b.ts"]);
     });
 
-    it("structured-findings returns validated objects, not prose", async () => {
+    it("count-child deterministically counts non-empty text lines", async () => {
       const { host } = stubHost();
-      const result = await runExample("structured-findings.js", host);
+      const result = await runWorkflow({
+        script: readExample(LIB_DIR, "count-child.js"),
+        host,
+        args: { root: "src/" },
+      });
 
-      // 2 dimensions x (1 review + 1 finding verified).
-      expect(result.agentCount).toBe(4);
-      expect(result.value).toMatchObject({ confirmed: 2 });
+      expect(result.error).toBeUndefined();
+      expect(result.value).toBe(2);
     });
 
     it("review-panel synthesizes once, after every lens", async () => {
@@ -236,7 +211,7 @@ describe("shipped example workflows", () => {
 
       // The child's agent counts toward the parent run — they share the counter.
       expect(result.agentCount).toBe(2);
-      expect(result.value).toMatchObject({ ok: true, count: 2 });
+      expect(result.value).toEqual({ ok: true, count: 2, summary: "ok:summarize" });
     });
 
     it("gated-fix passes straight through when the gate is happy", async () => {

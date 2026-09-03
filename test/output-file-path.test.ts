@@ -11,7 +11,7 @@
 // intermittently in the full run). Redirecting `tmpdir()` gives each run its own
 // root and removes the shared state entirely.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir as realTmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +23,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, tmpdir: () => fakeTmp.dir || actual.tmpdir() };
 });
 
-import { createOutputFilePath } from "../src/output-file.js";
+import { createOutputFilePath, encodeCwd } from "../src/output-file.js";
 
 const UID = process.getuid?.() ?? 0;
 const AGENT = "agent-xyz";
@@ -44,10 +44,37 @@ describe("createOutputFilePath", () => {
     fakeTmp.dir = "";
   });
 
-  it("builds the documented layout: <root>/<encoded-cwd>/<session>/tasks/<agent>.output", () => {
+  it("builds the documented hashed project layout", () => {
+    const encodedCwd = encodeCwd("/home/user/project");
     const path = createOutputFilePath("/home/user/project", AGENT, SESSION);
-    expect(path).toBe(join(root, "home-user-project", SESSION, "tasks", `${AGENT}.output`));
+
+    expect(path).toBe(join(root, encodedCwd, SESSION, "tasks", `${AGENT}.output`));
+    expect(encodedCwd).toContain("home-user-project-");
+    expect(encodedCwd).toMatch(/-[0-9a-f]{64}$/);
   });
+
+  it.each(["../escape", "a/b", "..", `a${"x".repeat(128)}`, "bad\u0000id"]) (
+    "rejects unsafe session ids: %s",
+    (sessionId) => {
+      expect(() => createOutputFilePath("/home/user/project", AGENT, sessionId)).toThrow("invalid session id");
+    },
+  );
+
+  it("rejects unsafe agent ids before constructing an output path", () => {
+    expect(() => createOutputFilePath("/home/user/project", "../escape", SESSION))
+      .toThrow("invalid agent id");
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlinked session root", () => {
+    const target = mkdtempSync(join(realTmpdir(), "pi-outpath-target-"));
+    symlinkSync(target, root, "dir");
+
+    expect(() => createOutputFilePath("/home/user/project", AGENT, SESSION))
+      .toThrow("invalid session root");
+    rmSync(target, { recursive: true, force: true });
+  });
+
+
 
   it("creates the directory chain so the first write cannot fail", () => {
     const path = createOutputFilePath("/home/user/project", AGENT, SESSION);
@@ -55,12 +82,15 @@ describe("createOutputFilePath", () => {
     expect(statSync(join(path, "..")).isDirectory()).toBe(true);
   });
 
-  it("keeps distinct cwds in separate subdirectories under the shared root", () => {
-    const a = createOutputFilePath("/home/user/project", AGENT, SESSION);
-    const b = createOutputFilePath("/home/user/other", "agent-2", SESSION);
-    expect(a).toContain("home-user-project");
-    expect(b).toContain("home-user-other");
-    expect(a).not.toBe(b);
+  it("keeps stable and distinct cwd namespaces under the shared root", () => {
+    const first = createOutputFilePath("/tmp/a-b/c", AGENT, SESSION);
+    const repeated = createOutputFilePath("/tmp/a-b/c", AGENT, SESSION);
+    const formerlyColliding = createOutputFilePath("/tmp/a/b-c", AGENT, SESSION);
+
+    expect(first).toBe(repeated);
+    expect(first).not.toBe(formerlyColliding);
+    expect(first).toContain(encodeCwd("/tmp/a-b/c"));
+    expect(formerlyColliding).toContain(encodeCwd("/tmp/a/b-c"));
   });
 
   it.skipIf(process.platform === "win32")("creates the root owner-only", () => {

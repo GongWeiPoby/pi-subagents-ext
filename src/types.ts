@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { TaskExecutionRef } from "./tasks/types.js";
 import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -56,7 +57,7 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
   persistSession?: boolean;
-  /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
+  /** Write the subagent's .output transcript and optional result body. Defaults to true. */
   outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
@@ -91,6 +92,9 @@ export interface AgentConfig {
 }
 
 export type JoinMode = 'async' | 'group' | 'smart';
+
+/** Internal persistence state for one immutable Agent attempt result. */
+export type ResultArtifactStatus = "pending" | "complete" | "metadata-only" | "failed" | "skipped";
 
 /**
  * Display mode for the persistent above-editor agent widget.
@@ -138,6 +142,14 @@ export interface AgentTombstone {
   handle: string;
   alias?: string;
   id: string;
+  /** Last immutable attempt identity, used as lineage when this session is reopened. */
+  artifactId: string;
+  /**
+   * Body/transcript privacy captured by the first live record. Optional only for
+   * tombstones created by an older runtime, which resolve the current policy
+   * once when reopened.
+   */
+  resultBodyEnabled?: boolean;
   type: SubagentType;
   description: string;
   /** Always set — a record with no session file is never tombstoned. */
@@ -155,6 +167,24 @@ export type MentionResolution =
 
 export interface AgentRecord {
   id: string;
+  /** Immutable result-attempt identity. A resume replaces it with a new ID. */
+  artifactId: string;
+  /**
+   * Body/transcript privacy captured at the first spawn and reused by every
+   * resume. Optional only for records created by an older runtime; the manager
+   * fills it once from historical attempt state or the current configuration.
+   */
+  resultBodyEnabled?: boolean;
+  /** Previous attempt when this invocation is a resume or identifiable task retry. */
+  sourceAttemptId?: string;
+  /** Absolute internal manifest path, intentionally omitted from user-facing results. */
+  resultArtifactPath?: string;
+  /** Absolute internal Markdown body path, when privacy policy allowed a body. */
+  resultBodyPath?: string;
+  /** Best-effort persistence outcome; never determines the Agent's terminal status. */
+  artifactStatus: ResultArtifactStatus;
+  /** Sanitized artifact writer failure, separate from the Agent's own error. */
+  artifactError?: string;
   type: SubagentType;
   /**
    * Typeable name for the `@handle message` prompt mention, derived from the
@@ -175,6 +205,12 @@ export interface AgentRecord {
   result?: string;
   error?: string;
   toolUses: number;
+  /**
+   * Number of child session `turn_end` events completed during the current
+   * invocation. Runtime-created records initialize it to 0; optional for
+   * external record-shaped adapters compiled against older releases.
+   */
+  turnCount?: number;
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;
@@ -240,19 +276,10 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Structured Todo execution owned by this top-level agent, when TaskExecute spawned it. */
+  taskExecutionRef?: TaskExecutionRef;
   /** Nesting depth: top-level subagent = 1. */
   depth?: number;
-  /**
-   * The validated `StructuredOutput` payload, as canonical JSON.
-   *
-   * Set only when the spawn asked for a schema. Separate from `result` because
-   * `result` is prose for a reader — previewed in the widget, written to the
-   * transcript, and appended to with the worktree branch note — and JSON that
-   * has been appended to no longer parses.
-   */
-  structuredJson?: string;
-  /** Whether the child needed the extra structured-output prompt. */
-  structuredRetried?: boolean;
   /** Parent agent ID for ownership-scoped nested controls. */
   parentAgentId?: string;
   /**

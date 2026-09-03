@@ -14,8 +14,14 @@
  */
 
 import { Worker } from "node:worker_threads";
+import {
+  createWorkflowChildAttempt,
+  isSafeWorkflowReference,
+  snapshotWorkflowChildAttempt,
+  type WorkflowChildAttempt,
+  type WorkflowChildAttemptUsage,
+} from "./attempt.js";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
-import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
 import { extractMeta, type WorkflowMeta } from "./meta.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "./progress.js";
 import { WORKER_SOURCE } from "./worker-source.js";
@@ -40,6 +46,9 @@ export class WorkflowRuntimeError extends Error {}
 /** Default concurrent agents per workflow run. */
 export const WORKFLOW_DEFAULT_CONCURRENCY = 2;
 
+/** Maximum time a killed run waits for already accepted child handlers to settle. */
+export const WORKFLOW_CHILD_SETTLE_TIMEOUT_MS = 250;
+
 /**
  * Concurrent agents allowed by default.
  *
@@ -56,6 +65,8 @@ export interface WorkflowSpawnRequest {
   agentId: string;
   /** Position in the run, and the progress entry's stable identity. */
   index: number;
+  /** Previous immutable attempt when the runtime is replacing this child after a retry. */
+  sourceAttemptId?: string;
   prompt: string;
   label: string;
   agentType: string;
@@ -99,14 +110,14 @@ export interface WorkflowSpawnRequest {
     requestedThinking?: string;
     requestedModel?: string;
   }): void;
-  /**
-   * Compiled from the script's `agent({ schema })`.
-   *
-   * The host must give the child a `StructuredOutput` tool built from it and
-   * return the validated payload as JSON text. Compiled rather than raw so the
-   * runtime can re-check the answer without re-parsing the schema per call.
-   */
-  schema?: CompiledSchema;
+  /** Called when the child session exists and its model request can begin. */
+  onSessionReady?(): void;
+  /** Called after each child `turn_end`, with this invocation's cumulative count. */
+  onTurnEnd?(turnCount: number): void;
+  /** Called when a child tool starts or ends. */
+  onToolActivity?(activity: { type: "start" | "end"; toolName: string }): void;
+  /** Called with assistant text deltas and the current complete response text. */
+  onTextDelta?(delta: string, fullText: string): void;
   phaseIndex?: number;
   phaseTitle?: string;
   /**
@@ -124,23 +135,37 @@ export interface WorkflowSpawnRequest {
 
 export interface WorkflowSpawnResult {
   ok: boolean;
+  /** Safe manager/result identities. Paths and artifact bodies never cross this boundary. */
+  recordId?: string;
+  artifactId?: string;
+  sourceAttemptId?: string;
+  /** Effective configuration captured at the physical-attempt boundary. */
+  model?: string;
+  modelId?: string;
+  thinking?: string;
+  /** Usage from this physical invocation only. */
+  usage?: WorkflowChildAttemptUsage;
+  /** The agent was hard-aborted rather than returning an ordinary failure. */
+  killed?: boolean;
   /** The agent's answer. Present when `ok`. */
   text?: string;
   /** Why it failed. Present when not `ok`. */
   error?: string;
   /** The user dismissed it rather than it failing; renders as skipped. */
   skipped?: boolean;
+  /** Display-token total for this physical invocation (input + output + cache write). */
   tokens?: number;
   /**
-   * Output tokens only, for the script's `budget.spent()`.
+   * Output tokens from this physical invocation, for the script's `budget.spent()`.
    *
-   * Separate from {@link tokens}, which is the lifetime total. Claude Code's
-   * budget counts output, and a fan-out's re-sent input would swamp it.
+   * Separate from {@link tokens}, which includes this attempt's input and cache
+   * writes. Claude Code's budget counts output, and a fan-out's re-sent input
+   * would swamp it.
    */
   outputTokens?: number;
-  /** Whether the child needed an extra prompt to produce its structured answer. */
-  structuredRetried?: boolean;
   toolCalls?: number;
+  /** Completed child `turn_end` events for this invocation. */
+  turnCount?: number;
   /**
    * Where the child actually ran.
    *
@@ -207,6 +232,10 @@ export interface WorkflowHost {
      * the row above it shows the one that ran.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
+    onSessionReady?: WorkflowSpawnRequest["onSessionReady"],
+    onTurnEnd?: WorkflowSpawnRequest["onTurnEnd"],
+    onToolActivity?: WorkflowSpawnRequest["onToolActivity"],
+    onTextDelta?: WorkflowSpawnRequest["onTextDelta"],
   ): Promise<WorkflowSpawnResult>;
   /**
    * Run a `gate` command and report whether it passed.
@@ -263,9 +292,10 @@ export interface WorkflowControl {
    * re-run, so the script's `agent()` promise is still the one waiting and it
    * gets the new answer.
    *
-   * Only while it is running — that is the whole window. Once the call has
-   * settled its value is already the script's, and re-running would produce a
-   * result with nowhere to go.
+   * Only while it is running and the host has exposed an abortable record — a
+   * startup-pending child cannot be stopped safely, so retry is rejected. Once
+   * the call has settled its value is already the script's, and re-running
+   * would produce a result with nowhere to go.
    */
   retry(index: number): boolean;
 }
@@ -276,6 +306,8 @@ export interface RunWorkflowOptions {
   args?: unknown;
   host: WorkflowHost;
   signal?: AbortSignal;
+  /** Fired with a complete, detached snapshot whenever one physical child attempt changes. */
+  onAttempt?(attempt: WorkflowChildAttempt): void;
   /** Fired per batch, not per entry — see the worker's progress batching. */
   onProgress?(entries: readonly WorkflowEntry[]): void;
   concurrency?: number;
@@ -324,6 +356,10 @@ export interface WorkflowRunResult {
   agentCount: number;
   /** How many of those came back from the journal instead of being spawned. */
   replayedCount: number;
+  /** Final snapshots of every physical child attempt, including replaced retries. */
+  attempts?: WorkflowChildAttempt[];
+  /** True when a killed run could not drain all accepted child settlements in time. */
+  evidenceIncomplete?: boolean;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -444,8 +480,6 @@ interface AgentCallPayload {
   resume?: string;
   /** Reasoning effort, already validated against pi's thinking levels worker-side. */
   effort?: string;
-  /** Raw JSON Schema from `agent({ schema })`, compiled before anything spawns. */
-  schema?: unknown;
 }
 
 type WorkerMessage =
@@ -457,12 +491,33 @@ type WorkerMessage =
 /** Everything below 0x20 except tab, newline and carriage return, plus DEL. */
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 
-const preview = (text: string) =>
-  text.length <= PREVIEW_LENGTH ? text : `${text.slice(0, PREVIEW_LENGTH - 1)}…`;
+const PROGRESS_UNSAFE = /[\u0000-\u0008\u000B\u000C\u000D\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
+const escapeProgressCharacter = (character: string) =>
+  `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+const safeProgressText = (text: string) => text.replace(PROGRESS_UNSAFE, escapeProgressCharacter);
+const safeProgressLine = (text: string) => safeProgressText(text).replace(/\s+/g, " ").trim();
+
+const preview = (text: string) => {
+  const safe = safeProgressText(text);
+  return safe.length <= PREVIEW_LENGTH ? safe : `${safe.slice(0, PREVIEW_LENGTH - 1)}…`;
+};
+
+/** Live output is a compact, terminal-safe tail rather than an unbounded transcript. */
+const liveOutputPreview = (text: string) => {
+  const safe = text
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return safe.length <= PREVIEW_LENGTH ? safe : `…${safe.slice(-(PREVIEW_LENGTH - 1))}`;
+};
+
+/** Maximum cadence for text-delta progress entries. One-second snapshots keep the append-only log bounded. */
+const OUTPUT_PROGRESS_THROTTLE_MS = 1_000;
 
 /** First line of the prompt, trimmed — the fallback display name for an agent. */
 function derivedLabel(prompt: string): string {
-  const line = prompt.split("\n", 1)[0].trim();
+  const line = safeProgressLine(prompt.split("\n", 1)[0]);
   return line.length <= 60 ? line || "agent" : `${line.slice(0, 59)}…`;
 }
 
@@ -495,35 +550,6 @@ interface CompletedChild {
  * `result.gate`, and this then shapes that outcome rather than running it
  * again.
  */
-/**
- * Hold a schema'd result to its schema, host-side.
- *
- * The child's own tool already validated whatever it passed, so this normally
- * agrees. It exists for the cases where nothing did: a host that ignores
- * `schema` entirely, a replayed journal entry from before the schema changed,
- * or a payload that reached us some other way. The script asked for a shape;
- * exactly one place should be able to promise it.
- */
-function applySchema(result: WorkflowSpawnResult, compiled: CompiledSchema): WorkflowSpawnResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.text ?? "");
-  } catch {
-    return {
-      ...result,
-      ok: false,
-      error: "The agent did not return structured output: its answer was not JSON.",
-    };
-  }
-  const verdict = compiled.check(parsed);
-  if (verdict === true) return result;
-  return {
-    ...result,
-    ok: false,
-    error: `The agent's answer did not match the requested schema: ${verdict}`,
-  };
-}
-
 async function applyGate(
   result: WorkflowSpawnResult,
   command: string,
@@ -595,6 +621,29 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   const semaphore = new Semaphore(options.concurrency ?? workflowConcurrency());
 
   const progress: WorkflowEntry[] = [];
+  const attempts: WorkflowChildAttempt[] = [];
+  const emitAttempt = (attempt: WorkflowChildAttempt): void => {
+    const snapshot = snapshotWorkflowChildAttempt(attempt);
+    const existing = attempts.findIndex(candidate =>
+      candidate.logicalChildIndex === snapshot.logicalChildIndex
+      && candidate.logicalChildId === snapshot.logicalChildId
+      && candidate.physicalAttempt === snapshot.physicalAttempt,
+    );
+    if (existing === -1) attempts.push(snapshot);
+    else attempts[existing] = snapshot;
+    options.onAttempt?.(snapshotWorkflowChildAttempt(snapshot));
+  };
+  const safeRef = (value: string | undefined): string | undefined =>
+    value !== undefined && isSafeWorkflowReference(value) ? value : undefined;
+  const safeAttemptMetadata = (result: WorkflowSpawnResult): Partial<WorkflowChildAttempt> => ({
+    ...(safeRef(result.recordId) !== undefined ? { recordId: safeRef(result.recordId) } : {}),
+    ...(safeRef(result.artifactId) !== undefined ? { artifactId: safeRef(result.artifactId) } : {}),
+    ...(safeRef(result.sourceAttemptId) !== undefined ? { sourceAttemptId: safeRef(result.sourceAttemptId) } : {}),
+    ...(result.model !== undefined ? { model: result.model } : {}),
+    ...(result.modelId !== undefined ? { modelId: result.modelId } : {}),
+    ...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+    ...(result.usage !== undefined ? { usage: result.usage } : {}),
+  });
   const inflight = new Set<string>();
   /** Label → the child that ran under it, last one wins. The `resume` handle. */
   const completedByLabel = new Map<string, CompletedChild>();
@@ -608,6 +657,29 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
    * realm, which §2.4 rules out, and reading stack traces, which is brittle.
    */
   const openLaunches = new Map<number, string>();
+  const childSettlements = new Set<Promise<void>>();
+  const trackChildSettlement = (settlement: Promise<void>): void => {
+    childSettlements.add(settlement);
+    void settlement.then(
+      () => childSettlements.delete(settlement),
+      () => childSettlements.delete(settlement),
+    );
+  };
+  const drainChildSettlements = async (timeoutMs: number): Promise<boolean> => {
+    const pending = [...childSettlements];
+    if (pending.length === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    const drained = await Promise.race([
+      Promise.allSettled(pending).then(() => true),
+      timeout,
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    return drained;
+  };
   let agentCount = 0;
   let aborted = false;
   let settled = false;
@@ -638,11 +710,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
    *
    * The window in which skip and retry mean anything: before the entry appears
    * there is nothing to act on, and after it is gone the script already has its
-   * value. `started` is what separates the two — a retry needs a child to stop.
+   * value. `started` is what separates the two — a retry also needs the host's
+   * manager record so it can stop the physical child before replacing it.
    */
   interface LiveAgent {
     agentId: string;
     started: boolean;
+    /** The host has supplied the manager record needed for a physical abort. */
+    abortable: boolean;
+    /** Physical attempt whose callbacks are currently allowed to mutate this live entry. */
+    attempt?: number;
     intent?: "skip" | "retry";
     /** Wakes it out of a pause hold, so a skip does not wait for a resume. */
     wake?: () => void;
@@ -700,7 +777,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     },
     retry: index => {
       const live = liveAgents.get(index);
-      if (live === undefined || !live.started || live.intent !== undefined) return false;
+      // A startup that has not reported its manager record cannot be aborted:
+      // calling the host here would leave the old physical child running while
+      // this intent could otherwise start a second one.
+      if (live === undefined || !live.started || !live.abortable || live.intent !== undefined) return false;
       live.intent = "retry";
       host.abortAgent(live.agentId);
       return true;
@@ -746,10 +826,20 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       worker.postMessage({ type: "response", callId, ok, value, error, fatal, spent: spentOutputTokens });
     };
 
-    const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount">) => {
+    const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount" | "attempts">) => {
       if (settled) return;
       settled = true;
       options.signal?.removeEventListener("abort", onAbort);
+      const finishedAt = Date.now();
+      for (const attempt of attempts) {
+        if (attempt.status !== "queued" && attempt.status !== "running") continue;
+        emitAttempt({
+          ...attempt,
+          status: "killed",
+          completedAt: finishedAt,
+          error: result.error ?? "Workflow stopped before the child settled.",
+        });
+      }
       // Symmetric with `semaphore.drain()` below: everything parked is woken so
       // it observes the settle and unwinds. Nothing depends on it — the run's
       // promise resolves either way — it just does not leave live-agent
@@ -758,10 +848,26 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       for (const agentId of inflight) host.abortAgent(agentId);
       inflight.clear();
       semaphore.drain();
-      // Resolve only once the thread is actually down, so a caller that awaits
-      // runWorkflow() is guaranteed not to be leaking one.
-      const settle = () => resolve({ ...result, meta, progress, agentCount, replayedCount });
-      void worker.terminate().then(settle, settle);
+      const settle = async () => {
+        // Resolve only once the thread is actually down, so a caller that awaits
+        // runWorkflow() is guaranteed not to be leaking one. A killed run also
+        // gives already accepted child handlers a short, bounded chance to
+        // publish refs and usage before its final snapshot is returned.
+        await worker.terminate().catch(() => undefined);
+        const evidenceIncomplete = result.status === "killed"
+          ? !(await drainChildSettlements(WORKFLOW_CHILD_SETTLE_TIMEOUT_MS))
+          : false;
+        resolve({
+          ...result,
+          meta,
+          progress,
+          agentCount,
+          replayedCount,
+          attempts: attempts.map(snapshotWorkflowChildAttempt),
+          ...(evidenceIncomplete ? { evidenceIncomplete: true } : {}),
+        });
+      };
+      void settle();
     };
 
     function onAbort() {
@@ -825,20 +931,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         }
       }
 
-      // Compiled before anything is scheduled. A schema the runtime cannot use
-      // is a script bug, so it is fatal like a typo'd resume label — folding it
-      // into a null would surface as an agent that mysteriously returned
-      // nothing, and it costs no model call to say so here.
-      let compiledSchema: CompiledSchema | undefined;
-      if (payload.schema !== undefined) {
-        const compilation = compileJsonSchema(payload.schema);
-        if (!compilation.ok) {
-          respond(callId, false, undefined, compilation.message, true);
-          return;
-        }
-        compiledSchema = compilation.compiled;
-      }
-
       if (agentCount >= agentCap) {
         // Fatal, so parallel()/pipeline() rethrow instead of folding it into a
         // null. A cap that silently drops work is worse than no cap.
@@ -870,31 +962,25 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         ...(payload.phaseTitle !== undefined ? { phaseTitle: payload.phaseTitle } : {}),
       };
 
-      const queuedAt = Date.now();
+      let queuedAt = Date.now();
+      let attempt = 1;
+      const logicalChildId = `workflow-child-${index}`;
+      emitAttempt(createWorkflowChildAttempt({
+        logicalChildIndex: index,
+        logicalChildId,
+        physicalAttempt: 1,
+        status: "queued",
+        invocation: resumed === undefined ? "spawn" : "resume",
+        queuedAt,
+      }));
       emit([{ ...base, queuedAt }]);
 
       // Replay before the semaphore, not after: a cached answer is not model
       // running, so it must not hold a concurrency slot that a live agent
       // could use. The row still appears in the tree — the run reads as the
       // same shape it had the first time, just faster.
-      // The payload's `schema` is the raw object; the key wants it serialized,
-      // so the spread is narrowed rather than passed through.
-      const keyInput: JournalKeyInput = {
-        ...payload,
-        schema: payload.schema !== undefined ? JSON.stringify(payload.schema) : undefined,
-      };
-      let replayed = replayAt(index, journalKey(keyInput));
-      // A replayed answer still has to satisfy the schema. The key covers a
-      // schema that *changed*, but not a journal that was hand-edited, and not
-      // the empty text a torn entry leaves behind — either would hand the
-      // script a null from an entry the journal claims succeeded.
-      if (replayed !== undefined && compiledSchema !== undefined) {
-        const recheck = applySchema({ ok: true, text: replayed.text ?? "" }, compiledSchema);
-        if (!recheck.ok) {
-          prefixIntact = false;
-          replayed = undefined;
-        }
-      }
+      const keyInput: JournalKeyInput = payload;
+      const replayed = replayAt(index, journalKey(keyInput));
       if (replayed !== undefined) {
         replayedCount++;
         const replayedText = replayed.text ?? "";
@@ -914,6 +1000,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             resultPreview: preview(replayedText),
           },
         ]);
+        emitAttempt({
+          ...attempts.find(candidate => candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt)!,
+          status: "replayed",
+          invocation: "replay",
+          queuedAt,
+          startedAt: at,
+          completedAt: at,
+          cached: true,
+          usage: { turns: 0, toolCalls: 0, tokens: { input: 0, output: 0, cacheWrite: 0 } },
+        });
         openLaunches.delete(callId);
         // Re-recorded so this run's journal is complete on its own terms: a
         // resume of a resume must not have to walk back through a chain of
@@ -929,6 +1025,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       /** A skip the user asked for, before the child ever started. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
         recordJournal?.({ index, key, ok: false, ...resumeMark });
+        emitAttempt({
+          ...attempts.find(candidate => candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt)!,
+          status: "skipped",
+          completedAt: Date.now(),
+          skipped: true,
+          error: "Skipped by user.",
+        });
         emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
         // the script's `.filter(Boolean)` was already written to survive.
@@ -937,14 +1040,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
       // Registered for exactly as long as the call is unanswered, which is the
       // window in which skip and retry mean anything.
-      const live: LiveAgent = { agentId, started: false };
+      const live: LiveAgent = { agentId, started: false, abortable: false };
       liveAgents.set(index, live);
       // Read through a call, not off the field: `intent` is set from outside
       // this function while it is suspended at an await, so control-flow
       // narrowing across the awaits would be reasoning about a value that has
       // since changed.
       const intent = (): LiveAgent["intent"] => live.intent;
-      let attempt = 1;
       try {
         for (;;) {
           // Held before the slot, not after: a paused run must not sit on
@@ -982,6 +1084,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             attempt > 1 ? { attempt, lastAttemptReason: "user-retry" as const } : {};
 
           const startedAt = Date.now();
+          const currentAttempt = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          );
+          if (currentAttempt === undefined) throw new Error("Workflow child attempt is missing.");
+          emitAttempt({ ...currentAttempt, status: "running", startedAt });
+          delete base.turnCount;
+          delete base.outputPreview;
+          base.activity = "starting";
           emit([{ ...base, queuedAt, startedAt, ...attemptMark }]);
 
           // Mutates `base` rather than emitting a standalone patch: every later
@@ -989,6 +1099,12 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // without knowing they were ever corrected. Re-emitting under the
           // same `index` is what the append-only, last-write-wins progress log
           // is for — the row updates in place while the agent is still running.
+          const physicalAttempt = attempt;
+          const onSessionReady = () => {
+            base.activity = "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
           const onResolved = (info: {
             recordId?: string;
             modelName?: string;
@@ -997,12 +1113,28 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             requestedThinking?: string;
             requestedModel?: string;
           }) => {
+            // A late callback from an older physical attempt must not make a
+            // newer startup look abortable.
+            if (live.attempt !== physicalAttempt) return;
+            if (info.recordId !== undefined) live.abortable = true;
             if (info.recordId !== undefined) base.recordId = info.recordId;
-            if (info.modelName !== undefined) base.model = info.modelName;
-            if (info.modelId !== undefined) base.modelId = info.modelId;
-            if (info.thinking !== undefined) base.thinking = info.thinking;
-            if (info.requestedThinking !== undefined) base.requestedThinking = info.requestedThinking;
-            if (info.requestedModel !== undefined) base.requestedModel = info.requestedModel;
+            if (info.modelName !== undefined) base.model = safeProgressLine(info.modelName);
+            if (info.modelId !== undefined) base.modelId = safeProgressLine(info.modelId);
+            if (info.thinking !== undefined) base.thinking = safeProgressLine(info.thinking);
+            if (info.requestedThinking !== undefined) base.requestedThinking = safeProgressLine(info.requestedThinking);
+            if (info.requestedModel !== undefined) base.requestedModel = safeProgressLine(info.requestedModel);
+            const liveAttempt = attempts.find(candidate =>
+              candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+            );
+            if (liveAttempt !== undefined) {
+              emitAttempt({
+                ...liveAttempt,
+                ...(safeRef(info.recordId) !== undefined ? { recordId: safeRef(info.recordId) } : {}),
+                ...(info.modelName !== undefined ? { model: info.modelName } : {}),
+                ...(info.modelId !== undefined ? { modelId: info.modelId } : {}),
+                ...(info.thinking !== undefined ? { thinking: info.thinking } : {}),
+              });
+            }
             // `base.state` is still "start", so emitting after the row reached a
             // terminal state would revert it to running under last-write-wins.
             // Not reachable from this repo's host, which reports during startup
@@ -1011,23 +1143,96 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             if (!inflight.has(agentId)) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
+          let latestTurnCount: number | undefined;
+          const onTurnEnd = (turnCount: number) => {
+            latestTurnCount = turnCount;
+            base.turnCount = turnCount;
+            base.activity = "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
+          const onToolActivity = (activity: { type: "start" | "end"; toolName: string }) => {
+            base.activity = activity.type === "start"
+              ? `tool: ${safeProgressLine(activity.toolName)}`
+              : "waiting for model";
+            if (!inflight.has(agentId)) return;
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
+          let latestOutputPreview: string | undefined;
+          let emittedOutputPreview: string | undefined;
+          let outputPreviewSource = "";
+          let previousFullTextLength = 0;
+          let outputTimer: ReturnType<typeof setTimeout> | undefined;
+          let lastOutputEmitAt = 0;
+          const emitOutputProgress = () => {
+            if (latestOutputPreview === undefined || latestOutputPreview === emittedOutputPreview) return;
+            if (!inflight.has(agentId)) return;
+            base.outputPreview = latestOutputPreview;
+            emittedOutputPreview = latestOutputPreview;
+            lastOutputEmitAt = Date.now();
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: lastOutputEmitAt }]);
+          };
+          const onTextDelta = (delta: string, fullText: string) => {
+            // Process only a bounded raw tail. Re-sanitizing the complete
+            // accumulated response on every token would become quadratic on a
+            // long-running writer, exactly where live progress matters most.
+            if (fullText.length < previousFullTextLength) outputPreviewSource = delta;
+            else outputPreviewSource += delta;
+            previousFullTextLength = fullText.length;
+            outputPreviewSource = outputPreviewSource.slice(-(PREVIEW_LENGTH * 4));
+            latestOutputPreview = liveOutputPreview(outputPreviewSource);
+            base.activity = "responding";
+            const remaining = OUTPUT_PROGRESS_THROTTLE_MS - (Date.now() - lastOutputEmitAt);
+            if (remaining <= 0) {
+              emitOutputProgress();
+              return;
+            }
+            if (outputTimer !== undefined) return;
+            outputTimer = setTimeout(() => {
+              outputTimer = undefined;
+              emitOutputProgress();
+            }, remaining);
+            outputTimer.unref?.();
+          };
+          const flushOutputProgress = () => {
+            if (outputTimer !== undefined) clearTimeout(outputTimer);
+            outputTimer = undefined;
+            emitOutputProgress();
+          };
+          live.attempt = physicalAttempt;
+          live.abortable = false;
           live.started = true;
           inflight.add(agentId);
 
           let result: WorkflowSpawnResult;
+          const sourceAttemptId = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          )?.sourceAttemptId ?? attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          )?.artifactId;
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
-                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved)
+                ? await resumeAgent(
+                    resumed.agentId,
+                    payload.prompt,
+                    onResolved,
+                    onSessionReady,
+                    onTurnEnd,
+                    onToolActivity,
+                    onTextDelta,
+                  )
                 : await host.spawnAgent({
                     agentId,
                     index,
+                    ...(attempt > 1 && safeRef(sourceAttemptId) !== undefined
+                      ? { sourceAttemptId: safeRef(sourceAttemptId) }
+                      : {}),
                     prompt: payload.prompt,
                     label,
                     agentType,
                     ...(model !== undefined ? { model } : {}),
                     ...(payload.effort !== undefined ? { effort: payload.effort } : {}),
-                    ...(compiledSchema !== undefined ? { schema: compiledSchema } : {}),
                     ...(isolation !== undefined ? { isolation } : {}),
                     ...(payload.phaseIndex !== undefined ? { phaseIndex: payload.phaseIndex } : {}),
                     ...(payload.phaseTitle !== undefined ? { phaseTitle: payload.phaseTitle } : {}),
@@ -1035,6 +1240,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    onSessionReady,
+                    onTurnEnd,
+                    onToolActivity,
+                    onTextDelta,
                   });
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
@@ -1047,16 +1256,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 ...(model !== undefined ? { model } : {}),
                 ...(isolation !== undefined ? { isolation } : {}),
               });
-              // Re-checked here, not just in the child's tool: this is the one
-              // place that decides the script's value matches the schema it
-              // asked for, so a host that ignored `schema` fails loudly instead
-              // of handing the script prose. Before the gate, because a gate
-              // verifies work and there is no work to verify if the shape is
-              // wrong — and the reader should see the schema error, not a gate
-              // error standing in front of it.
-              if (compiledSchema !== undefined && result.ok) {
-                result = applySchema(result, compiledSchema);
-              }
               if (result.ok && payload.gate !== undefined && runGate !== undefined) {
                 result = await applyGate(result, payload.gate, agentId, runGate);
               }
@@ -1064,29 +1263,84 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           } catch (error) {
             result = { ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
+            flushOutputProgress();
             inflight.delete(agentId);
             live.started = false;
             semaphore.release();
           }
 
-          if (settled) return;
+          const finishedAt = Date.now();
+          const current = attempts.find(candidate =>
+            candidate.logicalChildIndex === index && candidate.physicalAttempt === attempt,
+          );
+          if (current === undefined) return;
+          const metadata = safeAttemptMetadata(result);
+
+          // The workflow may already be terminal while its aborted child is
+          // still unwinding. Keep the terminal classification from finish(),
+          // but retain the attempt-local evidence that only the child can
+          // report at settle. Nothing below this branch may answer the dead
+          // worker, append a journal entry, retry, or change workflow status.
+          if (settled) {
+            if (current.status === "killed") {
+              emitAttempt({
+                ...current,
+                ...metadata,
+                status: "killed",
+                completedAt: finishedAt,
+                ...(result.error !== undefined ? { error: result.error } : {}),
+              });
+            }
+            return;
+          }
+
+          // Every physical invocation pays its output-token budget, including a
+          // stopped attempt that is about to be replaced by retry.
+          spentOutputTokens += result.outputTokens ?? 0;
 
           // The stop that produced this result was ours, so run the same call
-          // again rather than reporting it. The script is still awaiting this
-          // `agent()`, which is the only reason a retry can mean anything.
+          // again rather than reporting it. The old physical attempt remains in
+          // telemetry as killed; the script is still awaiting this `agent()`.
           if (intent() === "retry" && !aborted) {
+            emitAttempt({
+              ...current,
+              ...metadata,
+              status: "killed",
+              completedAt: finishedAt,
+              error: result.error ?? "Replaced by user retry.",
+            });
             live.intent = undefined;
             attempt++;
+            queuedAt = Date.now();
+            emitAttempt({
+              logicalChildIndex: index,
+              logicalChildId,
+              physicalAttempt: attempt,
+              status: "queued",
+              invocation: "retry",
+              sourceAttemptId: safeRef(result.artifactId),
+              queuedAt,
+            });
             emit([{ ...base, queuedAt, attempt, lastAttemptReason: "user-retry" }]);
             continue;
           }
 
-          // Counted before the response is sent, so the very call that spent
-          // them already sees them in `budget.spent()`. Failed and skipped
-          // agents count too — they burned the tokens either way.
-          spentOutputTokens += result.outputTokens ?? 0;
+          const terminalStatus = result.ok
+            ? "completed" as const
+            : result.killed
+              ? "killed" as const
+              : result.skipped
+                ? "skipped" as const
+                : "failed" as const;
+          emitAttempt({
+            ...current,
+            ...metadata,
+            status: terminalStatus,
+            completedAt: finishedAt,
+            ...(result.skipped ? { skipped: true } : {}),
+            ...(result.error !== undefined ? { error: result.error } : {}),
+          });
 
-          const finishedAt = Date.now();
           const common = {
             ...base,
             queuedAt,
@@ -1096,7 +1350,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             durationMs: finishedAt - startedAt,
             ...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
             ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
+            ...(result.turnCount !== undefined
+              ? { turnCount: result.turnCount }
+              : latestTurnCount !== undefined
+                ? { turnCount: latestTurnCount }
+                : {}),
           };
+          delete common.activity;
+          delete common.outputPreview;
 
           if (result.ok) {
             const text = result.text ?? "";
@@ -1184,7 +1445,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             respond(message.callId, false, undefined, `Unknown workflow host method "${message.method}".`, true);
             break;
           }
-          void handleAgent(message.callId, message.payload as AgentCallPayload);
+          trackChildSettlement(handleAgent(message.callId, message.payload as AgentCallPayload));
           break;
         case "complete": {
           // The script is done, so every launch it made should have been

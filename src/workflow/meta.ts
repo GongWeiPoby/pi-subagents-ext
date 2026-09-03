@@ -186,6 +186,12 @@ function fail(message: string): never {
   throw new WorkflowMetaError(message);
 }
 
+const META_UNSAFE_CONTROL = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/;
+
+function assertSafeMetaText(value: string, path: string): void {
+  if (META_UNSAFE_CONTROL.test(value)) fail(`\`${path}\` contains unsafe terminal control characters.`);
+}
+
 function assertPhases(value: unknown): WorkflowPhaseMeta[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) fail("`meta.phases` must be an array of { title, detail?, model? } objects.");
@@ -197,12 +203,15 @@ function assertPhases(value: unknown): WorkflowPhaseMeta[] | undefined {
     if (typeof title !== "string" || title.trim() === "") {
       fail(`\`meta.phases[${index}].title\` must be a non-empty string.`);
     }
+    assertSafeMetaText(title, `meta.phases[${index}].title`);
     if (detail !== undefined && typeof detail !== "string") {
       fail(`\`meta.phases[${index}].detail\` must be a string.`);
     }
+    if (detail !== undefined) assertSafeMetaText(detail, `meta.phases[${index}].detail`);
     if (model !== undefined && typeof model !== "string") {
       fail(`\`meta.phases[${index}].model\` must be a string.`);
     }
+    if (model !== undefined) assertSafeMetaText(model, `meta.phases[${index}].model`);
     return { title, ...(detail !== undefined ? { detail } : {}), ...(model !== undefined ? { model } : {}) };
   });
 }
@@ -274,6 +283,9 @@ export function extractMeta(source: string): MetaExtraction {
   if (raw.whenToUse !== undefined && typeof raw.whenToUse !== "string") {
     fail("`meta.whenToUse` must be a string.");
   }
+  assertSafeMetaText(raw.name, "meta.name");
+  assertSafeMetaText(raw.description, "meta.description");
+  if (raw.whenToUse !== undefined) assertSafeMetaText(raw.whenToUse as string, "meta.whenToUse");
   const phases = assertPhases(raw.phases);
 
   const meta: WorkflowMeta = {

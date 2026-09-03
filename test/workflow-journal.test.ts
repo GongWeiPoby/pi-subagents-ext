@@ -69,6 +69,19 @@ describe("journalKey", () => {
     expect(keys.size).toBe(7);
   });
 
+  it("keeps the schema-free canonical field ordering stable", () => {
+    expect(journalKey({
+      prompt: "audit",
+      label: "one",
+      model: "haiku",
+      agentType: "Explore",
+      effort: "high",
+      isolation: "worktree",
+      gate: "npm test",
+      resume: "previous",
+    })).toBe("53ff28c4fe25809b672910dc7de3c121");
+  });
+
   it("ignores which phase the row is filed under", () => {
     // Re-grouping the progress tree changes no token the agent sees, and must
     // not throw away an hour of recorded results.
@@ -129,6 +142,109 @@ describe("replay", () => {
       { index: 0, key: journalKey({ prompt: "first" }), ok: true, text: "live:first" },
       { index: 1, key: journalKey({ prompt: "second" }), ok: true, text: "live:second" },
     ]);
+  });
+
+  it("replays a passed gate without spawning or running the gate again", async () => {
+    const first = recorder();
+    const gateCalls: string[] = [];
+    const initial = stubHost();
+    const firstHost = {
+      ...initial.host,
+      async runGate(command: string) {
+        gateCalls.push(command);
+        return { ok: true, output: "passed" };
+      },
+    };
+    const body = 'return await agent("first", { gate: "npm test" });';
+
+    await run(body, { host: firstHost, journal: first });
+    expect(first.entries).toEqual([{
+      index: 0,
+      key: journalKey({ prompt: "first", gate: "npm test" }),
+      ok: true,
+      text: "live:first",
+    }]);
+    expect(gateCalls).toEqual(["npm test"]);
+
+    const replay = stubHost();
+    const replayGateCalls: string[] = [];
+    const result = await run(body, {
+      host: {
+        ...replay.host,
+        async runGate(command: string) {
+          replayGateCalls.push(command);
+          return { ok: true, output: "passed" };
+        },
+      },
+      journal: { entries: first.entries },
+    });
+    expect(result.replayedCount).toBe(1);
+    expect(replay.calls).toEqual([]);
+    expect(replayGateCalls).toEqual([]);
+    expect(result.value).toBe("live:first");
+  });
+
+  it("never replays a gate failure", async () => {
+    const first = recorder();
+    const initial = stubHost();
+    await run('return await agent("first", { gate: "npm test" });', {
+      host: {
+        ...initial.host,
+        async runGate() { return { ok: false, output: "failed" }; },
+      },
+      journal: first,
+    });
+    expect(first.entries[0]).toEqual({
+      index: 0,
+      key: journalKey({ prompt: "first", gate: "npm test" }),
+      ok: false,
+    });
+
+    const retry = stubHost(() => ({ ok: true, text: "fixed" }));
+    const gateCalls: string[] = [];
+    const result = await run('return await agent("first", { gate: "npm test" });', {
+      host: {
+        ...retry.host,
+        async runGate(command: string) {
+          gateCalls.push(command);
+          return { ok: true, output: "passed" };
+        },
+      },
+      journal: { entries: first.entries },
+    });
+    expect(result.replayedCount).toBe(0);
+    expect(retry.calls).toHaveLength(1);
+    expect(gateCalls).toEqual(["npm test"]);
+    expect(result.value).toBe("fixed");
+  });
+
+  it("invalidates replay when only the gate command changes", async () => {
+    const first = recorder();
+    const initial = stubHost();
+    await run('return await agent("first", { gate: "npm test" });', {
+      host: {
+        ...initial.host,
+        async runGate() { return { ok: true, output: "passed" }; },
+      },
+      journal: first,
+    });
+
+    const changed = stubHost(() => ({ ok: true, text: "new gate" }));
+    const gateCalls: string[] = [];
+    const result = await run('return await agent("first", { gate: "npm run check" });', {
+      host: {
+        ...changed.host,
+        async runGate(command: string) {
+          gateCalls.push(command);
+          return { ok: true, output: "passed" };
+        },
+      },
+      journal: { entries: first.entries },
+    });
+    expect(result.replayedCount).toBe(0);
+    expect(changed.calls).toHaveLength(1);
+    expect(gateCalls).toEqual(["npm run check"]);
+    expect(result.value).toBe("new gate");
   });
 
   it("replays an identical run without spawning anything", async () => {

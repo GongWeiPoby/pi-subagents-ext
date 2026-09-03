@@ -19,7 +19,26 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  canonicalJson,
+  type ReadWorkflowAggregateArtifactResult,
+  readResultArtifactBody,
+  readWorkflowAggregateArtifactBody,
+  readWorkflowAggregateArtifactManifest,
+} from "../result-artifact.js";
+import { SUBAGENTS_RPC_PROTOCOL_VERSION } from "../subagent-contract.js";
+import type { ResultArtifactStatus } from "../types.js";
+import type { LifetimeUsage } from "../usage.js";
+import type { WorkflowChildAttempt, WorkflowCoverageAggregate } from "../workflow/attempt.js";
 import { AutoClearManager } from "./auto-clear.js";
+import type {
+  TaskExecutionBinding,
+  TaskExecutionClaim,
+  TaskExecutionKind,
+  TaskExecutionRef,
+  TaskExecutionSettle,
+} from "./execution-contract.js";
+import { isTaskExecutionClaim, isTaskExecutionRef } from "./execution-contract.js";
 import { ProcessTracker } from "./process-tracker.js";
 import {
   type CadenceConfig,
@@ -30,10 +49,27 @@ import {
   resetCadenceState,
 } from "./reminder-cadence.js";
 import { resolveTaskGlyphs } from "./task-glyphs.js";
+import {
+  assertTaskOutputSafeId,
+  formatTaskOutputChildren,
+  formatTaskOutputResult,
+  formatTaskOutputSummary,
+  parseTaskWorkflowAggregateMetadata,
+  TASK_OUTPUT_PRIVATE_MARKER,
+  TASK_OUTPUT_RESULT_DEFAULT_LIMIT,
+  TASK_OUTPUT_RESULT_MAX_LIMIT,
+  type TaskOutputAgentSummary,
+  type TaskOutputSummaryContext,
+  type TaskOutputWorkflowSummary,
+} from "./task-output-view.js";
 import { reclaimGlobalSessionTasksDir, sessionTaskFile } from "./task-paths.js";
 import { TaskStore } from "./task-store.js";
 import { loadGlobalTasksConfig, loadTasksConfig } from "./tasks-config.js";
-import type { Task, TaskCascadeConfig } from "./types.js";
+import type {
+  Task,
+  TaskCascadeConfig,
+  TaskStatus,
+} from "./types.js";
 import { openSettingsMenu } from "./ui/settings-menu.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
 
@@ -51,10 +87,19 @@ function textResult(msg: string) {
 }
 
 interface TaskAgentRecord {
+  artifactId?: string;
+  artifactStatus?: ResultArtifactStatus;
   error?: string;
   id: string;
+  invocation?: { modelId?: string; modelName?: string };
+  lifetimeUsage?: LifetimeUsage;
   result?: string;
+  resultArtifactPath?: string;
+  resultBodyEnabled?: boolean;
   status: string;
+  taskExecutionRef?: TaskExecutionRef;
+  toolUses?: number;
+  turnCount?: number;
 }
 
 interface TaskAgentRegistry {
@@ -74,6 +119,7 @@ interface TaskAgentSpawnOptions {
   isBackground: true;
   maxTurns?: number;
   model?: string;
+  taskExecution: TaskExecutionClaim;
 }
 
 function errorMessage(error: unknown): string {
@@ -93,6 +139,33 @@ function normalizeCascadeConfig(value: unknown): TaskCascadeConfig | undefined {
 function eventAgentId(data: unknown): string | undefined {
   if (!data || typeof data !== "object" || !("id" in data)) return undefined;
   return typeof data.id === "string" ? data.id : undefined;
+}
+
+function eventTaskExecutionRef(data: unknown): TaskExecutionRef | undefined {
+  if (!data || typeof data !== "object" || !("taskExecutionRef" in data)) return undefined;
+  return isTaskExecutionRef(data.taskExecutionRef) ? data.taskExecutionRef : undefined;
+}
+
+function taskExecutionRefMatchesClaim(
+  ref: TaskExecutionRef,
+  claim: TaskExecutionClaim,
+  executorId: string,
+): boolean {
+  return ref.executorId === executorId
+    && ref.storeId === claim.storeId
+    && ref.taskId === claim.taskId
+    && ref.taskAttemptId === claim.taskAttemptId
+    && ref.attemptId === claim.attemptId
+    && ref.kind === claim.kind;
+}
+
+function sameTaskExecutionRef(left: TaskExecutionRef, right: TaskExecutionRef): boolean {
+  return left.storeId === right.storeId
+    && left.taskId === right.taskId
+    && left.taskAttemptId === right.taskAttemptId
+    && left.attemptId === right.attemptId
+    && left.kind === right.kind
+    && left.executorId === right.executorId;
 }
 
 /** Task tool names — used to detect task tool usage for reminder suppression. */
@@ -186,6 +259,13 @@ export interface WorkflowTaskOutputSnapshot {
   elapsedMs: number;
   output?: string;
   scriptPath?: string;
+  taskExecutionRef?: TaskExecutionRef;
+  attempts?: readonly WorkflowChildAttempt[];
+  coverage?: WorkflowCoverageAggregate;
+  resultBodyEnabled?: boolean;
+  aggregateArtifactId?: string;
+  aggregateArtifactStatus?: ResultArtifactStatus;
+  evidenceIncomplete?: boolean;
 }
 
 export interface WorkflowTaskOutputAdapter {
@@ -196,10 +276,49 @@ export interface WorkflowTaskOutputAdapter {
     options: { signal?: AbortSignal; timeoutMs: number },
   ): Promise<WorkflowTaskOutputSnapshot | undefined>;
   consume(runId: string): void;
+  /** Abort one controller and resolve only after its run has settled. */
+  stop?(
+    runId: string,
+    outcome?: { status: "completed" | "pending"; error?: string },
+  ): Promise<boolean>;
+}
+
+export interface TaskExecutionCoordinator {
+  claim(
+    taskId: string,
+    kind: TaskExecutionKind,
+    attemptId?: string,
+    taskAttemptId?: string,
+  ): TaskExecutionClaim | undefined;
+  bind(claim: TaskExecutionClaim, executorId: string): TaskExecutionRef | undefined;
+  rollback(claim: TaskExecutionBinding, error?: string): boolean;
+  prepare(ref: TaskExecutionRef, status: "completed" | "pending", error?: string): string | undefined;
+  restore(ref: TaskExecutionRef, token: string): boolean;
+  update(ref: TaskExecutionRef, fields: {
+    status?: TaskStatus | "deleted";
+    subject?: string;
+    description?: string;
+    activeForm?: string;
+    owner?: string;
+    metadata?: Record<string, unknown>;
+    addBlocks?: string[];
+    addBlockedBy?: string[];
+  }): boolean;
+  /** Merge metadata while the owner holds a terminal stop reservation. */
+  updateStop(ref: TaskExecutionRef, fields: {
+    metadata?: Record<string, unknown>;
+  }): boolean;
+  settle(ref: TaskExecutionRef, outcome: TaskExecutionSettle): boolean;
 }
 
 export interface RegisterTasksOptions {
   workflowOutput?: WorkflowTaskOutputAdapter;
+  workflowAggregateReader?: (input: {
+    cwd: string;
+    sessionId: string;
+    workflowId: string;
+    taskBinding?: TaskExecutionRef;
+  }) => ReadWorkflowAggregateArtifactResult;
 }
 
 const WORKFLOW_OUTPUT_UNSAFE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g;
@@ -277,18 +396,84 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   let storeGeneration = 0;
   const tracker = new ProcessTracker();
   const widget = new TaskWidget(store, cfg);
+  const executionHandles = new Map<string, { generation: number; store: TaskStore }>();
+  const stopReservations = new Map<string, {
+    generation: number;
+    store: TaskStore;
+    ref: TaskExecutionRef;
+    token: string;
+  }>();
+
+  function executionHandleKey(binding: TaskExecutionBinding): string {
+    return [binding.storeId, binding.taskId, binding.taskAttemptId, binding.attemptId].join("\u0000");
+  }
+
+  function rememberExecutionStore(binding: TaskExecutionBinding, taskStore = store): void {
+    executionHandles.set(executionHandleKey(binding), { generation: storeGeneration, store: taskStore });
+  }
+
+  function executionHandle(binding: TaskExecutionBinding): { generation: number; store: TaskStore } | undefined {
+    return executionHandles.get(executionHandleKey(binding));
+  }
+
+  function forgetExecutionStore(binding: TaskExecutionBinding): void {
+    executionHandles.delete(executionHandleKey(binding));
+  }
+
+  function forgetStopReservation(ref: TaskExecutionRef): void {
+    const key = executionHandleKey(ref);
+    const reservation = stopReservations.get(key);
+    if (reservation && sameTaskExecutionRef(reservation.ref, ref)) stopReservations.delete(key);
+  }
+
+  function prepareTaskExecution(
+    ref: TaskExecutionRef,
+    status: "completed" | "pending",
+    error?: string,
+  ): string | undefined {
+    const handle = executionHandle(ref);
+    const token = handle?.store.prepareExecutionStop(ref, status, error);
+    if (token !== undefined && handle) {
+      stopReservations.set(executionHandleKey(ref), {
+        generation: handle.generation,
+        store: handle.store,
+        ref: { ...ref },
+        token,
+      });
+    }
+    return token;
+  }
+
+  function restoreTaskExecution(ref: TaskExecutionRef, token: string): boolean {
+    return executionHandle(ref)?.store.restoreExecution(ref, token) ?? false;
+  }
+
+  function updateTaskExecution(
+    ref: TaskExecutionRef,
+    fields: Parameters<TaskStore["finalizeExecutionStop"]>[2],
+    token?: string,
+    retainBinding = false,
+  ): boolean {
+    const handle = executionHandle(ref);
+    const committed = token !== undefined
+      ? handle?.store.finalizeExecutionStop(ref, token, fields, retainBinding).casMatched === true
+      : false;
+    if (committed && !retainBinding) forgetExecutionStore(ref);
+    if (token !== undefined) forgetStopReservation(ref);
+    return committed;
+  }
 
   // ── Subagent integration state ──
   /** Latest ExtensionContext — refreshed on every tool execution so cascade always has a valid one. */
   let latestCtx: ExtensionContext | undefined;
   /** Cascade options captured per launched agent, so overlapping executions do not overwrite each other. */
   const agentCascadeConfigs = new Map<string, TaskCascadeConfig>();
-  /** Maps agent IDs to task IDs for O(1) completion lookup. */
-  const agentTaskMap = new Map<string, string>();
+  /** Maps agent IDs to canonical execution refs for lookup and reattachment. */
+  const agentTaskMap = new Map<string, TaskExecutionRef>();
 
   function detachTaskAgents(taskId: string): void {
-    for (const [agentId, mappedTaskId] of agentTaskMap) {
-      if (mappedTaskId !== taskId) continue;
+    for (const [agentId, ref] of agentTaskMap) {
+      if (ref.taskId !== taskId) continue;
       agentTaskMap.delete(agentId);
       agentCascadeConfigs.delete(agentId);
     }
@@ -324,10 +509,23 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   }
 
   /** Spawn a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
-  function spawnSubagent(type: string, prompt: string, options?: TaskAgentSpawnOptions): Promise<string> {
+  function spawnSubagent(
+    type: string,
+    prompt: string,
+    options: TaskAgentSpawnOptions,
+  ): Promise<{ id: string; taskExecutionRef: TaskExecutionRef }> {
     debug("spawn:call", { type, options: { ...options, prompt: undefined } });
-    return rpcCall<{ id: string }>("subagents:rpc:spawn", { type, prompt, options }, 30_000)
-      .then(d => { debug("spawn:ok", d); return d.id; });
+    return rpcCall<{ id: string; taskExecutionRef?: TaskExecutionRef }>(
+      "subagents:rpc:spawn",
+      { type, prompt, options },
+      30_000,
+    ).then(data => {
+      debug("spawn:ok", data);
+      if (!isTaskExecutionRef(data.taskExecutionRef)) {
+        throw new Error("subagent runtime returned no valid task execution ref");
+      }
+      return { id: data.id, taskExecutionRef: data.taskExecutionRef };
+    });
   }
 
   /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
@@ -335,33 +533,92 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
     return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000);
   }
 
-  async function stopAndDetachTaskAgent(
+  interface PreparedTaskStop {
+    ref: TaskExecutionRef;
+    token: string;
+  }
+
+  async function stopTaskExecutor(
+    task: Task,
+    outcome: { status: "completed" | "pending"; error?: string } = { status: "completed" },
+  ): Promise<PreparedTaskStop | undefined> {
+    if (task.status !== "in_progress" || !isTaskExecutionRef(task.execution)) return undefined;
+    const execution = task.execution;
+    const handle = executionHandle(execution);
+    const token = prepareTaskExecution(execution, outcome.status, outcome.error);
+    if (token === undefined || !handle) return undefined;
+    try {
+      if (execution.kind === "workflow") {
+        const stopped = await options.workflowOutput?.stop?.(execution.executorId, outcome);
+        if (!stopped) throw new Error(`Workflow ${execution.executorId} is not running`);
+      } else {
+        await stopSubagent(execution.executorId);
+      }
+    } catch (error) {
+      const reservation = stopReservations.get(executionHandleKey(execution));
+      const canRestore = reservation !== undefined
+        && reservation.token === token
+        && reservation.store === handle.store
+        && reservation.generation === storeGeneration
+        && reservation.store === store;
+      if (canRestore) restoreTaskExecution(execution, token);
+      forgetStopReservation(execution);
+      throw error;
+    }
+    return { ref: execution, token };
+  }
+
+  async function stopTaskExecution(
     task: Task,
     expectedGeneration = storeGeneration,
-  ): Promise<void> {
-    if (task.status !== "in_progress") return;
-    const agentId = task.metadata.agentId;
-    if (!agentId || agentTaskMap.get(agentId) !== task.id) return;
-    const cascadeConfig = agentCascadeConfigs.get(agentId);
+    outcome: { status: "completed" | "pending"; error?: string } = { status: "completed" },
+  ): Promise<PreparedTaskStop | undefined> {
+    if (task.status !== "in_progress" || !isTaskExecutionRef(task.execution)) return undefined;
+    const execution = task.execution;
+    const mapped = execution.kind === "agent" ? agentTaskMap.get(execution.executorId) : undefined;
+    const cascadeConfig = execution.kind === "agent" ? agentCascadeConfigs.get(execution.executorId) : undefined;
     detachTaskAgents(task.id);
     try {
-      await stopSubagent(agentId);
+      return await stopTaskExecutor(task, outcome);
     } catch (error) {
-      if (expectedGeneration === storeGeneration) {
-        agentTaskMap.set(agentId, task.id);
-        if (cascadeConfig) agentCascadeConfigs.set(agentId, cascadeConfig);
+      if (expectedGeneration === storeGeneration && mapped) {
+        agentTaskMap.set(execution.executorId, mapped);
+        if (cascadeConfig) agentCascadeConfigs.set(execution.executorId, cascadeConfig);
       }
       throw error;
     }
   }
 
+
+  /** Stop and revoke an executor whose binding lost the launch metadata CAS. */
+  async function cleanupFailedLaunch(
+    ref: TaskExecutionRef,
+    taskStore: TaskStore,
+    error: string,
+  ): Promise<void> {
+    try {
+      if (ref.kind === "workflow") await options.workflowOutput?.stop?.(ref.executorId);
+      else await stopSubagent(ref.executorId);
+    } catch {
+      // The launch is already unauthorized; cleanup remains best effort if the
+      // runtime settled or rejected the just-created executor concurrently.
+    } finally {
+      taskStore.rollbackExecution(ref, error);
+      forgetExecutionStore(ref);
+      const mapped = agentTaskMap.get(ref.executorId);
+      if (!mapped || sameTaskExecutionRef(mapped, ref)) {
+        agentTaskMap.delete(ref.executorId);
+        agentCascadeConfigs.delete(ref.executorId);
+      }
+    }
+  }
   /** Resolve a task ID or an exact/unambiguous agent ID prefix to its task. */
   function resolveTaskId(ref: string): string {
     if (store.get(ref)) return ref;
     const matches = [...agentTaskMap]
       .filter(([agentId]) => agentId === ref || agentId.startsWith(ref));
     if (matches.length > 1) throw new Error(`Agent ID prefix is ambiguous: ${ref}`);
-    return matches[0]?.[1] ?? ref;
+    return matches[0]?.[1].taskId ?? ref;
   }
 
   /** Tell subagents its result has been handed to the model, which suppresses the
@@ -376,7 +633,7 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   }
 
   // ── Subagent extension presence & version detection ──
-  const PROTOCOL_VERSION = 2;
+  const PROTOCOL_VERSION = SUBAGENTS_RPC_PROTOCOL_VERSION;
   let subagentsAvailable = false;
   let pendingWarning: string | undefined;
 
@@ -449,25 +706,82 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   // ── Subagent completion listener ──
   // Listens for subagent lifecycle events to update task status and optionally cascade.
 
+  function executionRefForEvent(data: unknown, agentId: string): TaskExecutionRef | undefined {
+    const carriesRef = data !== null && typeof data === "object" && "taskExecutionRef" in data;
+    const mapped = agentTaskMap.get(agentId);
+    if (!carriesRef) {
+      // Canonical executions must prove authority with the immutable ref emitted
+      // by the runtime. The local map is only a lookup/reattachment index; it
+      // must never turn a metadata-free lifecycle event into commit authority.
+      return undefined;
+    }
+    // Once a producer carries the field, it must carry the complete canonical
+    // ref. Never repair a malformed or unauthorized value from local state.
+    const carried = eventTaskExecutionRef(data);
+    if (carried === undefined || carried.executorId !== agentId) return undefined;
+    if (mapped !== undefined && !sameTaskExecutionRef(carried, mapped)) return undefined;
+    return carried;
+  }
+
+  /** Explicit compatibility path for pre-binding metadata-only tasks. */
+  function legacyTaskForEvent(data: unknown, agentId: string): Task | undefined {
+    if (data !== null && typeof data === "object" && "taskExecutionRef" in data) return undefined;
+    if (agentTaskMap.has(agentId)) return undefined;
+    return store.list().find(task =>
+      task.status === "in_progress"
+      && task.execution === undefined
+      && task.metadata.agentId === agentId,
+    );
+  }
+
   // Success → mark task completed, cascade if enabled
   async function handleSubagentCompleted(data: unknown): Promise<void> {
-    const { id, result } = data as { id: string; result?: string };
-    const taskId = agentTaskMap.get(id);
-    if (!taskId) return;
-    agentTaskMap.delete(id);
+    const id = eventAgentId(data);
+    if (!id) return;
+    const ref = executionRefForEvent(data, id);
+    if (!ref) {
+      const legacy = legacyTaskForEvent(data, id);
+      if (!legacy) return;
+      const legacyResult = data && typeof data === "object" && "result" in data && typeof data.result === "string"
+        ? data.result
+        : undefined;
+      store.update(legacy.id, {
+        status: "completed",
+        ...(legacyResult !== undefined ? { metadata: { result: legacyResult } } : {}),
+      });
+      widget.setActiveTask(legacy.id, false);
+      widget.update();
+      return;
+    }
+    const result = data && typeof data === "object" && "result" in data && typeof data.result === "string"
+      ? data.result
+      : undefined;
     const cascadeConfig = agentCascadeConfigs.get(id);
+    agentTaskMap.delete(id);
     agentCascadeConfigs.delete(id);
-    const taskStore = store;
-    const taskGeneration = storeGeneration;
-    const task = taskStore.get(taskId);
-    if (!task) return;
 
-    taskStore.update(task.id, { status: "completed", metadata: { ...task.metadata, result } });
-    widget.setActiveTask(task.id, false);
+    const handle = executionHandle(ref);
+    const taskStore = handle?.store;
+    if (!handle || !taskStore) return;
+    const isCurrentGeneration = taskStore === store && handle.generation === storeGeneration;
+    const task = taskStore.get(ref.taskId);
+    const committed = taskStore.settleExecution(ref, {
+      status: "completed",
+      ...(result !== undefined ? { result } : {}),
+    });
+    if (!task || !committed) {
+      if (!task?.execution
+        || executionHandleKey(task.execution) !== executionHandleKey(ref)) {
+        forgetExecutionStore(ref);
+      }
+      return;
+    }
+    forgetExecutionStore(ref);
+    if (isCurrentGeneration) widget.setActiveTask(task.id, false);
 
     // Auto-cascade: find unblocked dependents with agentType. claimPending keeps
     // concurrent blocker completions or sessions from launching the same task twice.
-    if ((cfg.autoCascade ?? false) && cascadeConfig && latestCtx) {
+    if (isCurrentGeneration && (cfg.autoCascade ?? false) && cascadeConfig && latestCtx) {
       const unblocked = taskStore.list().filter(t =>
         t.status === "pending" &&
         t.metadata?.agentType &&
@@ -475,83 +789,136 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
         t.blockedBy.every(depId => taskStore.get(depId)?.status === "completed")
       );
       for (const next of unblocked) {
-        if (taskGeneration !== storeGeneration) break;
-        const taskAttemptId = randomUUID();
-        const claimed = taskStore.claimPending(next.id, taskAttemptId);
+        if (!isCurrentGeneration || taskStore !== store) break;
+        const claimed = taskStore.claimPending(next.id, {
+          kind: "agent",
+          taskAttemptId: randomUUID(),
+          attemptId: randomUUID(),
+        });
+        const claim = claimed?.execution;
         const agentType = claimed?.metadata.agentType;
-        if (!claimed || !agentType) continue;
+        if (!claimed || !claim || !agentType) continue;
+        rememberExecutionStore(claim, taskStore);
         const prompt = buildTaskPrompt(claimed, cascadeConfig.additionalContext);
         try {
-          const agentId = await spawnSubagent(agentType, prompt, {
+          const spawned = await spawnSubagent(agentType, prompt, {
             description: claimed.subject,
             isBackground: true,
             maxTurns: cascadeConfig.maxTurns,
             ...(cascadeConfig.model ? { model: cascadeConfig.model } : {}),
+            taskExecution: claim,
           });
-          const current = taskStore.get(claimed.id);
-          const stillClaimed = current?.status === "in_progress"
-            && current.metadata.taskAttemptId === taskAttemptId;
-          if (taskGeneration !== storeGeneration || !stillClaimed) {
-            try { await stopSubagent(agentId); } catch { /* already settled or stopped by session teardown */ }
-            if (stillClaimed) {
-              taskStore.update(claimed.id, {
-                status: "pending",
-                metadata: {
-                  ...claimed.metadata,
-                  lastError: "task or session changed before cascaded launch completed",
-                },
-              });
-            }
-            if (taskGeneration !== storeGeneration) break;
+          if (!taskExecutionRefMatchesClaim(spawned.taskExecutionRef, claim, spawned.id)) {
+            try { await stopSubagent(spawned.id); } catch { /* invalid runtime reply; best-effort cleanup */ }
+            taskStore.rollbackExecution(claim, "subagent runtime returned a mismatched task execution ref");
+            forgetExecutionStore(claim);
             continue;
           }
-          agentTaskMap.set(agentId, claimed.id);
-          agentCascadeConfigs.set(agentId, cascadeConfig);
-          taskStore.update(claimed.id, {
-            owner: agentId,
-            metadata: { ...claimed.metadata, agentId, taskCascadeConfig: cascadeConfig },
-          });
-          widget.setActiveTask(claimed.id);
-          await reconcileSettledAgent(agentId);
-        } catch (error) {
-          const current = taskStore.get(claimed.id);
-          if (current?.metadata.taskAttemptId === taskAttemptId) {
-            taskStore.update(claimed.id, {
-              status: "pending",
-              metadata: { ...claimed.metadata, result: null, lastError: errorMessage(error) },
-            });
+          const bound = isCurrentGeneration && taskStore === store
+            ? taskStore.bindExecution(claim, spawned.id)
+            : undefined;
+          if (!bound) {
+            try { await stopSubagent(spawned.id); } catch { /* already settled or stopped by session teardown */ }
+            taskStore.rollbackExecution(claim, "task or session changed before cascaded launch completed");
+            forgetExecutionStore(claim);
+            if (!isCurrentGeneration || taskStore !== store) break;
+            continue;
           }
+          const metadataCommitted = taskStore.updateExecution(bound, {
+            owner: spawned.id,
+            metadata: { agentId: spawned.id, taskCascadeConfig: cascadeConfig },
+          });
+          if (!metadataCommitted) {
+            await cleanupFailedLaunch(
+              bound,
+              taskStore,
+              "task changed before cascaded launch metadata was committed",
+            );
+            if (!isCurrentGeneration || taskStore !== store) break;
+            continue;
+          }
+          agentTaskMap.set(spawned.id, bound);
+          agentCascadeConfigs.set(spawned.id, cascadeConfig);
+          widget.setActiveTask(claimed.id);
+          await reconcileSettledAgent(spawned.id);
+        } catch (error) {
+          taskStore.rollbackExecution(claim, errorMessage(error));
+          forgetExecutionStore(claim);
         }
       }
     }
-    if (taskGeneration === storeGeneration) {
+    if (isCurrentGeneration) {
       autoClear.trackCompletion(task.id, cadence.currentTurn);
       widget.update();
     }
   }
 
-  // Failure → store error, revert to pending, don't cascade (branch stops)
-  // Intentional stop (status === "stopped") → mark completed, preserve partial result
+  // Failure → store error, revert to pending, don't cascade (branch stops).
+  // Intentional stop completes the task and preserves output already available.
   function handleSubagentFailed(data: unknown): void {
-    const { id, error, result, status } = data as { id: string; error?: string; result?: string; status: string };
-    const taskId = agentTaskMap.get(id);
-    if (!taskId) return;
+    const id = eventAgentId(data);
+    if (!id) return;
+    const ref = executionRefForEvent(data, id);
+    if (!ref) {
+      const legacy = legacyTaskForEvent(data, id);
+      if (!legacy) return;
+      const record = data as { error?: unknown; result?: unknown; status?: unknown };
+      const status = typeof record.status === "string" ? record.status : "error";
+      const metadata = status === "stopped"
+        ? { ...(typeof record.result === "string" && record.result !== "" ? { result: record.result } : {}) }
+        : { result: null, lastError: typeof record.error === "string" ? record.error : status };
+      store.update(legacy.id, {
+        status: status === "stopped" ? "completed" : "pending",
+        metadata,
+      });
+      widget.setActiveTask(legacy.id, false);
+      widget.update();
+      return;
+    }
+    const record = data as { error?: unknown; result?: unknown; status?: unknown };
+    const status = typeof record.status === "string" ? record.status : "error";
+    const error = typeof record.error === "string" ? record.error : status;
+    const result = typeof record.result === "string" ? record.result : undefined;
+    const handle = executionHandle(ref);
+    const taskStore = handle?.store;
+    const task = taskStore?.get(ref.taskId);
     agentTaskMap.delete(id);
     agentCascadeConfigs.delete(id);
-    const task = store.get(taskId);
-    if (!task) return;
-
-    if (status === "stopped") {
-      // Intentional stop — mark completed, preserve partial result
-      store.update(task.id, { status: "completed", metadata: { ...task.metadata, result: result || task.metadata?.result } });
-      autoClear.trackCompletion(task.id, cadence.currentTurn);
-    } else {
-      // Actual error — revert to pending. `result: null` drops it (the store deletes
-      // a key set to null): a task back to pending has no current result, and an
-      // earlier run's would otherwise outrank this error everywhere it is read.
-      store.update(task.id, { status: "pending", metadata: { ...task.metadata, result: null, lastError: error || status } });
-      autoClear.resetBatchCountdown();
+    if (!handle || !taskStore) return;
+    if (!task) {
+      forgetExecutionStore(ref);
+      return;
     }
+    const isCurrentGeneration = taskStore === store && handle.generation === storeGeneration;
+
+    const committed = status === "stopped"
+      ? taskStore.settleExecution(ref, {
+          status: "completed",
+          ...(result !== undefined && result !== ""
+            ? { result }
+            : typeof task.metadata.result === "string" ? { result: task.metadata.result } : {}),
+        })
+      : taskStore.settleExecution(ref, { status: "pending", error });
+    if (!committed) {
+      // TaskStop may have finalized the status while keeping this ref solely
+      // for the runtime's same-attempt partial output. A TaskUpdate reservation
+      // also accepts the output but keeps both its ref and store handle until
+      // the reservation owner applies the final field update.
+      if (status === "stopped" && task.status === "completed") {
+        taskStore.recordSettledExecutionResult(ref, result);
+      }
+      const current = taskStore.get(ref.taskId);
+      if (!current?.execution
+        || executionHandleKey(current.execution) !== executionHandleKey(ref)) {
+        forgetExecutionStore(ref);
+      }
+      return;
+    }
+    forgetExecutionStore(ref);
+    if (!isCurrentGeneration) return;
+
+    if (status === "stopped") autoClear.trackCompletion(task.id, cadence.currentTurn);
+    else autoClear.resetBatchCountdown();
     widget.setActiveTask(task.id, false);
     widget.update();
   }
@@ -635,11 +1002,30 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
     if (agentsReattached) return;
     agentsReattached = true;
     for (const task of store.list()) {
-      const agentId = task.metadata?.agentId;
-      if (task.status === "in_progress" && typeof agentId === "string" && agentId) {
-        agentTaskMap.set(agentId, task.id);
+      const ref = task.execution;
+      if (task.status !== "in_progress" || !isTaskExecutionRef(ref)) continue;
+      if (ref.kind === "workflow") {
+        let live = false;
+        try {
+          const snapshot = options.workflowOutput?.get(ref.executorId);
+          live = snapshot?.status === "running" || snapshot?.status === "paused";
+        } catch {
+          live = false;
+        }
+        if (!live) {
+          // A persisted workflow ref is authority only while its controller is
+          // live in this extension instance. Revoke stale authority atomically;
+          // there is no controller to stop after a process reload.
+          store.rollbackExecution(ref, "workflow controller was interrupted before it could be reattached");
+          forgetExecutionStore(ref);
+          continue;
+        }
+      }
+      rememberExecutionStore(ref);
+      if (ref.kind === "agent") {
+        agentTaskMap.set(ref.executorId, ref);
         const cascadeConfig = normalizeCascadeConfig(task.metadata.taskCascadeConfig);
-        if (cascadeConfig) agentCascadeConfigs.set(agentId, cascadeConfig);
+        if (cascadeConfig) agentCascadeConfigs.set(ref.executorId, cascadeConfig);
       }
     }
   }
@@ -760,6 +1146,60 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
     };
   });
 
+  async function rollbackCurrentExecutions(error: string): Promise<void> {
+    const taskStore = store;
+    const generation = storeGeneration;
+    const executions = new Map<string, {
+      execution: TaskExecutionBinding;
+      reservationToken?: string;
+    }>();
+    for (const task of taskStore.list()) {
+      if (task.status === "in_progress" && task.execution !== undefined) {
+        executions.set(executionHandleKey(task.execution), { execution: task.execution });
+      }
+    }
+    for (const reservation of stopReservations.values()) {
+      if (reservation.store === taskStore) {
+        executions.set(executionHandleKey(reservation.ref), {
+          execution: reservation.ref,
+          reservationToken: reservation.token,
+        });
+      }
+    }
+
+    for (const { execution, reservationToken } of executions.values()) {
+      if (reservationToken !== undefined && isTaskExecutionRef(execution)) {
+        taskStore.rollbackExecutionStop(execution, reservationToken, error);
+      } else {
+        taskStore.rollbackExecution(execution, error);
+      }
+      if (isTaskExecutionRef(execution)) forgetStopReservation(execution);
+      forgetExecutionStore(execution);
+      detachTaskAgents(execution.taskId);
+    }
+
+    await Promise.allSettled([...executions.values()].map(async ({ execution }) => {
+      if (!isTaskExecutionRef(execution)) return;
+      if (execution.kind === "workflow") {
+        await options.workflowOutput?.stop?.(execution.executorId);
+      } else {
+        await stopSubagent(execution.executorId);
+      }
+    }));
+
+    if (taskStore === store && generation === storeGeneration && executions.size > 0) {
+      for (const { execution } of executions.values()) widget.setActiveTask(execution.taskId, false);
+      autoClear.resetBatchCountdown();
+      widget.update();
+    }
+  }
+
+  // Revoke execution authority before the host activates the replacement
+  // session. Root workflow/agent shutdown runs after this handler.
+  pi.on("session_before_switch", async () => {
+    await rollbackCurrentExecutions("session changed before execution settled");
+  });
+
   // session_start replaces the never-emitted session_switch event. Rehydrating
   // here matters because before_agent_start only fires once the user prompts.
   pi.on("session_start", async (event, ctx) => {
@@ -788,6 +1228,9 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
     // copy. Snapshot before the store re-points to the new (empty) session file.
     const forkSeed = reason === "fork" ? store.snapshot() : undefined;
     if (isSwitch) {
+      // Some hosts transition directly to session_start without first emitting
+      // session_before_switch. Revoke the old generation here as a fallback.
+      await rollbackCurrentExecutions("session changed before execution settled");
       storeGeneration++;
       persistedTasksShown = false;
       agentsReattached = false;
@@ -843,6 +1286,7 @@ export function registerTasks(pi: ExtensionAPI, options: RegisterTasksOptions = 
   });
 
   pi.on("session_shutdown", async () => {
+    await rollbackCurrentExecutions("session shut down before execution settled");
     for (const unsubscribe of eventUnsubs.splice(0)) unsubscribe();
     widget.dispose();
   });
@@ -906,7 +1350,7 @@ All tasks are created with status \`pending\`.
       description: Type.String({ description: "A detailed description of what needs to be done" }),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress (e.g., 'Running tests')" })),
       agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution (e.g., 'general-purpose', 'Explore'). Tasks with agentType can be started via TaskExecute." })),
-      metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary metadata to attach to the task" })),
+      metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary user metadata to attach to the task. workflowAggregate is reserved for the workflow runtime and is ignored." })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -914,7 +1358,9 @@ All tasks are created with status \`pending\`.
       // cannot be relied on for that: they only tick at `turn_start`, so a run that ends
       // right after its last completion freezes one mid-count.
       autoClear.startNewBatch();
-      const meta = params.metadata ?? {};
+      const meta = Object.fromEntries(
+        Object.entries(params.metadata ?? {}).filter(([key]) => key !== "workflowAggregate"),
+      );
       if (params.agentType) meta.agentType = params.agentType;
       const task = store.create(params.subject, params.description, params.activeForm, Object.keys(meta).length > 0 ? meta : undefined);
       widget.update();
@@ -1052,7 +1498,9 @@ Returns full task details:
       // Show user-authored/runtime metadata, but keep attempt and cascade bookkeeping internal.
       const metadata = Object.fromEntries(
         Object.entries(task.metadata).filter(
-          ([key]) => key !== "taskAttemptId" && key !== "taskCascadeConfig",
+          ([key]) => key !== "taskAttemptId"
+            && key !== "taskCascadeConfig"
+            && key !== "workflowAggregate",
         ),
       );
       if (Object.keys(metadata).length > 0) {
@@ -1108,7 +1556,7 @@ Returns full task details:
 - **description**: Change the task description
 - **activeForm**: Present continuous form shown in spinner when in_progress (e.g., "Running tests")
 - **owner**: Change the task owner (agent name)
-- **metadata**: Merge metadata keys into the task (set a key to null to delete it)
+- **metadata**: Merge user metadata keys into the task (set a key to null to delete it). \`workflowAggregate\` is reserved for the workflow runtime and is ignored.
 - **addBlocks**: Mark tasks that cannot start until this one completes
 - **addBlockedBy**: Mark tasks that must complete before this one can start
 
@@ -1159,24 +1607,52 @@ Set up task dependencies:
       description: Type.Optional(Type.String({ description: "New description for the task" })),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress" })),
       owner: Type.Optional(Type.String({ description: "New owner for the task" })),
-      metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Metadata keys to merge into the task. Set a key to null to delete it." })),
+      metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "User metadata keys to merge into the task. Set a key to null to delete it. workflowAggregate is reserved for the workflow runtime and is ignored." })),
       addBlocks: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that this task blocks" })),
       addBlockedBy: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that block this task" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const { taskId, ...fields } = params;
+      const { taskId, ...unfilteredFields } = params;
+      const fields = { ...unfilteredFields };
+      if (fields.metadata !== undefined) {
+        fields.metadata = Object.fromEntries(
+          Object.entries(fields.metadata).filter(([key]) => key !== "workflowAggregate"),
+        );
+        if (Object.keys(fields.metadata).length === 0) delete fields.metadata;
+      }
       const taskStore = store;
       const operationGeneration = storeGeneration;
       const existing = taskStore.get(taskId);
+      const executionBinding = existing?.execution;
+      const execution = isTaskExecutionRef(executionBinding) ? executionBinding : undefined;
+      let stopReservation: PreparedTaskStop | undefined;
       if (fields.status && fields.status !== "in_progress" && existing) {
-        await stopAndDetachTaskAgent(existing, operationGeneration);
+        stopReservation = await stopTaskExecution(existing, operationGeneration, {
+          status: fields.status === "pending" ? "pending" : "completed",
+        });
         if (existing.status !== "in_progress" && fields.status !== existing.status) {
           detachTaskAgents(taskId);
         }
       }
 
-      const { task, changedFields, warnings } = taskStore.update(taskId, fields);
+      const update = execution && stopReservation
+        ? taskStore.finalizeExecutionStop(execution, stopReservation.token, {
+            ...fields,
+            status: fields.status as "completed" | "pending" | "deleted",
+          })
+        : executionBinding
+          ? taskStore.update(taskId, fields, executionBinding)
+          : taskStore.update(taskId, fields);
+      const { task, changedFields, warnings } = update;
+      if (stopReservation) forgetStopReservation(stopReservation.ref);
+      if (update.casMatched === false) {
+        return textResult(`Task #${taskId} changed while its previous executor was stopping; no update was applied`);
+      }
+      if (update.casMatched === true && executionBinding
+        && fields.status !== undefined && fields.status !== "in_progress") {
+        forgetExecutionStore(executionBinding);
+      }
 
       if (changedFields.length === 0 && !task) {
         return textResult(`Task #${taskId} not found`);
@@ -1222,38 +1698,597 @@ Set up task dependencies:
       task_id: Type.String({ description: "The task ID, agent ID/prefix, or SubagentWorkflow wf_* run ID to inspect" }),
       block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion", default: true })),
       timeout: Type.Optional(Type.Number({ description: "Max wait time in ms", default: 30000, minimum: 0, maximum: 600000 })),
+      view: Type.Optional(Type.Unsafe<"summary" | "children" | "result">({
+        type: "string",
+        enum: ["summary", "children", "result"],
+        description: "Metadata views or an explicitly requested persisted result body slice.",
+      })),
+      offset: Type.Optional(Type.Number({ description: "Character offset for view=result", minimum: 0 })),
+      limit: Type.Optional(Type.Number({
+        description: "Maximum characters for view=result",
+        default: TASK_OUTPUT_RESULT_DEFAULT_LIMIT,
+        minimum: 0,
+        maximum: TASK_OUTPUT_RESULT_MAX_LIMIT,
+      })),
     }),
 
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const task_id = params.task_id;
       const block = params.block ?? true;
       const timeout = params.timeout ?? 30000;
+      const view = params.view;
+      if (view !== undefined && view !== "summary" && view !== "children" && view !== "result") {
+        throw new Error(`Invalid TaskOutput view: ${String(view)}`);
+      }
+      const offset = params.offset ?? 0;
+      const limit = params.limit ?? TASK_OUTPUT_RESULT_DEFAULT_LIMIT;
+      if (!Number.isInteger(offset) || offset < 0 || offset > TASK_OUTPUT_RESULT_MAX_LIMIT) {
+        throw new Error("TaskOutput offset must be a non-negative integer within the result limit");
+      }
+      if (!Number.isInteger(limit) || limit < 0 || limit > TASK_OUTPUT_RESULT_MAX_LIMIT) {
+        throw new Error("TaskOutput limit must be a non-negative integer within the result limit");
+      }
       const taskStore = store;
       const operationGeneration = storeGeneration;
-      // Reject an empty id up front: every agent ID starts with "", so the prefix
-      // match below would resolve it to whichever agent the map yields first.
-      if (!task_id) throw new Error("task_id is required");
 
-      if (task_id.startsWith("wf_")) {
-        let workflow = options.workflowOutput?.get(task_id);
+      const renderView = (context: TaskOutputSummaryContext): ReturnType<typeof textResult> =>
+        textResult(view === "children"
+          ? formatTaskOutputChildren(context)
+          : formatTaskOutputSummary(context));
+
+      const renderResult = (
+        context: TaskOutputSummaryContext,
+        result?: { body: string; offset: number; limit: number; totalLength: number; hasMore: boolean },
+        resultError?: string,
+      ): ReturnType<typeof textResult> => textResult(formatTaskOutputResult({ ...context, result, resultError }));
+
+      const workflowSummary = (workflow: WorkflowTaskOutputSnapshot): TaskOutputWorkflowSummary => ({
+        id: workflow.id,
+        status: workflow.status,
+        name: workflow.name,
+        doneCount: workflow.doneCount,
+        totalCount: workflow.totalCount,
+        replayedCount: workflow.replayedCount,
+        totalTokens: workflow.totalTokens,
+        totalToolCalls: workflow.totalToolCalls,
+        elapsedMs: workflow.elapsedMs,
+        attempts: workflow.attempts ?? [],
+        coverage: workflow.coverage,
+        resultBodyEnabled: workflow.resultBodyEnabled,
+        artifactId: workflow.aggregateArtifactId,
+        artifactStatus: workflow.aggregateArtifactStatus,
+        evidenceIncomplete: workflow.evidenceIncomplete,
+      });
+
+      const readWorkflowResult = (
+        runId: string,
+        context: TaskOutputSummaryContext,
+        resultBodyEnabled: boolean | undefined,
+        artifactId: string | undefined,
+        expectedRef?: TaskExecutionRef,
+      ): ReturnType<typeof textResult> => {
+        const workflow = context.workflow;
+        if (workflow?.status === "running" || workflow?.status === "paused") {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        if (resultBodyEnabled === false) {
+          return renderResult(context, undefined, TASK_OUTPUT_PRIVATE_MARKER);
+        }
+        if (workflow?.artifactStatus !== "complete") {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        const sessionId = ctx.sessionManager?.getSessionId?.();
+        if (sessionId === undefined) {
+          return renderResult(context, undefined, "result body is unavailable without a persisted session");
+        }
+        if (artifactId === undefined) {
+          return renderResult(context, undefined, "workflow aggregate body is unavailable");
+        }
+        assertTaskOutputSafeId(artifactId, "workflow aggregate artifact id");
+        const loaded = readWorkflowAggregateArtifactBody({
+          cwd: ctx.cwd,
+          sessionId,
+          workflowId: runId,
+          ...(expectedRef !== undefined ? { taskBinding: expectedRef } : {}),
+          offset,
+          limit,
+        });
+        if ("error" in loaded) throw new Error(loaded.error);
+        if (loaded.manifest.artifactId !== artifactId
+          || loaded.manifest.workflowId !== runId
+          || loaded.manifest.artifactStatus !== "complete") {
+          throw new Error(`Workflow aggregate metadata does not match its manifest for ${runId}`);
+        }
+        const rendered = renderResult(context, loaded.slice);
+        options.workflowOutput?.consume(runId);
+        return rendered;
+      };
+      const readUnboundWorkflowView = (runId: string): ReturnType<typeof textResult> | undefined => {
+        const sessionId = ctx.sessionManager?.getSessionId?.();
+        if (sessionId === undefined) return undefined;
+        const readAggregate = options.workflowAggregateReader ?? readWorkflowAggregateArtifactManifest;
+        const loaded = readAggregate({
+          cwd: ctx.cwd,
+          sessionId,
+          workflowId: runId,
+        });
+        if (!("manifest" in loaded) || loaded.manifest.taskBinding !== undefined) return undefined;
+        const manifest = loaded.manifest;
+        const context: TaskOutputSummaryContext = {
+          workflow: {
+            id: runId,
+            status: manifest.status,
+            name: manifest.workflowName,
+            attempts: manifest.childAttempts,
+            coverage: manifest.coverage,
+            resultBodyEnabled: manifest.resultSummary !== TASK_OUTPUT_PRIVATE_MARKER,
+            artifactId: manifest.artifactId,
+            artifactStatus: manifest.artifactStatus,
+            artifactError: manifest.artifactError,
+            evidenceIncomplete: manifest.evidenceIncomplete,
+          },
+        };
+        if (view === "result") {
+          return readWorkflowResult(
+            runId,
+            context,
+            context.workflow?.resultBodyEnabled,
+            manifest.artifactId,
+          );
+        }
+        return renderView(context);
+      };
+
+      const readWorkflowView = async (
+        runId: string,
+        task?: Task,
+        expectedRef?: TaskExecutionRef,
+      ): Promise<ReturnType<typeof textResult>> => {
+        assertTaskOutputSafeId(runId, "workflow id");
+        let workflow = options.workflowOutput?.get(runId);
+        if (workflow && block && (workflow.status === "running" || workflow.status === "paused")) {
+          workflow = await options.workflowOutput!.wait(runId, {
+            timeoutMs: timeout,
+            ...(signal ? { signal } : {}),
+          });
+          if (!workflow) throw new Error("Workflow context changed while waiting for output");
+        }
+        if (workflow) {
+          if (workflow.id !== runId) throw new Error("Workflow snapshot identity does not match the requested run");
+          if (expectedRef !== undefined && workflow.taskExecutionRef !== undefined
+            && !sameTaskExecutionRef(expectedRef, workflow.taskExecutionRef)) {
+            throw new Error(`Workflow ${runId} task binding does not match Task #${task?.id ?? expectedRef.taskId}`);
+          }
+          if (task !== undefined && operationGeneration !== storeGeneration) {
+            throw new Error("Task context changed while waiting for output");
+          }
+          const updated = task === undefined ? undefined : taskStore.get(task.id) ?? task;
+          const liveContext: TaskOutputSummaryContext = {
+            ...(updated === undefined
+              ? {}
+              : { taskId: updated.id, taskStatus: updated.status, owner: updated.owner }),
+            ...(expectedRef !== undefined ? { execution: expectedRef } : {}),
+            workflow: workflowSummary(workflow),
+          };
+          if (view === "result") {
+            return readWorkflowResult(
+              runId,
+              liveContext,
+              liveContext.workflow?.resultBodyEnabled,
+              liveContext.workflow?.artifactId,
+              expectedRef,
+            );
+          }
+          return renderView(liveContext);
+        }
+
+        if (task === undefined) {
+          const unbound = readUnboundWorkflowView(runId);
+          if (unbound !== undefined) return unbound;
+          const known = options.workflowOutput?.list() ?? [];
+          throw new Error(
+            `No workflow run with ID ${runId}. ${known.length > 0
+              ? `Known workflow runs: ${known.join(", ")}`
+              : "No workflow runs are available in this session."}`,
+          );
+        }
+
+        const rawAggregate = task.metadata.workflowAggregate;
+        const aggregate = parseTaskWorkflowAggregateMetadata(rawAggregate, runId, task.id);
+        if (rawAggregate !== undefined && aggregate === undefined) {
+          throw new Error(`Invalid workflow aggregate metadata for Task #${task.id}`);
+        }
+        if (aggregate === undefined) {
+          const context: TaskOutputSummaryContext = {
+            taskId: task.id,
+            taskStatus: task.status,
+            owner: task.owner,
+            workflow: {
+              id: runId,
+              status: task.status,
+              attempts: [],
+            },
+          };
+          return view === "result"
+            ? readWorkflowResult(runId, context, undefined, undefined, expectedRef)
+            : renderView(context);
+        }
+        if (expectedRef !== undefined && !sameTaskExecutionRef(expectedRef, aggregate.taskBinding)) {
+          throw new Error(`Workflow aggregate task binding does not match Task #${task.id}`);
+        }
+
+        const sessionId = ctx.sessionManager?.getSessionId?.();
+        const resultDoesNotNeedManifest = view === "result" && aggregate.artifactStatus !== "complete";
+        if (aggregate.artifactStatus === "skipped" || sessionId === undefined || resultDoesNotNeedManifest) {
+          const artifactError = sessionId === undefined && aggregate.artifactStatus !== "skipped"
+            ? "workflow aggregate is unavailable without a persisted session"
+            : undefined;
+          if (view === "children" && artifactError !== undefined) throw new Error(artifactError);
+          const context: TaskOutputSummaryContext = {
+            taskId: task.id,
+            taskStatus: task.status,
+            owner: task.owner,
+            execution: aggregate.taskBinding,
+            workflow: {
+              id: runId,
+              status: aggregate.status,
+              attempts: [],
+              coverage: aggregate.coverage,
+              resultBodyEnabled: aggregate.resultBodyEnabled,
+              artifactId: aggregate.artifactId,
+              artifactStatus: aggregate.artifactStatus,
+              artifactError,
+              evidenceIncomplete: aggregate.evidenceIncomplete,
+            },
+          };
+          if (view === "result") {
+            return readWorkflowResult(
+              runId,
+              context,
+              aggregate.resultBodyEnabled,
+              aggregate.artifactId,
+              expectedRef,
+            );
+          }
+          return renderView(context);
+        }
+
+        const readAggregate = options.workflowAggregateReader ?? readWorkflowAggregateArtifactManifest;
+        const loaded = readAggregate({
+          cwd: ctx.cwd,
+          sessionId,
+          workflowId: runId,
+          taskBinding: aggregate.taskBinding,
+        });
+        if ("error" in loaded) {
+          if (view === "children" || view === "result") throw new Error(loaded.error);
+          return renderView({
+            taskId: task.id,
+            taskStatus: task.status,
+            owner: task.owner,
+            execution: aggregate.taskBinding,
+            workflow: {
+              id: runId,
+              status: aggregate.status,
+              attempts: [],
+              coverage: aggregate.coverage,
+              resultBodyEnabled: aggregate.resultBodyEnabled,
+              artifactId: aggregate.artifactId,
+              artifactStatus: aggregate.artifactStatus,
+              artifactError: loaded.error,
+              evidenceIncomplete: aggregate.evidenceIncomplete,
+            },
+          });
+        }
+        const manifest = loaded.manifest;
+        if (manifest.status !== aggregate.status
+          || manifest.artifactId !== aggregate.artifactId
+          || manifest.artifactStatus !== aggregate.artifactStatus
+          || canonicalJson(manifest.coverage) !== canonicalJson(aggregate.coverage)
+          || Boolean(manifest.evidenceIncomplete) !== Boolean(aggregate.evidenceIncomplete)) {
+          throw new Error(`Workflow aggregate metadata does not match its manifest for Task #${task.id}`);
+        }
+        const context: TaskOutputSummaryContext = {
+          taskId: task.id,
+          taskStatus: task.status,
+          owner: task.owner,
+          execution: aggregate.taskBinding,
+          workflow: {
+            id: runId,
+            status: manifest.status,
+            name: manifest.workflowName,
+            attempts: manifest.childAttempts,
+            coverage: manifest.coverage,
+            resultBodyEnabled: aggregate.resultBodyEnabled,
+            artifactId: manifest.artifactId,
+            artifactStatus: manifest.artifactStatus,
+            evidenceIncomplete: manifest.evidenceIncomplete,
+          },
+        };
+        if (view === "result") {
+          return readWorkflowResult(
+            runId,
+            context,
+            aggregate.resultBodyEnabled,
+            manifest.artifactId,
+            expectedRef,
+          );
+        }
+        return renderView(context);
+      };
+
+      const waitForAgentView = async (task: Task, agentId: string): Promise<Task> => {
+        if (block && task.status === "in_progress") {
+          await new Promise<void>((resolveWait) => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout>;
+            let unsubOk: () => void = () => {};
+            let unsubFail: () => void = () => {};
+            const cleanup = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              unsubOk();
+              unsubFail();
+              signal?.removeEventListener("abort", cleanup);
+              resolveWait();
+            };
+            unsubOk = pi.events.on("subagents:completed", (data: unknown) => {
+              if (eventAgentId(data) === agentId) cleanup();
+            });
+            unsubFail = pi.events.on("subagents:failed", (data: unknown) => {
+              if (eventAgentId(data) === agentId) cleanup();
+            });
+            timer = setTimeout(cleanup, timeout);
+            const current = taskStore.get(task.id);
+            if (current && current.status !== "in_progress") cleanup();
+            else if (signal?.aborted) cleanup();
+            else signal?.addEventListener("abort", cleanup, { once: true });
+          });
+        }
+        if (operationGeneration !== storeGeneration) {
+          throw new Error("Task context changed while waiting for output");
+        }
+        return taskStore.get(task.id) ?? task;
+      };
+
+      const readAgentView = async (
+        task: Task,
+        agentId: string,
+        execution?: TaskExecutionRef,
+      ): Promise<ReturnType<typeof textResult>> => {
+        assertTaskOutputSafeId(agentId, "agent id");
+        const updated = await waitForAgentView(task, agentId);
+        const record = getTaskAgentRegistry()?.getRecord(agentId);
+        if (record !== undefined) {
+          if (record.id !== agentId) throw new Error("Agent registry identity does not match the requested agent");
+          if (record.taskExecutionRef !== undefined) {
+            if (record.taskExecutionRef.executorId !== agentId
+              || record.taskExecutionRef.taskId !== task.id
+              || (execution !== undefined && !sameTaskExecutionRef(execution, record.taskExecutionRef))) {
+              throw new Error(`Agent ${agentId} task binding does not match Task #${task.id}`);
+            }
+          }
+        }
+        const usage = record?.lifetimeUsage;
+        const agent: TaskOutputAgentSummary = {
+          id: agentId,
+          status: record?.status ?? updated.status,
+          artifactId: record?.artifactId,
+          artifactStatus: record?.artifactStatus,
+          resultBodyEnabled: record?.resultBodyEnabled,
+          model: record?.invocation?.modelId ?? record?.invocation?.modelName,
+          turns: record?.turnCount,
+          toolCalls: record?.toolUses,
+          tokens: usage === undefined ? undefined : usage.input + usage.output + usage.cacheWrite,
+        };
+        const context: TaskOutputSummaryContext = {
+          taskId: updated.id,
+          taskStatus: updated.status,
+          owner: updated.owner,
+          ...(execution !== undefined ? { execution } : {}),
+          agent,
+        };
+        if (view === "result") {
+          if (agent.status === "running" || agent.status === "queued" || agent.artifactStatus === "pending") {
+            return renderResult(context, undefined, "result body is unavailable");
+          }
+          if (agent.resultBodyEnabled === false) {
+            return renderResult(context, undefined, TASK_OUTPUT_PRIVATE_MARKER);
+          }
+          const sessionId = ctx.sessionManager?.getSessionId?.();
+          if (sessionId === undefined) {
+            return renderResult(context, undefined, "result body is unavailable without a persisted session");
+          }
+          if (agent.artifactId === undefined) {
+            return renderResult(context, undefined, "result body is unavailable");
+          }
+          assertTaskOutputSafeId(agent.artifactId, "agent artifact id");
+          const loaded = readResultArtifactBody({
+            cwd: ctx.cwd,
+            sessionId,
+            agentId,
+            artifactId: agent.artifactId,
+            offset,
+            limit,
+          });
+          if ("error" in loaded) throw new Error(loaded.error);
+          if (loaded.manifest.agentId !== agentId || loaded.manifest.artifactId !== agent.artifactId) {
+            throw new Error(`Agent result metadata does not match the requested agent ${agentId}`);
+          }
+          const rendered = renderResult(context, loaded.slice);
+          consumeSubagentResult(agentId);
+          return rendered;
+        }
+        return renderView(context);
+      };
+
+      if (view !== undefined) {
+        if (!task_id) throw new Error("task_id is required");
+        if (task_id.startsWith("wf_")) {
+          const tasks = taskStore.list();
+          const liveWorkflow = options.workflowOutput?.get(task_id);
+          const canonicalCandidates = tasks.flatMap(candidate => {
+            const execution = candidate.execution;
+            return isTaskExecutionRef(execution)
+                && execution.kind === "workflow"
+                && execution.executorId === task_id
+              ? [{ task: candidate, execution }]
+              : [];
+          });
+          if (liveWorkflow !== undefined) {
+            const snapshotRef = liveWorkflow.taskExecutionRef;
+            const matchingCandidates = snapshotRef === undefined
+              ? canonicalCandidates
+              : canonicalCandidates.filter(candidate => sameTaskExecutionRef(candidate.execution, snapshotRef));
+            if (matchingCandidates.length > 1) {
+              throw new Error(`Multiple canonical tasks are bound to workflow ${task_id}`);
+            }
+            const canonical = matchingCandidates[0];
+            return readWorkflowView(
+              task_id,
+              canonical?.task,
+              snapshotRef ?? canonical?.execution,
+            );
+          }
+
+          const aggregateCandidates = tasks.flatMap(task => {
+            try {
+              const aggregate = parseTaskWorkflowAggregateMetadata(
+                task.metadata.workflowAggregate,
+                task_id,
+                task.id,
+              );
+              return aggregate === undefined ? [] : [{ task, execution: aggregate.taskBinding }];
+            } catch {
+              return [];
+            }
+          });
+          if (aggregateCandidates.length > 1) {
+            throw new Error(`Multiple tasks contain validated workflow aggregate metadata for ${task_id}`);
+          }
+          const aggregateCandidate = aggregateCandidates[0];
+          if (aggregateCandidate !== undefined) {
+            return readWorkflowView(task_id, aggregateCandidate.task, aggregateCandidate.execution);
+          }
+
+          const unbound = readUnboundWorkflowView(task_id);
+          if (unbound !== undefined) return unbound;
+
+          const legacyCandidates = tasks.filter(candidate =>
+            candidate.execution === undefined
+            && candidate.metadata.workflowAggregate === undefined
+            && candidate.metadata.workflowId === task_id
+          );
+          if (legacyCandidates.length > 1) {
+            throw new Error(`Multiple legacy tasks reference workflow ${task_id}`);
+          }
+          const legacy = legacyCandidates[0];
+          return readWorkflowView(task_id, legacy);
+        }
+
+        const processOutput = tracker.getOutput(task_id);
+        if (processOutput !== undefined) {
+          const context = { taskId: task_id, taskStatus: processOutput.status };
+          return view === "result"
+            ? renderResult(context, undefined, "result body is unavailable")
+            : renderView(context);
+        }
+        const resolvedId = resolveTaskId(task_id);
+        const task = taskStore.get(resolvedId);
+        if (!task) throw new Error(`No task found with ID ${task_id}`);
+        const execution = task.execution;
+        if (isTaskExecutionRef(execution) && execution.kind === "workflow") {
+          return readWorkflowView(execution.executorId, task, execution);
+        }
+        if (isTaskExecutionClaim(execution) && execution.kind === "workflow") {
+          const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+          return view === "result"
+            ? renderResult(context, undefined, "workflow aggregate body is unavailable while the controller is starting")
+            : textResult(`${formatTaskOutputSummary(context)}\nWorkflow: controller is starting`);
+        }
+        const rawAggregate = task.metadata.workflowAggregate;
+        if (rawAggregate !== undefined) {
+          const taskBinding = rawAggregate !== null && typeof rawAggregate === "object"
+            && !Array.isArray(rawAggregate) && "taskBinding" in rawAggregate
+            ? rawAggregate.taskBinding
+            : undefined;
+          const aggregateWorkflowId = taskBinding !== null && typeof taskBinding === "object"
+            && !Array.isArray(taskBinding) && "executorId" in taskBinding
+            && typeof taskBinding.executorId === "string"
+            ? taskBinding.executorId
+            : undefined;
+          const aggregate = aggregateWorkflowId === undefined
+            ? undefined
+            : parseTaskWorkflowAggregateMetadata(rawAggregate, aggregateWorkflowId, task.id);
+          if (aggregate === undefined) {
+            throw new Error(`Invalid workflow aggregate metadata for Task #${task.id}`);
+          }
+          return readWorkflowView(aggregate.taskBinding.executorId, task, aggregate.taskBinding);
+        }
+        if (execution === undefined && typeof task.metadata.workflowId === "string") {
+          return readWorkflowView(task.metadata.workflowId, task);
+        }
+        if (isTaskExecutionRef(execution) && execution.kind === "agent") {
+          return readAgentView(task, execution.executorId, execution);
+        }
+        if (isTaskExecutionClaim(execution) && execution.kind === "agent") {
+          const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+          return view === "result"
+            ? renderResult(context, undefined, "result body is unavailable while the agent is starting")
+            : textResult(`${formatTaskOutputSummary(context)}\nAgent: starting`);
+        }
+        if (execution === undefined && typeof task.metadata.agentId === "string") {
+          return readAgentView(task, task.metadata.agentId);
+        }
+        const context = { taskId: task.id, taskStatus: task.status, owner: task.owner };
+        return view === "result"
+          ? renderResult(context, undefined, "result body is unavailable")
+          : renderView(context);
+      }
+
+      const readPersistedWorkflow = (runId: string): string | undefined => {
+        const task = taskStore.list().find(candidate =>
+          candidate.metadata.workflowId === runId
+          && candidate.status !== "in_progress"
+          && (typeof candidate.metadata.result === "string"
+            || typeof candidate.metadata.lastError === "string"),
+        );
+        if (!task) return undefined;
+        const output = typeof task.metadata.result === "string"
+          ? task.metadata.result
+          : `Error: ${task.metadata.lastError}`;
+        return `Task #${task.id} [${task.status}] — workflow ${runId}\n\n${sanitizeWorkflowOutputField(output)}`;
+      };
+      const readWorkflow = async (runId: string): Promise<WorkflowTaskOutputSnapshot> => {
+        let workflow = options.workflowOutput?.get(runId);
         if (!workflow) {
           const known = options.workflowOutput?.list() ?? [];
           throw new Error(
-            `No workflow run with ID ${task_id}. ${known.length > 0
+            `No workflow run with ID ${runId}. ${known.length > 0
               ? `Known workflow runs: ${known.join(", ")}`
               : "No workflow runs are available in this session."}`,
           );
         }
         if (block && (workflow.status === "running" || workflow.status === "paused")) {
-          workflow = await options.workflowOutput!.wait(task_id, {
+          workflow = await options.workflowOutput!.wait(runId, {
             timeoutMs: timeout,
             ...(signal ? { signal } : {}),
           });
           if (!workflow) throw new Error("Workflow context changed while waiting for output");
         }
         const settled = workflow.status !== "running" && workflow.status !== "paused";
-        if (settled && workflow.output !== undefined) options.workflowOutput?.consume(task_id);
-        return textResult(workflowOutputText(workflow));
+        if (settled && workflow.output !== undefined) options.workflowOutput?.consume(runId);
+        return workflow;
+      };
+      // Reject an empty id up front: every agent ID starts with "", so the prefix
+      // match below would resolve it to whichever agent the map yields first.
+      if (!task_id) throw new Error("task_id is required");
+
+      if (task_id.startsWith("wf_")) {
+        const persisted = readPersistedWorkflow(task_id);
+        if (persisted !== undefined) return textResult(persisted);
+        return textResult(workflowOutputText(await readWorkflow(task_id)));
       }
 
       const processOutput = tracker.getOutput(task_id);
@@ -1264,7 +2299,51 @@ Set up task dependencies:
         const task = taskStore.get(resolvedId);
         if (!task) throw new Error(`No task found with ID ${task_id}`);
 
-        if (task.metadata?.agentId) {
+        const execution = task.execution;
+        const workflowId = isTaskExecutionRef(execution) && execution.kind === "workflow"
+          ? execution.executorId
+          : execution === undefined && typeof task.metadata.workflowId === "string"
+            ? task.metadata.workflowId
+            : undefined;
+        if (workflowId) {
+          const liveWorkflow = options.workflowOutput?.get(workflowId);
+          if (liveWorkflow) {
+            const workflow = await readWorkflow(workflowId);
+            if (operationGeneration !== storeGeneration) {
+              throw new Error("Task context changed while waiting for output");
+            }
+            const updated = taskStore.get(resolvedId) ?? task;
+            return textResult(
+              `Task #${resolvedId} [${updated.status}] — ${workflowOutputText(workflow)}`,
+            );
+          }
+
+          // The controller map is session-local, while the Todo outcome is
+          // persisted. A reload, resume, or fork can therefore retain the
+          // workflowId after the live adapter has gone away; return the stored
+          // result/error instead of treating that expected residue as an
+          // unknown workflow run.
+          const output = typeof task.metadata.result === "string"
+            ? task.metadata.result
+            : typeof task.metadata.lastError === "string"
+              ? `Error: ${task.metadata.lastError}`
+              : undefined;
+          return textResult(
+            `Task #${resolvedId} [${task.status}] — workflow ${workflowId}${
+              output !== undefined ? `\n\n${sanitizeWorkflowOutputField(output)}` : ""
+            }`,
+          );
+        }
+        if (execution?.kind === "workflow") {
+          return textResult(`Task #${resolvedId} [${task.status}] — workflow controller is starting`);
+        }
+
+        const agentId = isTaskExecutionRef(execution) && execution.kind === "agent"
+          ? execution.executorId
+          : execution === undefined && typeof task.metadata.agentId === "string"
+            ? task.metadata.agentId
+            : undefined;
+        if (agentId) {
           // Subagent task — wait for completion if blocking
           if (block && task.status === "in_progress") {
             await new Promise<void>((resolve) => {
@@ -1272,7 +2351,6 @@ Set up task dependencies:
               let timer: ReturnType<typeof setTimeout>;
               let unsubOk: () => void = () => {};
               let unsubFail: () => void = () => {};
-              const agentId = task.metadata.agentId;
               const cleanup = () => {
                 if (settled) return;
                 settled = true;
@@ -1304,7 +2382,6 @@ Set up task dependencies:
             throw new Error("Task context changed while waiting for output");
           }
           const updated = taskStore.get(resolvedId) ?? task;
-          const agentId: string = task.metadata.agentId;
           // Consume only what is actually handed over: the agent has reported back
           // (it leaves the map when it does) and the task carries its outcome. Short
           // of both — still running, or an update that never landed — the model is
@@ -1316,6 +2393,9 @@ Set up task dependencies:
           return textResult(
             `Task #${resolvedId} [${updated.status}] — subagent ${agentId}${output ? `\n\n${output}` : ""}`,
           );
+        }
+        if (execution?.kind === "agent") {
+          return textResult(`Task #${resolvedId} [${task.status}] — subagent is starting`);
         }
         throw new Error(`No background process for task ${task_id}`);
       }
@@ -1356,23 +2436,37 @@ Set up task dependencies:
       if (!taskId) throw new Error("task_id is required");
       const taskStore = store;
       const operationGeneration = storeGeneration;
+      const resolvedId = resolveTaskId(taskId);
+      const task = taskStore.get(resolvedId);
 
       const stopped = await tracker.stop(taskId);
       if (!stopped) {
-        // No shell process — check if this is a subagent task
-        // Support both task IDs and agent IDs
-        const resolvedId = resolveTaskId(taskId);
-        const task = taskStore.get(resolvedId);
-        if (task?.metadata?.agentId && task.status === "in_progress") {
-          await stopSubagent(task.metadata.agentId);
-          const current = taskStore.get(resolvedId);
-          if (current?.status === "in_progress") {
-            taskStore.update(resolvedId, { status: "completed" });
-            if (operationGeneration === storeGeneration) {
-              autoClear.trackCompletion(resolvedId, cadence.currentTurn);
+        // No shell process — use the task/execution captured before the first
+        // await, so a concurrent session switch cannot redirect this stop to a
+        // replacement task with the same numeric ID.
+        const ref = task?.execution;
+        if (task?.status === "in_progress" && isTaskExecutionRef(ref)) {
+          const reservation = await stopTaskExecutor(task, { status: "completed" });
+          if (!reservation) {
+            if (operationGeneration === storeGeneration && executionHandle(ref) !== undefined) {
+              throw new Error(`Task #${resolvedId} changed while stopping`);
             }
+            return textResult(`Task #${resolvedId} stopped successfully`);
+          }
+          const retainBinding = ref.kind === "agent" && agentTaskMap.has(ref.executorId);
+          const ownsReservation = stopReservations.get(executionHandleKey(ref))?.token
+            === reservation.token;
+          const finalized = updateTaskExecution(
+            ref,
+            { status: "completed" },
+            reservation.token,
+            retainBinding,
+          );
+          if (!finalized && ownsReservation && operationGeneration === storeGeneration) {
+            throw new Error(`Task #${resolvedId} changed while stopping`);
           }
           if (operationGeneration === storeGeneration) {
+            autoClear.trackCompletion(resolvedId, cadence.currentTurn);
             widget.setActiveTask(resolvedId, false);
             widget.update();
           }
@@ -1467,39 +2561,48 @@ Set up task dependencies:
           continue;
         }
 
-        const taskAttemptId = randomUUID();
-        const claimed = taskStore.claimPending(taskId, taskAttemptId);
-        if (!claimed) {
-          results.push(`#${taskId}: already claimed by another session`);
+        const claimed = taskStore.claimPending(taskId, {
+          kind: "agent",
+          taskAttemptId: randomUUID(),
+          attemptId: randomUUID(),
+        });
+        const claim = claimed?.execution;
+        if (!claimed || !claim) {
+          results.push(`#${taskId}: already claimed by another session or execution`);
           continue;
         }
+        rememberExecutionStore(claim, taskStore);
 
         const agentType = claimed.metadata.agentType;
         if (!agentType) {
-          taskStore.update(taskId, { status: "pending" });
+          taskStore.rollbackExecution(claim);
           results.push(`#${taskId}: no agentType set — create with agentType parameter or update metadata`);
           continue;
         }
 
         const prompt = buildTaskPrompt(claimed, params.additional_context);
         try {
-          const agentId = await spawnSubagent(agentType, prompt, {
+          const spawned = await spawnSubagent(agentType, prompt, {
             description: claimed.subject,
             isBackground: true,
             maxTurns: params.max_turns,
             ...(params.model ? { model: params.model } : {}),
+            taskExecution: claim,
           });
-          const current = taskStore.get(taskId);
-          const stillClaimed = current?.status === "in_progress"
-            && current.metadata.taskAttemptId === taskAttemptId;
-          if (operationGeneration !== storeGeneration || !stillClaimed) {
-            try { await stopSubagent(agentId); } catch { /* session teardown or reset may have stopped it already */ }
-            if (stillClaimed) {
-              taskStore.update(taskId, {
-                status: "pending",
-                metadata: { ...claimed.metadata, lastError: "session changed before agent startup completed" },
-              });
-            }
+          if (!taskExecutionRefMatchesClaim(spawned.taskExecutionRef, claim, spawned.id)) {
+            try { await stopSubagent(spawned.id); } catch { /* invalid runtime reply; best-effort cleanup */ }
+            taskStore.rollbackExecution(claim, "subagent runtime returned a mismatched task execution ref");
+            forgetExecutionStore(claim);
+            results.push(`#${taskId}: spawn failed — subagent runtime returned a mismatched task execution ref`);
+            continue;
+          }
+          const bound = operationGeneration === storeGeneration
+            ? taskStore.bindExecution(claim, spawned.id)
+            : undefined;
+          if (!bound) {
+            try { await stopSubagent(spawned.id); } catch { /* session teardown or reset may have stopped it already */ }
+            taskStore.rollbackExecution(claim, "task or session changed before agent startup completed");
+            forgetExecutionStore(claim);
             results.push(
               `#${taskId}: ${operationGeneration !== storeGeneration
                 ? "session changed before launch completed"
@@ -1508,21 +2611,28 @@ Set up task dependencies:
             if (operationGeneration !== storeGeneration) break;
             continue;
           }
-          agentTaskMap.set(agentId, taskId);
-          agentCascadeConfigs.set(agentId, cascadeConfig);
-          taskStore.update(taskId, {
-            owner: agentId,
-            metadata: { ...claimed.metadata, agentId, taskCascadeConfig: cascadeConfig },
+          const metadataCommitted = taskStore.updateExecution(bound, {
+            owner: spawned.id,
+            metadata: { agentId: spawned.id, taskCascadeConfig: cascadeConfig },
           });
+          if (!metadataCommitted) {
+            await cleanupFailedLaunch(
+              bound,
+              taskStore,
+              "task changed before agent launch metadata was committed",
+            );
+            results.push(`#${taskId}: launch lost the task binding before metadata was committed`);
+            continue;
+          }
+          agentTaskMap.set(spawned.id, bound);
+          agentCascadeConfigs.set(spawned.id, cascadeConfig);
           widget.setActiveTask(taskId);
-          await reconcileSettledAgent(agentId);
-          launched.push(`#${taskId} → agent ${agentId}`);
+          await reconcileSettledAgent(spawned.id);
+          launched.push(`#${taskId} → agent ${spawned.id}`);
         } catch (error) {
           debug(`spawn:error task=#${taskId}`, error);
-          const current = taskStore.get(taskId);
-          if (current?.metadata.taskAttemptId === taskAttemptId) {
-            taskStore.update(taskId, { status: "pending" });
-          }
+          taskStore.rollbackExecution(claim, errorMessage(error));
+          forgetExecutionStore(claim);
           results.push(`#${taskId}: spawn failed — ${errorMessage(error)}`);
         }
       }
@@ -1579,24 +2689,61 @@ Set up task dependencies:
           await settingsMenu();
         } else if (choice.startsWith("Clear completed")) {
           for (const task of store.list()) {
-            if (task.status === "completed") detachTaskAgents(task.id);
+            if (task.status === "completed" && task.execution === undefined) {
+              detachTaskAgents(task.id);
+            }
           }
           store.clearCompleted();
           if (isSessionScope()) deleteSessionFileIfEmpty();
           widget.update();
           await mainMenu();
         } else if (choice.startsWith("Clear all")) {
+          const tasksToClear = store.list();
+          const startingTask = tasksToClear.find(task => isTaskExecutionClaim(task.execution));
+          if (startingTask && isTaskExecutionClaim(startingTask.execution)) {
+            ui.notify(
+              `Could not clear tasks: task #${startingTask.id} has a ${startingTask.execution.kind} execution starting; wait for startup to finish`,
+              "warning",
+            );
+            return mainMenu();
+          }
+          const boundTasks = tasksToClear.filter(task => isTaskExecutionRef(task.execution));
+          const preparedStops = new Map<string, PreparedTaskStop>();
+          // Stop every bound executor first. No task is deleted until all stops
+          // succeed, so a failed stop cannot leave a partially cleared list.
           try {
-            for (const task of store.list()) {
-              await stopAndDetachTaskAgent(task);
-              detachTaskAgents(task.id);
-              if (task.status === "in_progress") store.update(task.id, { status: "completed" });
+            for (const task of boundTasks) {
+              const ref = task.execution;
+              if (!isTaskExecutionRef(ref)) continue;
+              const prepared = await stopTaskExecution(task);
+              if (prepared) {
+                preparedStops.set(executionHandleKey(ref), prepared);
+                detachTaskAgents(task.id);
+              }
             }
           } catch (error) {
             ui.notify(`Could not stop active task: ${errorMessage(error)}`, "warning");
             return mainMenu();
           }
-          store.clearAll();
+          let changedDuringClear = false;
+          for (const task of tasksToClear) {
+            if (isTaskExecutionRef(task.execution)) {
+              const ref = task.execution;
+              const prepared = preparedStops.get(executionHandleKey(ref));
+              if (prepared && !updateTaskExecution(ref, { status: "deleted" }, prepared.token)) {
+                changedDuringClear = true;
+              }
+              continue;
+            }
+            detachTaskAgents(task.id);
+            const updated = store.update(task.id, { status: "deleted" });
+            if (updated.changedFields.length === 0 && store.get(task.id) !== undefined) {
+              changedDuringClear = true;
+            }
+          }
+          if (changedDuringClear) {
+            ui.notify("Some tasks changed or started execution while clearing; those tasks were left unchanged", "warning");
+          }
           if (isSessionScope()) deleteSessionFileIfEmpty();
           widget.update();
           await mainMenu();
@@ -1658,25 +2805,48 @@ Set up task dependencies:
           widget.update();
           return viewTasks();
         } else if (action === "✓ Complete") {
+          const ref = isTaskExecutionRef(task.execution) ? task.execution : undefined;
+          let prepared: PreparedTaskStop | undefined;
           try {
-            await stopAndDetachTaskAgent(task);
+            prepared = await stopTaskExecution(task);
           } catch (error) {
             ui.notify(`Could not stop task #${taskId}: ${errorMessage(error)}`, "warning");
             return viewTasks();
           }
-          store.update(taskId, { status: "completed" });
+          const updated = ref
+            ? prepared !== undefined && updateTaskExecution(ref, { status: "completed" }, prepared.token)
+            : store.update(taskId, { status: "completed" }).changedFields.length > 0;
+          if (!updated && ref) {
+            ui.notify(`Could not complete task #${taskId}: task changed while stopping`, "warning");
+            return viewTasks();
+          }
           autoClear.trackCompletion(taskId, cadence.currentTurn);
           widget.setActiveTask(taskId, false);
           widget.update();
           return viewTasks();
         } else if (action === "✗ Delete") {
+          if (isTaskExecutionClaim(task.execution)) {
+            ui.notify(
+              `Could not delete task #${taskId}: ${task.execution.kind} execution is starting; wait for startup to finish`,
+              "warning",
+            );
+            return viewTasks();
+          }
+          const ref = isTaskExecutionRef(task.execution) ? task.execution : undefined;
+          let prepared: PreparedTaskStop | undefined;
           try {
-            await stopAndDetachTaskAgent(task);
+            prepared = await stopTaskExecution(task);
           } catch (error) {
             ui.notify(`Could not stop task #${taskId}: ${errorMessage(error)}`, "warning");
             return viewTasks();
           }
-          store.update(taskId, { status: "deleted" });
+          const updated = ref
+            ? prepared !== undefined && updateTaskExecution(ref, { status: "deleted" }, prepared.token)
+            : store.update(taskId, { status: "deleted" }).changedFields.length > 0;
+          if (!updated) {
+            ui.notify(`Could not delete task #${taskId}: task changed or started execution`, "warning");
+            return viewTasks();
+          }
           widget.setActiveTask(taskId, false);
           widget.update();
           return viewTasks();
@@ -1701,6 +2871,68 @@ Set up task dependencies:
       await mainMenu();
     },
   });
+
+  return {
+    claim(taskId, kind, attemptId = randomUUID(), taskAttemptId = randomUUID()) {
+      const taskStore = store;
+      const claimed = taskStore.claimPending(taskId, { kind, attemptId, taskAttemptId });
+      if (!claimed?.execution) return undefined;
+      rememberExecutionStore(claimed.execution, taskStore);
+      widget.setActiveTask(taskId);
+      autoClear.resetBatchCountdown();
+      widget.update();
+      return { ...claimed.execution };
+    },
+    bind(claim, executorId) {
+      return executionHandle(claim)?.store.bindExecution(claim, executorId);
+    },
+    rollback(claim, error) {
+      const handle = executionHandle(claim);
+      const committed = handle?.store.rollbackExecution(claim, error) ?? false;
+      forgetExecutionStore(claim);
+      if (committed && handle?.store === store && handle.generation === storeGeneration) {
+        widget.setActiveTask(claim.taskId, false);
+        autoClear.resetBatchCountdown();
+        widget.update();
+      }
+      return committed;
+    },
+    prepare(ref, status, error) {
+      return prepareTaskExecution(ref, status, error);
+    },
+    restore(ref, token) {
+      return restoreTaskExecution(ref, token);
+    },
+    update(ref, fields) {
+      const handle = executionHandle(ref);
+      const committed = handle?.store.updateExecution(ref, fields) ?? false;
+      if (committed && handle?.store === store && handle.generation === storeGeneration) {
+        widget.update();
+      }
+      return committed;
+    },
+    updateStop(ref, fields) {
+      const reservation = stopReservations.get(executionHandleKey(ref));
+      if (!reservation || !sameTaskExecutionRef(reservation.ref, ref)) return false;
+      const committed = reservation.store.updateExecutionStopMetadata(ref, reservation.token, fields.metadata ?? {});
+      if (committed && reservation.store === store && reservation.generation === storeGeneration) {
+        widget.update();
+      }
+      return committed;
+    },
+    settle(ref, outcome) {
+      const handle = executionHandle(ref);
+      const committed = handle?.store.settleExecution(ref, outcome) ?? false;
+      if (committed && !outcome.retainBinding) forgetExecutionStore(ref);
+      if (committed && handle?.store === store && handle.generation === storeGeneration) {
+        widget.setActiveTask(ref.taskId, false);
+        if (outcome.status === "completed") autoClear.trackCompletion(ref.taskId, cadence.currentTurn);
+        else autoClear.resetBatchCountdown();
+        widget.update();
+      }
+      return committed;
+    },
+  } satisfies TaskExecutionCoordinator;
 }
 
 export default registerTasks;

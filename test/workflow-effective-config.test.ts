@@ -194,6 +194,30 @@ describe("the workflow host reports a child's effective configuration", () => {
     expect(reported).toEqual([]);
   });
 
+  it("bridges session, turn, tool, and text progress before the child settles", async () => {
+    const order: string[] = [];
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
+      opts.onSessionCreated?.({
+        dispose: vi.fn(),
+        model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      } as any);
+      opts.onToolActivity?.({ type: "start", toolName: "read" });
+      opts.onTextDelta?.("partial", "partial response");
+      opts.onTurnEnd?.(1);
+      return { responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false };
+    });
+    const host = createWorkflowHost({ pi, ctx: ctx({}), manager });
+
+    await host.spawnAgent(spawnRequest({
+      onSessionReady: () => order.push("session"),
+      onToolActivity: activity => order.push(`tool:${activity.toolName}`),
+      onTextDelta: (_delta, full) => order.push(`text:${full}`),
+      onTurnEnd: count => order.push(`turn:${count}`),
+    }));
+
+    expect(order).toEqual(["session", "tool:read", "text:partial response", "turn:1"]);
+  });
+
   it("reports the record id ahead of any session, so the row is openable either way", async () => {
     // The inspector's `c` key opens the manager's record for this child. The
     // id is knowable as soon as the manager issues it, and gating it on the

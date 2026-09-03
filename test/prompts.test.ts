@@ -463,7 +463,7 @@ describe("buildAgentPrompt", () => {
           workflowChild: true,
         });
         expect(prompt).toContain("<workflow_child>");
-        expect(prompt).toContain("Your final message IS the return value");
+        expect(prompt).toContain("Your final message IS the text/Markdown return value");
         expect(prompt).toContain("no preamble");
         expect(prompt.indexOf("<workflow_child>")).toBeGreaterThan(prompt.indexOf("Working directory: /workspace"));
       }

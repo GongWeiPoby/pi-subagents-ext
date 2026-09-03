@@ -324,6 +324,9 @@ describe("SubagentScheduler — fire path", () => {
     const optsArg = manager.spawn.mock.calls[0][4];
     expect(optsArg.bypassQueue).toBe(true);
     expect(optsArg.isBackground).toBe(true);
+    // Privacy is resolved by AgentManager from the agent config/default. The
+    // scheduler must not invent an include-body default for its direct spawn.
+    expect(optsArg.resultBodyEnabled).toBeUndefined();
   });
 
   it("fire passes the job's configuration as the invocation snapshot", () => {

@@ -70,15 +70,23 @@ function documentedAgentOptions(): { keys: Set<string>; efforts: string[]; line:
 }
 
 describe("the agent() contract it documents", () => {
+  it("documents text/Markdown returns and the schema migration refusal", () => {
+    expect(description).toContain("return its final text/Markdown");
+    expect(description).toContain("opts.schema is no longer supported");
+    expect(description).toContain("before any model call");
+    expect(description).not.toContain("StructuredOutput");
+  });
+
   it("names every option the runtime accepts", () => {
     for (const option of AGENT_OPTIONS) {
       expect(description, `agent() opts.${option} is undocumented`).toContain(option);
     }
   });
 
-  it("documents no option the runtime would reject by name", () => {
+  it("documents no unsupported option except the explicit schema refusal", () => {
     const named = [...description.matchAll(/opts\.(\w+)/g)].map(m => m[1]);
-    expect([...new Set(named)].filter(name => !AGENT_OPTIONS.includes(name))).toEqual([]);
+    expect([...new Set(named)].filter(name => !AGENT_OPTIONS.includes(name))).toEqual(["schema"]);
+    expect(description.match(/opts\.schema/g)).toHaveLength(1);
   });
 
   it("lists every option resume cannot be combined with", () => {
@@ -145,14 +153,32 @@ describe("the limits it quotes", () => {
 });
 
 describe("rendering", () => {
+  it("does not advertise the removed structured planner or execution reference", () => {
+    expect(description).not.toContain("WorkflowPlan");
+    expect(description).not.toContain("planRef");
+  });
+
   it("keeps the placeholder the live agent roster is substituted into", () => {
     expect(description).toContain("{{typeList}}");
+  });
+
+  it("uses the user's language for fields shown in the approval flow", () => {
+    expect(description).toContain("approval dialog builds its readable flow");
+    expect(description).toContain("`meta.description`, phase titles/details, and agent labels");
+    expect(description).toContain("write those user-visible fields in the user's language");
+    expect(description).toContain("keep `meta.name` as a stable technical identifier");
+  });
+
+  it("requires an explicit user request before deterministic workflow selection", () => {
+    expect(description).toContain("selected only when the user explicitly asks");
+    expect(description).toContain("Do not infer permission to author deterministic JavaScript");
+    expect(description).not.toContain("coordinator has enough project/task evidence");
   });
 
   it("leaves no unescaped template interpolation from the source literal", () => {
     // A bare `${...}` in the .ts literal would interpolate at module load and
     // reach the model as a value (or throw), not as the example text.
     expect(description).not.toContain("[object Object]");
-    expect(description).toContain(["$", "{f.title}"].join(""));
+    expect(description).toContain(["$", "{d.key}"].join(""));
   });
 });

@@ -11,6 +11,7 @@ inputs:
   target:
     type: string
     description: Diff, PR, branch, file, or directory to review
+example: Review the current diff with target="HEAD"
 ---
 
 # Outcome
@@ -20,33 +21,26 @@ only actionable findings supported by file and line evidence, ordered by
 severity. Disclose residual uncertainty and meaningful test gaps when no defect
 is confirmed.
 
-# Context adaptation
+# Coordinator guidance
 
-Inspect the target before choosing the review shape.
+Inspect the target and current conversation before choosing the review shape.
+Use one focused `Agent` call for a small, coherent change. For a broad or risky
+change, choose several independent reviewers according to the surfaces actually
+present. Use ordinary tools such as `read`, `grep`, `find`, or `bash` when they
+provide direct evidence, and use relevant skills when they improve the review.
 
-For a small local change, prefer one focused reviewer. For a broad or risky
-change, select independent perspectives according to the surfaces that changed.
-Security, UI, API contract, performance, migration, and reliability review are
-conditional capabilities, not mandatory checklist items.
+Do not create review work merely to fill categories or duplicate another reviewer.
+Choose prompts, agent types, and lenses based on the evidence. A reviewer may
+cover correctness, security, UI, API contracts, performance, migration, or
+reliability when that surface is relevant; these are conditional capabilities,
+not a mandatory checklist.
 
-Do not create review work merely to fill categories. Do not duplicate work that
-another reviewer already owns. Verify high-impact findings independently before
-reporting them.
+Verify high-impact candidate findings independently. Verification may be a
+focused follow-up `Agent` call, an ordinary tool command, or a relevant skill.
+Then synthesize the verified findings in the main context, merging duplicates,
+resolving severity disagreements, and stating coverage gaps or uncertainty.
 
-# Available approaches
-
-The Planner may use:
-
-- A single `code-reviewer` agent for a small, coherent change
-- Several specialized reviewers in parallel for independent concerns
-- Executable evidence or a fresh skeptical agent to verify candidate findings
-- A synthesis node to merge duplicates and resolve severity disagreements
-
-Prompt templates in `prompts/` are starting points. Adapt their variables and
-wording to the actual target instead of treating them as fixed stages.
-
-# Completion
-
-Finish when relevant changed surfaces have been covered, high-impact findings
-have independent evidence, duplicate findings are merged, and any remaining
-coverage gaps or uncertainty are stated plainly.
+Every child should return concise text or Markdown with file and line evidence.
+Keep the final response in the main context. Do not assume that every suggested
+reviewer, prompt resource, or paragraph must be used, and do not claim coverage
+that the available evidence does not support.

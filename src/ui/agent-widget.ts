@@ -283,6 +283,53 @@ export function describeActivity(activeTools: Map<string, string>, responseText?
   return "thinking…";
 }
 
+export interface ExecutionStatPartsInput {
+  modelName?: string;
+  thinking?: string;
+  turnCount?: number;
+  maxTurns?: number;
+  toolUses?: number;
+  tokenText?: string;
+  costText?: string;
+  elapsed?: string;
+}
+
+/** Shared execution-stat order for ordinary agents and workflow children. */
+export function executionStatParts(input: ExecutionStatPartsInput): string[] {
+  const parts: string[] = [];
+  if (input.modelName) parts.push(input.modelName);
+  if (input.thinking) parts.push(input.thinking);
+  if ((input.turnCount ?? 0) > 0) parts.push(formatTurns(input.turnCount!, input.maxTurns));
+  if ((input.toolUses ?? 0) > 0) {
+    parts.push(`${input.toolUses} tool use${input.toolUses === 1 ? "" : "s"}`);
+  }
+  if (input.tokenText) parts.push(input.tokenText);
+  if (input.costText) parts.push(input.costText);
+  if (input.elapsed) parts.push(input.elapsed);
+  return parts;
+}
+
+export interface ExecutionActivityInput {
+  activeTools?: Map<string, string>;
+  responseText?: string;
+  activity?: string;
+  outputPreview?: string;
+}
+
+/** Shared current-work wording for ordinary activity and workflow snapshots. */
+export function executionActivityText(input: ExecutionActivityInput): string {
+  if (input.activeTools !== undefined) {
+    return describeActivity(input.activeTools, input.responseText);
+  }
+  if (input.activity?.startsWith("tool: ")) {
+    const toolName = input.activity.slice("tool: ".length);
+    return describeActivity(new Map([[toolName, toolName]]));
+  }
+  if (input.outputPreview) return describeActivity(new Map(), input.outputPreview);
+  if (input.activity && input.activity !== "responding") return input.activity;
+  return describeActivity(new Map(), input.responseText);
+}
+
 // ---- Widget manager ----
 
 export class AgentWidget {
@@ -444,7 +491,18 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string; lifetimeUsage?: LifetimeUsage }, theme: Theme): string {
+  private renderFinishedLine(a: {
+    id: string;
+    type: SubagentType;
+    status: string;
+    description: string;
+    toolUses: number;
+    turnCount?: number;
+    startedAt: number;
+    completedAt?: number;
+    error?: string;
+    lifetimeUsage?: LifetimeUsage;
+  }, theme: Theme): string {
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
 
@@ -469,16 +527,15 @@ export class AgentWidget {
       statusText = theme.fg("warning", " aborted");
     }
 
-    const parts: string[] = [];
     const activity = this.agentActivity.get(a.id);
-    if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
-    if (a.toolUses > 0) parts.push(`${a.toolUses} tool use${a.toolUses === 1 ? "" : "s"}`);
-    // From the record, not the activity tracker: that entry is deleted the
-    // moment an agent finishes, and "what did it cost" is a question asked
-    // about finished agents.
     const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
-    if (costText) parts.push(costText);
-    parts.push(duration);
+    const parts = executionStatParts({
+      turnCount: activity?.turnCount ?? a.turnCount,
+      maxTurns: activity?.maxTurns,
+      toolUses: a.toolUses,
+      costText,
+      elapsed: duration,
+    });
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
@@ -525,8 +582,14 @@ export class AgentWidget {
     const settledWorkflows = workflows.filter(workflow =>
       workflow.status !== "running" && workflow.status !== "paused");
     const orderedWorkflows = [...activeWorkflows, ...settledWorkflows];
+    const workflowAgentRows = (agent: FleetWorkflowAgent) => agent.state === "running" ? 2 : 1;
     const workflowDescendantCount = (workflow: FleetWorkflow) =>
       workflow.phases.reduce((count, phase) => count + 1 + phase.agents.length, 0);
+    const workflowRenderedRows = (workflow: FleetWorkflow) =>
+      workflow.phases.reduce(
+        (count, phase) => count + 1 + phase.agents.reduce((rows, agent) => rows + workflowAgentRows(agent), 0),
+        0,
+      );
 
     interface VisibleWorkflowPhase {
       phase: FleetWorkflowPhase;
@@ -551,7 +614,9 @@ export class AgentWidget {
               : theme.fg("dim", "■");
       return truncate(
         `${theme.fg("dim", hasLaterTopLevel ? "├─" : "└─")} ${glyph} ${theme.bold(workflow.name)}`
-        + `  ${theme.fg("dim", workflow.status)} · ${workflow.doneCount}/${workflow.totalCount} agents`
+        + `  ${theme.fg("dim", workflow.status)} · ${workflow.doneCount}/${workflow.totalCount} agents${
+          workflow.status === "running" || workflow.status === "paused" ? " so far" : ""
+        }`
         + ` · ${formatMs(fleetWorkflowElapsed(workflow, Date.now()))}`,
       );
     };
@@ -573,19 +638,60 @@ export class AgentWidget {
       rootHasLaterTopLevel: boolean,
       phaseHasLaterSibling: boolean,
       childHasLaterSibling: boolean,
-    ): string => {
+    ): string[] => {
+      const record = agent.recordId !== undefined ? this.manager.getRecord(agent.recordId) : undefined;
+      const type = record?.type ?? agent.agentType;
+      const modeLabel = getPromptModeLabel(type);
+      const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
       const elapsed = agent.startedAt === undefined
         ? undefined
         : formatMs(Math.max(0, (agent.completedAt ?? Date.now()) - agent.startedAt));
-      const tail = [agent.state, agent.model, elapsed].filter((part): part is string => part !== undefined);
+      const tokens = record ? getLifetimeTotal(record.lifetimeUsage) : agent.tokens;
+      const tokenText = tokens > 0
+        ? formatSessionTokens(
+            tokens,
+            getSessionContextPercent(record?.session),
+            theme,
+            record?.compactionCount ?? 0,
+          )
+        : "";
+      const costText = this.showCost() && record
+        ? formatCost(getLifetimeCost(record.lifetimeUsage))
+        : "";
+      const invocation = this.showModel() ? buildInvocationTags(record?.invocation) : undefined;
+      const parts = executionStatParts({
+        modelName: invocation?.modelName ?? (this.showModel() ? agent.model : undefined),
+        thinking: invocation?.tags.find(tag => tag.startsWith("thinking: ")),
+        turnCount: agent.turnCount ?? record?.turnCount,
+        maxTurns: record?.invocation?.maxTurns,
+        toolUses: record?.toolUses ?? agent.toolUses,
+        tokenText,
+        costText,
+        elapsed,
+      });
       const rootRail = rootHasLaterTopLevel ? "│  " : "   ";
       const phaseRail = phaseHasLaterSibling ? "│  " : "   ";
-      return truncate(
-        `${theme.fg("dim", `${rootRail}${phaseRail}${childHasLaterSibling ? "├─" : "└─"}`)}`
+      const childBranch = childHasLaterSibling ? "├─" : "└─";
+      const headerParts = [agent.state, ...parts];
+      const header = truncate(
+        `${theme.fg("dim", `${rootRail}${phaseRail}${childBranch}`)}`
         + ` ${workflowStateGlyph(agent.state, frame, theme)}`
-        + ` ${renderAgentName(agent.agentType, theme, { fallbackColor: "muted" })}  ${agent.label}`
-        + ` ${theme.fg("dim", tail.join(" · "))}`,
+        + ` ${renderAgentName(type, theme, { fallbackColor: "muted" })}${modeTag}  ${agent.label}`
+        + ` ${theme.fg("dim", `· ${headerParts.join(" · ")}`)}`,
       );
+      if (agent.state !== "running") return [header];
+      const continuation = childHasLaterSibling ? "│  " : "   ";
+      const activity = executionActivityText({
+        activity: agent.activity,
+        outputPreview: agent.outputPreview,
+      });
+      return [
+        header,
+        truncate(
+          theme.fg("dim", `${rootRail}${phaseRail}${continuation}`)
+          + theme.fg("dim", `   ⎿  ${activity}`),
+        ),
+      ];
     };
 
     const runningLines: string[][] = [];
@@ -603,18 +709,20 @@ export class AgentWidget {
         ? formatSessionTokens(tokens, contextPercent, theme, agent.compactionCount)
         : "";
       const costText = this.showCost() ? formatCost(getLifetimeCost(agent.lifetimeUsage)) : "";
-      const parts: string[] = [];
-      if (this.showModel()) {
-        const { modelName, tags } = buildInvocationTags(agent.invocation);
-        if (modelName) parts.push(modelName);
-        const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
-        if (thinkingTag) parts.push(thinkingTag);
-      }
-      if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
-      if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
-      if (tokenText) parts.push(tokenText);
-      if (costText) parts.push(costText);
-      parts.push(elapsed);
+      const parts = executionStatParts({
+        ...(this.showModel()
+          ? (() => {
+              const { modelName, tags } = buildInvocationTags(agent.invocation);
+              return { modelName, thinking: tags.find(tag => tag.startsWith("thinking: ")) };
+            })()
+          : {}),
+        turnCount: activity?.turnCount ?? agent.turnCount,
+        maxTurns: activity?.maxTurns ?? agent.invocation?.maxTurns,
+        toolUses,
+        tokenText,
+        costText,
+        elapsed,
+      });
       runningLines.push([
         truncate(
           theme.fg("dim", "├─")
@@ -624,7 +732,10 @@ export class AgentWidget {
         ),
         truncate(theme.fg("dim", "│  ") + theme.fg(
           "dim",
-          `  ⎿  ${activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…"}`,
+          `  ⎿  ${executionActivityText({
+            activeTools: activity?.activeTools,
+            responseText: activity?.responseText,
+          })}`,
         )),
       ]);
     }
@@ -635,7 +746,7 @@ export class AgentWidget {
       truncate(theme.fg("dim", "├─") + " " + this.renderFinishedLine(agent, theme)));
 
     const workflowNodeCount = orderedWorkflows.reduce(
-      (count, workflow) => count + 1 + workflowDescendantCount(workflow),
+      (count, workflow) => count + 1 + workflowRenderedRows(workflow),
       0,
     );
     const bodyLimit = MAX_WIDGET_LINES - 1;
@@ -690,14 +801,15 @@ export class AgentWidget {
         descendantBudget--;
 
         for (let agentIndex = 0; agentIndex < phase.agents.length; agentIndex++) {
-          if (descendantBudget < 1) {
+          const rows = workflowAgentRows(phase.agents[agentIndex]);
+          if (descendantBudget < rows) {
             visiblePhase.hiddenAgents = phase.agents.length - agentIndex;
             hiddenWorkflow += visiblePhase.hiddenAgents;
             break;
           }
           visiblePhase.agents.push(phase.agents[agentIndex]);
-          budget--;
-          descendantBudget--;
+          budget -= rows;
+          descendantBudget -= rows;
         }
       }
     };
@@ -756,7 +868,7 @@ export class AgentWidget {
           for (let agentIndex = 0; agentIndex < visiblePhase.agents.length; agentIndex++) {
             const childHasLaterSibling = agentIndex < visiblePhase.agents.length - 1
               || visiblePhase.hiddenAgents > 0;
-            lines.push(renderWorkflowAgent(
+            lines.push(...renderWorkflowAgent(
               visiblePhase.agents[agentIndex],
               hasLaterTopLevel,
               phaseHasLaterSibling,

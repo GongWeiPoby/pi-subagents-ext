@@ -17,10 +17,9 @@ export interface PromptExtras {
    */
   worktreeBase?: string;
   /**
-   * Set only for a workflow's own children, and only when they have no
-   * `StructuredOutput` tool to answer through.
+   * Set only for a workflow's own children.
    *
-   * A workflow child's final text is not read by a human — it is the value
+   * A workflow child's final text or Markdown is not read by a human — it is the value
    * `agent()` resolves to, and the script interpolates it straight into the
    * next stage's prompt. Without this, children answer the way every other
    * subagent does (a report addressed to a reader), and the padding becomes
@@ -81,8 +80,8 @@ Work only inside it — never in ${extras.worktreeBase}, even if other instructi
   // `PromptExtras.workflowChild` for why only workflow children get this.
   const workflowBlock = extras?.workflowChild
     ? `\n\n<workflow_child>
-Your final message IS the return value of this task. A workflow script captures it and passes it to the next stage; no person reads it.
-Return only the answer, in exactly the shape the prompt asks for — no preamble, no summary of what you did, no offer to continue.
+Your final message IS the text/Markdown return value of this task. A workflow script captures it and passes it to the next stage; no person reads it.
+Return only the answer, in exactly the text or Markdown shape the prompt asks for — no preamble, no summary of what you did, no offer to continue.
 </workflow_child>`
     : "";
 

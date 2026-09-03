@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import initExtension from "../../src/tasks/index.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
-import { installSubagentsMock, mockPi } from "./helpers/mock-pi.js";
+import { flush, installSubagentsMock, mockPi } from "./helpers/mock-pi.js";
 
 const config = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 vi.mock("../../src/tasks/tasks-config.js", () => ({
@@ -187,6 +187,123 @@ describe("/tasks clearing", () => {
     });
     expect((await mock.executeTool("TaskList", {})).content[0].text).toBe("No tasks found");
     expect(existsSync(taskFile)).toBe(false);
+  });
+
+  it("refuses delete with a warning while an agent claim is waiting to bind", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi, { spawnReplyDelayMs: 20 });
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Agent starting",
+      description: "d",
+      agentType: "general-purpose",
+    });
+
+    const launching = mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    await flush();
+    expect(new TaskStore(taskFile).get("1")?.execution).not.toHaveProperty("executorId");
+    const scripted = scriptedUI([0, 0, "✗ Delete", undefined]);
+    await mock.runCommand("tasks", "", { ui: scripted.ui });
+
+    expect(scripted.ui.notify).toHaveBeenCalledWith(
+      "Could not delete task #1: agent execution is starting; wait for startup to finish",
+      "warning",
+    );
+    expect((await launching).content[0].text).toContain("Launched 1 agent");
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "in_progress",
+      owner: "agent-1",
+    });
+    rpc.unsub();
+  });
+
+  it("refuses clear all with a warning while a workflow claim is waiting to bind", async () => {
+    const mock = mockPi();
+    const coordinator = initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", { subject: "Workflow starting", description: "d" });
+    const claim = coordinator.claim("1", "workflow", "workflow-attempt", "task-attempt");
+    expect(claim).toBeDefined();
+
+    const scripted = scriptedUI(["Clear all (1)", undefined]);
+    await mock.runCommand("tasks", "", { ui: scripted.ui });
+
+    expect(scripted.ui.notify).toHaveBeenCalledWith(
+      "Could not clear tasks: task #1 has a workflow execution starting; wait for startup to finish",
+      "warning",
+    );
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "in_progress",
+      execution: claim,
+    });
+    coordinator.rollback(claim!);
+  });
+
+  it("does not clear a task reserved by a concurrent TaskUpdate", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi, { stopReplyDelayMs: 20 });
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Running",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    const updating = mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "pending",
+      subject: "Reserved update",
+    });
+    await flush();
+    const scripted = scriptedUI(["Clear all (1)", undefined]);
+    await mock.runCommand("tasks", "", { ui: scripted.ui });
+
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "pending",
+      subject: "Running",
+      execution: expect.any(Object),
+    });
+    await updating;
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "pending",
+      subject: "Reserved update",
+      execution: undefined,
+    });
+    rpc.unsub();
+  });
+
+  it("does not delete a task reserved by a concurrent TaskUpdate", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi, { stopReplyDelayMs: 20 });
+    initExtension(mock.pi as never);
+    await mock.executeTool("TaskCreate", {
+      subject: "Running",
+      description: "d",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+
+    const updating = mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      status: "pending",
+      subject: "Reserved update",
+    });
+    await flush();
+    const scripted = scriptedUI([0, 0, "✗ Delete", undefined]);
+    await mock.runCommand("tasks", "", { ui: scripted.ui });
+
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "pending",
+      subject: "Running",
+      execution: expect.any(Object),
+    });
+    await updating;
+    expect(new TaskStore(taskFile).get("1")).toMatchObject({
+      status: "pending",
+      subject: "Reserved update",
+      execution: undefined,
+    });
+    rpc.unsub();
   });
 
   it("stops active agent-backed tasks before clearing them", async () => {
