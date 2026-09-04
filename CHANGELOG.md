@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Privacy-off startup workflows no longer persist child content in the parent session entry.** `--subagents-workflow-file` entries now use the workflow's run-start `outputTranscript` snapshot. When disabled, the entry retains structural phase/agent status, counters, the fixed `Output persistence disabled.` marker, and the aggregate manifest locator, while omitting child-derived labels, errors, logs, activity, and prompt/result/stream previews; privacy-on entries remain complete.
+- **`Agent resume` now accepts a handle, and a miss names the agents that are still resumable.** A foreground result carries its agent id only in renderer details, which are never serialized to the model, so an orchestrator that wanted to continue a foreground agent held no legal `resume` value — it invented an id, got `Agent not found … It may have been cleaned up.` while the record was alive and resumable, and (reading the message literally) abandoned the conversation and started a fresh agent, losing all context. `resume` now resolves ids and handles (`name`/type-derived) exactly like `get_subagent_result` and `steer_subagent`, and a not-found reply appends the session's resumable top-level agents (handle, id, type, status) so the caller retries with a real reference instead of concluding eviction. Id-based resume is unchanged; nested records remain rejected.
 
 ## [0.19.0] - 2026-08-25
 
