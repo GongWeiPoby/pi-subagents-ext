@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow execution UI and task metrics now settle cleanly.** FleetView draws phase and child connectors from real sibling positions; interrupted child clocks freeze at the workflow end; failed paused runs bank held time; settled workflow dialogs stop their animation timer; and reactivated or session-replaced task IDs start with fresh elapsed/token metrics.
 
 ### Fixed
+- **The built-in `Explore` agent no longer pins Anthropic Claude Haiku.** It now inherits the parent model by default, so installations without Anthropic access work without fallback behavior and an explicit `Agent({ model })` choice is honored.
 - **Privacy-off startup workflows no longer persist child content in the parent session entry.** `--subagents-workflow-file` entries now use the workflow's run-start `outputTranscript` snapshot. When disabled, the entry retains structural phase/agent status, counters, the fixed `Output persistence disabled.` marker, and the aggregate manifest locator, while omitting child-derived labels, errors, logs, activity, and prompt/result/stream previews; privacy-on entries remain complete.
 
 ## [0.19.0] - 2026-08-25
