@@ -769,6 +769,28 @@ export default function (pi: ExtensionAPI) {
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
 
+  /**
+   * Suffix for a resume failure: the top-level agents that ARE resumable right
+   * now, as `handle (id, type, status)` lines. A caller that just missed the
+   * target — most often by inventing an id it was never given, because a
+   * foreground result carries its id only in renderer details — would
+   * otherwise conclude the record was "cleaned up" and abandon a perfectly
+   * resumable conversation. Listing real refs turns the miss into a retry with
+   * a valid handle. Running/queued agents are excluded: resume refuses them,
+   * and listing them would invite exactly that refusal. Empty when nothing is
+   * resumable, so the not-found text keeps its old shape in that case.
+   */
+  const formatResumableAgents = (mgr: AgentManager): string => {
+    const resumable = mgr.listAgents().filter(
+      r => isTopLevelAgent(r) && r.session && r.status !== "running" && r.status !== "queued",
+    );
+    if (resumable.length === 0) return "";
+    const lines = resumable.map(
+      r => `  - ${r.handle ?? r.id} (id: ${r.id}, type: ${r.type}, status: ${r.status}${r.alias && r.alias !== r.handle ? `, alias: ${r.alias}` : ""})`,
+    );
+    return `\nAgents still resumable in this session:\n${lines.join("\n")}\nResume one with its handle or id.`;
+  };
+
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
@@ -1688,7 +1710,8 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description:
+            'Optional agent to resume — its ID or its handle (`name` you gave it, else its type like `worker`/`worker-2`). Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.',
         }),
       ),
       isolated: Type.Optional(
@@ -2028,9 +2051,15 @@ Terse command-style prompts produce shallow, generic work.
 
       // Resume existing agent
       if (params.resume) {
-        const existing = manager.getRecord(params.resume);
+        // resolveAgentRef, not getRecord: a caller can hold a handle (`name` it
+        // itself assigned) without ever having been given the id — a foreground
+        // result carries its agent id only in renderer details, which are never
+        // serialized to the model. Ids are tried first inside resolveAgentRef,
+        // keeping id-based resume exact; nested records are rejected below by
+        // the isTopLevelAgent check, exactly as before.
+        const existing = resolveAgentRef(params.resume);
         if (!existing || !isTopLevelAgent(existing)) {
-          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.${formatResumableAgents(manager)}`);
         }
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
@@ -2075,7 +2104,7 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const record = await manager.resume(existing.id, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
