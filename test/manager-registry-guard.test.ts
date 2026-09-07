@@ -62,7 +62,7 @@ async function spawnBackground(tools: Map<string, any>): Promise<string> {
   vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "registry test agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "registry test agent", subagent_type: "Worker", run_in_background: true },
     undefined,
     undefined,
     ctx(),
@@ -122,7 +122,7 @@ describe("the registry spawn strips internal capabilities", () => {
     subagentsExtension(root.pi);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any);
     const entry = (globalThis as any)[MANAGER_KEY];
-    const id = entry.spawn(root.pi, ctx(), "general-purpose", "go", {
+    const id = entry.spawn(root.pi, ctx(), "Worker", "go", {
       description: "forged", isBackground: true, ...options,
     });
     return { entry, id, root, runOpts: () => vi.mocked(runAgent).mock.calls[0][3] as any };
@@ -159,9 +159,9 @@ describe("the registry spawn strips internal capabilities", () => {
   it("refuses a forged reclaim and allocates a handle the ordinary way", async () => {
     // reclaim bypasses assignHandle, so a forged value could duplicate a live
     // agent's name and make `@handle` resolve to either of two records.
-    const { entry, id, root } = forge({ reclaim: { handle: "explore", alias: "auth-audit" } });
+    const { entry, id, root } = forge({ reclaim: { handle: "explorer", alias: "auth-audit" } });
 
-    expect(entry.getRecord(id)).toMatchObject({ handle: "general-purpose", alias: undefined });
+    expect(entry.getRecord(id)).toMatchObject({ handle: "worker", alias: undefined });
     await root.lifecycle.get("session_shutdown")?.();
   });
 });

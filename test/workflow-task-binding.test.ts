@@ -145,7 +145,7 @@ describe("SubagentWorkflow task_id execution binding", () => {
     await harness.execute("TaskCreate", {
       subject: "Bound Todo",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
   }
 
@@ -506,7 +506,11 @@ describe("SubagentWorkflow task_id execution binding", () => {
     const workflowId = /Task ID: (wf_\w+)/.exec(textOf(started))?.[1];
     expect(workflowId).toBeTruthy();
     await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1));
-    await first.execute("TaskOutput", { task_id: workflowId!, block: false, view: "summary" });
+    // A child starting is not the workflow settling; shutdown would otherwise race completion.
+    const settled = await first.execute("TaskOutput", {
+      task_id: workflowId!, block: true, timeout: 5_000, view: "summary",
+    });
+    expect(textOf(settled)).toContain(`Workflow: ${workflowId} [completed]`);
     await first.fire("session_shutdown");
 
     const reloaded = integratedHarness(hermetic.dir);
@@ -849,7 +853,7 @@ describe("SubagentWorkflow task_id execution binding", () => {
     await harness.execute("TaskCreate", {
       subject: "Queued Todo",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await harness.execute("TaskExecute", { task_ids: ["1", "2"] });
     await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1));

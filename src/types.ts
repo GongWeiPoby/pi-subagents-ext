@@ -13,7 +13,7 @@ export type { ThinkingLevel };
 export type SubagentType = string;
 
 /** Names of the three embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
+export const DEFAULT_AGENT_NAMES = ["Explorer", "Worker", "Reviewer"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
@@ -188,7 +188,7 @@ export interface AgentRecord {
   type: SubagentType;
   /**
    * Typeable name for the `@handle message` prompt mention, derived from the
-   * agent type and numbered when siblings collide (`explore`, `explore-2`).
+   * agent type and numbered when siblings collide (`explorer`, `explorer-2`).
    * Top-level agents only — nested children are hidden from every top-level
    * surface, so nothing can address them.
    */
@@ -197,7 +197,7 @@ export interface AgentRecord {
    * A second, memorable handle from the spawner's `name` (`@auth-audit`), drawn
    * from the same namespace as `handle` so the two can never collide. Purely
    * additive: `handle` is assigned regardless, so a named agent stays reachable
-   * by its type and `@explore` never comes to mean "start another one".
+   * by its type and `@explorer` never comes to mean "start another one".
    */
   alias?: string;
   description: string;

@@ -133,7 +133,7 @@ describe("Agent tool — resume reference resolution", () => {
   async function spawnNamedForeground(tools: Map<string, any>, ctx: any, name: string) {
     const res = await tools.get("Agent").execute(
       "spawn-call",
-      { prompt: "first task", description: "First task", subagent_type: "general-purpose", name, run_in_background: false },
+      { prompt: "first task", description: "First task", subagent_type: "Worker", name, run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -151,7 +151,7 @@ describe("Agent tool — resume reference resolution", () => {
 
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: "workspace-worker", run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: "workspace-worker", run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -170,16 +170,16 @@ describe("Agent tool — resume reference resolution", () => {
     const ctx = makeCtx(cwd);
     await tools.get("Agent").execute(
       "spawn-call",
-      { prompt: "first task", description: "First task", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "first task", description: "First task", subagent_type: "Worker", run_in_background: false },
       undefined,
       undefined,
       ctx,
     );
 
-    // general-purpose → handle "general-purpose"
+    // Worker → handle "Worker"
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: "general-purpose", run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: "Worker", run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -196,7 +196,7 @@ describe("Agent tool — resume reference resolution", () => {
     const ctx = makeCtx(cwd);
     const spawnRes = await tools.get("Agent").execute(
       "spawn-call",
-      { prompt: "first task", description: "First task", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "first task", description: "First task", subagent_type: "Worker", run_in_background: true },
       undefined,
       undefined,
       ctx,
@@ -207,7 +207,7 @@ describe("Agent tool — resume reference resolution", () => {
 
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: id, run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -226,7 +226,7 @@ describe("Agent tool — resume reference resolution", () => {
 
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: "22d569a3-5d0e-446", run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: "22d569a3-5d0e-446", run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -237,7 +237,7 @@ describe("Agent tool — resume reference resolution", () => {
     expect(text).toContain("resumable");
     // The real agent is named with its handle, id, type and settled status.
     expect(text).toContain("workspace-worker");
-    expect(text).toContain("general-purpose");
+    expect(text).toContain("Worker");
     expect(text).toMatch(/id: [0-9a-f-]+/);
 
     await lifecycle.get("session_shutdown")?.({}, ctx);
@@ -252,7 +252,7 @@ describe("Agent tool — resume reference resolution", () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const bg = await tools.get("Agent").execute(
       "spawn-bg",
-      { prompt: "long task", description: "Long task", subagent_type: "general-purpose", name: "busy-worker", run_in_background: true },
+      { prompt: "long task", description: "Long task", subagent_type: "Worker", name: "busy-worker", run_in_background: true },
       undefined,
       undefined,
       ctx,
@@ -262,7 +262,7 @@ describe("Agent tool — resume reference resolution", () => {
 
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: "does-not-exist", run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: "does-not-exist", run_in_background: false },
       undefined,
       undefined,
       ctx,
@@ -283,7 +283,7 @@ describe("Agent tool — resume reference resolution", () => {
 
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: "nope", run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: "nope", run_in_background: false },
       undefined,
       undefined,
       ctx,

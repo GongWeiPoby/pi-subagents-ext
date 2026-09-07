@@ -55,7 +55,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
         parentInitial: agentCall({
-          subagent_type: "general-purpose",
+          subagent_type: "Worker",
           description: "greet",
           prompt: "Say hello.",
           run_in_background: true,
@@ -86,7 +86,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
         parentInitial: agentCall({
-          subagent_type: "general-purpose",
+          subagent_type: "Worker",
           description: "greet",
           prompt: "Say hello.",
           run_in_background: false,
@@ -196,7 +196,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(toolResults.length).toBe(1);
     expect(toolResults[0]).toContain(MARKER);
     expect(toolResults[0]).not.toContain("MISSING");
-    // The custom type resolved — it did NOT silently fall back to general-purpose.
+    // The custom type resolved — it did NOT silently fall back to Worker.
     expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
   });
 
@@ -288,7 +288,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 //
 // These are SMOKE tests, not strict assertions: a live model decides whether and
 // how to call the tool, so we cover the subset it can be reliably steered into
-// (foreground spawn, background spawn + get_subagent_result, an Explore spawn)
+// (foreground spawn, background spawn + get_subagent_result, an Explorer spawn)
 // and assert robust invariants (a real spawn happened and produced output).
 // Per-feature determinism lives in the faux suite above, which scripts exact calls.
 const LIVE_TIMEOUT = 150_000;
@@ -316,7 +316,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
     async () => {
       run = await runPrintMode({
         prompt:
-          "Use the Agent tool to spawn a general-purpose subagent (run_in_background: false) " +
+          "Use the Agent tool to spawn a Worker subagent (run_in_background: false) " +
           "whose only task is to reply with the exact word PONG, then tell me what it replied.",
         timeoutMs: LIVE_TIMEOUT,
       });
@@ -334,7 +334,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
     async () => {
       run = await runPrintMode({
         prompt:
-          "Spawn a general-purpose subagent IN THE BACKGROUND (run_in_background: true) whose " +
+          "Spawn a Worker subagent IN THE BACKGROUND (run_in_background: true) whose " +
           "only task is to reply with the exact word BGPONG. After it finishes, use the " +
           "get_subagent_result tool to fetch its result, then tell me exactly what it said.",
         timeoutMs: LIVE_TIMEOUT,
@@ -352,18 +352,18 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   );
 
   it(
-    "Explore subagent_type — model dispatches a non-default agent type",
+    "Explorer subagent_type — model dispatches a non-default agent type",
     async () => {
       run = await runPrintMode({
         prompt:
-          "Use the Agent tool with subagent_type 'Explore' to look at the current working " +
+          "Use the Agent tool with subagent_type 'Explorer' to look at the current working " +
           "directory and report a one-line summary of what's there.",
         timeoutMs: LIVE_TIMEOUT,
       });
       const calls = agentToolCalls(run.parentSession);
       // The non-default type was actually selected (case-insensitive per README).
       expect(
-        calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore"),
+        calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explorer"),
       ).toBe(true);
       expect(run.responseText.length).toBeGreaterThan(0);
     },
@@ -380,12 +380,12 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
         prompt: [
           "You are smoke-testing your own Agent toolset. Do these steps IN ORDER, then print a",
           "final report with one PASS/FAIL line per step:",
-          "1) FOREGROUND: spawn a general-purpose subagent (run_in_background: false) whose only",
+          "1) FOREGROUND: spawn a Worker subagent (run_in_background: false) whose only",
           "   task is to reply with the exact token FG_OK. Confirm you got FG_OK back.",
-          "2) BACKGROUND: spawn a general-purpose subagent with run_in_background: true whose only",
+          "2) BACKGROUND: spawn a Worker subagent with run_in_background: true whose only",
           "   task is to reply with the exact token BG_OK. After it finishes, call get_subagent_result",
           "   to retrieve its output. Confirm you got BG_OK.",
-          "3) EXPLORE: spawn a subagent with subagent_type 'Explore' to summarize the current",
+          "3) EXPLORER: spawn a subagent with subagent_type 'Explorer' to summarize the current",
           "   working directory in one line.",
           "Finish with: 'SELF-SMOKE COMPLETE' followed by the PASS/FAIL lines.",
         ].join("\n"),
@@ -402,8 +402,8 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       expect(calls.some((c) => c.run_in_background === true)).toBe(true);
       // — the result-retrieval tool was called
       expect(tools).toContain("get_subagent_result");
-      // — the Explore type was dispatched
-      expect(calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore")).toBe(true);
+      // — the Explorer type was dispatched
+      expect(calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explorer")).toBe(true);
       // — and the real child outputs materialized in the conversation (the
       //   foreground tool result + the get_subagent_result result). We check the
       //   whole transcript, not the final message: the agent's closing report

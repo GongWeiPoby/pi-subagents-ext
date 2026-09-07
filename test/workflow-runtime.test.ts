@@ -100,7 +100,7 @@ describe("script globals", () => {
     expect(result.meta.name).toBe("probe");
     expect(result.agentCount).toBe(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0].agentType).toBe("general-purpose");
+    expect(calls[0].agentType).toBe("Worker");
     expect(calls[0].label).toBe("hello");
   });
 
@@ -1577,7 +1577,7 @@ describe("pause and the concurrency limit", () => {
 describe("Claude Code option compatibility", () => {
   it("names a misspelt option rather than ignoring it", async () => {
     const stub = stubHost();
-    const result = await run("return await agent('go', { agenttype: 'Explore' });", { host: stub.host });
+    const result = await run("return await agent('go', { agenttype: 'Explorer' });", { host: stub.host });
 
     expect(result.status).toBe("failed");
     expect(result.error).toMatch(/agenttype/);
@@ -1587,12 +1587,12 @@ describe("Claude Code option compatibility", () => {
   it("accepts every option a Claude Code script actually uses", async () => {
     const stub = stubHost();
     const result = await run(
-      "return await agent('go', { label: 'L', phase: 'P', agentType: 'general-purpose', model: 'haiku', effort: 'high', isolation: 'worktree' });",
+      "return await agent('go', { label: 'L', phase: 'P', agentType: 'Worker', model: 'haiku', effort: 'high', isolation: 'worktree' });",
       { host: stub.host },
     );
 
     expect(result.status).toBe("completed");
-    expect(stub.calls[0]).toMatchObject({ label: "L", agentType: "general-purpose", effort: "high" });
+    expect(stub.calls[0]).toMatchObject({ label: "L", agentType: "Worker", effort: "high" });
   });
 
   it("passes each pipeline stage (previous, item, index), as Claude Code does", async () => {

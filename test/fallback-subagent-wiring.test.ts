@@ -142,7 +142,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
     // Not merely "something ran" — a fallback that routed anywhere else would pass that.
     expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(), "general-purpose", "do it", expect.anything(),
+      expect.anything(), "Worker", "do it", expect.anything(),
     );
   });
 
@@ -203,7 +203,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       JSON.parse(readFileSync(join(storeDir, f), "utf-8")).jobs ?? [],
     );
     expect(jobs).toHaveLength(1);
-    expect(jobs[0].subagent_type).toBe("general-purpose");
+    expect(jobs[0].subagent_type).toBe("Worker");
   });
 
   it("never blocks resume, which ignores subagent_type entirely", async () => {
@@ -239,7 +239,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     boot();
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
-    expect(() => registry.spawn({}, ctx(), "general-purpose", "do it", {
+    expect(() => registry.spawn({}, ctx(), "Worker", "do it", {
       description: "rpc",
       structuredOutput: { type: "object" },
     })).toThrow(/options\.structuredOutput is no longer supported/);

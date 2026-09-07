@@ -130,7 +130,7 @@ describe("Agent tool — background resume wiring", () => {
   });
 
   /** Spawn a background agent and let it settle, so it holds a resumable session. */
-  async function spawnSettled(tools: Map<string, any>, ctx: any, type = "general-purpose") {
+  async function spawnSettled(tools: Map<string, any>, ctx: any, type = "Worker") {
     const res = await tools.get("Agent").execute(
       "spawn-call",
       { prompt: "first task", description: "First task", subagent_type: type, run_in_background: true },
@@ -163,7 +163,7 @@ describe("Agent tool — background resume wiring", () => {
     const toolAbort = new AbortController();
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: id, run_in_background: true },
       toolAbort.signal,
       undefined,
       ctx,
@@ -193,7 +193,7 @@ describe("Agent tool — background resume wiring", () => {
 
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: id, run_in_background: true },
       undefined,
       undefined,
       ctx,
@@ -219,7 +219,7 @@ describe("Agent tool — background resume wiring", () => {
     const { pi, tools, lifecycle, emitted } = makePi();
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
-    const id = await spawnSettled(tools, ctx, "general-purpose");
+    const id = await spawnSettled(tools, ctx, "Worker");
 
     emitted.length = 0;
     const res = await tools.get("Agent").execute(
@@ -232,9 +232,9 @@ describe("Agent tool — background resume wiring", () => {
 
     const created = emitted.find(e => e.event === "subagents:created");
     expect(created).toBeDefined();
-    expect(created!.payload.type).toBe("general-purpose");
+    expect(created!.payload.type).toBe("Worker");
     expect(created!.payload.id).toBe(id);
-    expect(resultText(res)).toContain("Type: general-purpose");
+    expect(resultText(res)).toContain("Type: Worker");
 
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
@@ -252,7 +252,7 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
     vi.mocked(resumeAgent).mockClear();
 
-    const params = { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true };
+    const params = { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: id, run_in_background: true };
     await tools.get("Agent").execute("resume-1", params, undefined, undefined, ctx);
     const second = await tools.get("Agent").execute("resume-2", params, undefined, undefined, ctx);
 
@@ -275,7 +275,7 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockResolvedValue({ text: "inline answer" } as any);
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "Worker", resume: id, run_in_background: false },
       undefined,
       undefined,
       ctx,

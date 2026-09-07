@@ -77,7 +77,7 @@ export interface FleetOptions {
 export function makeRecord(i: number, overrides: Record<string, unknown> = {}) {
   return {
     id: `perf-agent-${i}`,
-    type: i % 3 === 0 ? "Explore" : "general-purpose",
+    type: i % 3 === 0 ? "Explorer" : "Worker",
     description: `agent ${i} inspecting a subsystem for the benchmark fixture`,
     status: "running",
     toolUses: i % 7,

@@ -30,7 +30,7 @@ afterEach(() => { delete process.env.PI_TASKS; });
 
 /** Create an agent-backed task and launch it, returning the harness. */
 async function launchAgentTask(mock: ReturnType<typeof mockPi>, subject = "Agent task") {
-  await mock.executeTool("TaskCreate", { subject, description: "d", agentType: "general-purpose" });
+  await mock.executeTool("TaskCreate", { subject, description: "d", agentType: "Worker" });
   await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 }
 
@@ -1284,12 +1284,12 @@ describe("TaskOutput — agent ID lookups", () => {
       await mock.executeTool("TaskCreate", {
         subject: "First",
         description: "d",
-        agentType: "general-purpose",
+        agentType: "Worker",
       });
       await mock.executeTool("TaskCreate", {
         subject: "Second",
         description: "d",
-        agentType: "general-purpose",
+        agentType: "Worker",
       });
       await mock.executeTool("TaskExecute", { task_ids: ["1", "2"] });
 

@@ -324,7 +324,7 @@ describe("TaskExecute", () => {
     await freshMock.executeTool("TaskCreate", {
       subject: "Test task",
       description: "Do something",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const result = await freshMock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -350,7 +350,7 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Already started",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "1", status: "in_progress" });
 
@@ -362,12 +362,12 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Blocker",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Blocked",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
@@ -379,7 +379,7 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Run tests",
       description: "Run the test suite",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -388,7 +388,7 @@ describe("TaskExecute", () => {
 
     // Verify the RPC responder was called
     expect(rpc.spawned).toHaveLength(1);
-    expect(rpc.spawned[0].type).toBe("general-purpose");
+    expect(rpc.spawned[0].type).toBe("Worker");
     expect(rpc.spawned[0].prompt).toContain("Run the test suite");
     expect(rpc.spawned[0].options.isBackground).toBe(true);
     expect(rpc.spawned[0].options).not.toHaveProperty("resultBodyEnabled");
@@ -413,7 +413,7 @@ describe("TaskExecute", () => {
       await mock.executeTool("TaskCreate", {
         subject: "Fast task",
         description: "Finish immediately",
-        agentType: "general-purpose",
+        agentType: "Worker",
       });
       await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -429,7 +429,7 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Explore codebase",
       description: "Find all API endpoints",
-      agentType: "Explore",
+      agentType: "Explorer",
     });
 
     await mock.executeTool("TaskExecute", {
@@ -446,12 +446,12 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Blocker",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Dependent",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", status: "completed" });
@@ -473,7 +473,7 @@ describe("TaskExecute", () => {
       await first.executeTool("TaskCreate", {
         subject: "Shared task",
         description: "Run once",
-        agentType: "general-purpose",
+        agentType: "Worker",
       });
 
       const [firstResult, secondResult] = await Promise.all([
@@ -495,7 +495,7 @@ describe("TaskExecute", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Valid",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "No agent type",
@@ -523,7 +523,7 @@ describe("TaskExecute via ready broadcast", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Late-loaded test",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -552,7 +552,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Agent task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -567,7 +567,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Failing task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -584,7 +584,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Stopped task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -599,7 +599,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Stopped task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "earlier output" } });
@@ -619,7 +619,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Retried task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "earlier output" } });
@@ -659,7 +659,7 @@ describe("Completion listener", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Shutting down",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -706,12 +706,12 @@ describe("Auto-cascade", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Task A",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Task B",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
@@ -734,12 +734,12 @@ describe("Auto-cascade", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Task A",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Task B",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
@@ -756,7 +756,7 @@ describe("Auto-cascade", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Agent task",
       description: "Desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Manual task",
@@ -823,7 +823,7 @@ describe("Standalone operation (no subagents extension)", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Agent task",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const text = result.content[0].text;
@@ -879,7 +879,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Test",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -889,7 +889,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Test 2",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["2"] });
     expect(rpc.spawned).toHaveLength(2);
@@ -907,7 +907,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Timeout test",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     // spawnSubagent has a 30s timeout — we'll advance timers
@@ -929,7 +929,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Test",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     let result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     expect(result.content[0].text).toContain("Subagent execution is currently unavailable");
@@ -954,7 +954,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Err test",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -970,7 +970,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Stoppable",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     expect(rpc.spawned).toHaveLength(1);
@@ -991,7 +991,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Ghost",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -1013,7 +1013,7 @@ describe("RPC protocol correctness", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Timeout stop",
       description: "desc",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     // Keep the canonical execution created by TaskExecute, but remove the
@@ -1161,7 +1161,7 @@ describe("Widget agent ID display", () => {
   });
 
   it("shows agent ID for active agent-backed tasks", () => {
-    store.create("Agent task", "Desc", "Running tests", { agentType: "general-purpose", agentId: "abc1234567890" });
+    store.create("Agent task", "Desc", "Running tests", { agentType: "Worker", agentId: "abc1234567890" });
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -1171,7 +1171,7 @@ describe("Widget agent ID display", () => {
   });
 
   it("shows agent ID for non-active in_progress agent-backed tasks", () => {
-    store.create("Agent task", "Desc", undefined, { agentType: "general-purpose", agentId: "xyz9876543210" });
+    store.create("Agent task", "Desc", undefined, { agentType: "Worker", agentId: "xyz9876543210" });
     store.update("1", { status: "in_progress" });
     // NOT calling setActiveTask — simulates external agent management
     widget.update();
@@ -1192,7 +1192,7 @@ describe("Widget agent ID display", () => {
   });
 
   it("does not show agent ID for pending tasks", () => {
-    store.create("Pending agent task", "Desc", undefined, { agentType: "general-purpose", agentId: "abc12345" });
+    store.create("Pending agent task", "Desc", undefined, { agentType: "Worker", agentId: "abc12345" });
     widget.update();
 
     const lines = renderWidget(ui.state);
@@ -1200,7 +1200,7 @@ describe("Widget agent ID display", () => {
   });
 
   it("does not show agent ID for completed tasks", () => {
-    store.create("Done", "Desc", undefined, { agentType: "general-purpose", agentId: "abc12345" });
+    store.create("Done", "Desc", undefined, { agentType: "Worker", agentId: "abc12345" });
     store.update("1", { status: "completed" });
     widget.update();
 
@@ -1232,12 +1232,12 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Task A",
       description: "Produce a result",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Task B",
       description: "Use Task A result",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
@@ -1258,12 +1258,12 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Task A",
       description: "Produce a long result",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Task B",
       description: "Use truncated result",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
 
@@ -1284,12 +1284,12 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Task A",
       description: "No result stored",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "Task B",
       description: "Works without A result",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });

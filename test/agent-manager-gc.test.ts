@@ -185,14 +185,14 @@ describe("AgentManager — tombstones outliving the GC", () => {
 
   it("keeps an evicted agent reachable by name when its session is on disk", async () => {
     manager = new AgentManager();
-    await evictable("Explore", "audit the RPC path", "/sessions/explore.jsonl");
+    await evictable("Explorer", "audit the RPC path", "/sessions/explorer.jsonl");
 
     await vi.advanceTimersByTimeAsync(TICK);
 
-    const resolved = manager.resolveMention("explore");
+    const resolved = manager.resolveMention("explorer");
     expect(resolved?.kind).toBe("tombstone");
     expect(resolved).toMatchObject({
-      entry: { handle: "explore", type: "Explore", description: "audit the RPC path", sessionFile: "/sessions/explore.jsonl" },
+      entry: { handle: "explorer", type: "Explorer", description: "audit the RPC path", sessionFile: "/sessions/explorer.jsonl" },
     });
   });
 
@@ -200,37 +200,37 @@ describe("AgentManager — tombstones outliving the GC", () => {
     // Without a file there is no conversation to reopen, so promising a resume
     // would be a lie — the mention has to fall through to starting a new agent.
     manager = new AgentManager();
-    await evictable("Explore", "ephemeral", undefined);
+    await evictable("Explorer", "ephemeral", undefined);
 
     await vi.advanceTimersByTimeAsync(TICK);
 
-    expect(manager.resolveMention("explore")).toBeUndefined();
+    expect(manager.resolveMention("explorer")).toBeUndefined();
     expect(manager.listTombstones()).toHaveLength(0);
   });
 
   it("holds the evicted handle so a later agent of the same type can't shadow it", async () => {
     manager = new AgentManager();
-    await evictable("Explore", "first", "/sessions/first.jsonl");
+    await evictable("Explorer", "first", "/sessions/first.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
 
-    const id = manager.spawn(mockPi, mockCtx, "Explore", "second", { description: "second", isBackground: true });
+    const id = manager.spawn(mockPi, mockCtx, "Explorer", "second", { description: "second", isBackground: true });
 
-    expect(manager.getRecord(id)!.handle).toBe("explore-2");
-    // ...and `@explore` still means the conversation you can resume.
-    expect(manager.resolveMention("explore")?.kind).toBe("tombstone");
+    expect(manager.getRecord(id)!.handle).toBe("explorer-2");
+    // ...and `@explorer` still means the conversation you can resume.
+    expect(manager.resolveMention("explorer")?.kind).toBe("tombstone");
   });
 
   it("prefers a live agent over a tombstone holding the same name", async () => {
     manager = new AgentManager();
-    await evictable("Explore", "old", "/sessions/old.jsonl");
+    await evictable("Explorer", "old", "/sessions/old.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
     // Give the live agent the tombstone's name directly: the collision this
     // guards against is resolution order, not allocation.
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const id = manager.spawn(mockPi, mockCtx, "Explore", "live", { description: "live", isBackground: true });
-    manager.getRecord(id)!.handle = "explore";
+    const id = manager.spawn(mockPi, mockCtx, "Explorer", "live", { description: "live", isBackground: true });
+    manager.getRecord(id)!.handle = "explorer";
 
-    const resolved = manager.resolveMention("explore");
+    const resolved = manager.resolveMention("explorer");
     expect(resolved?.kind).toBe("live");
     expect(resolved).toMatchObject({ record: { id } });
   });
@@ -238,7 +238,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
   it("drops the oldest once the cap is reached, keeping the most recent", async () => {
     manager = new AgentManager();
     for (let i = 0; i < 101; i++) {
-      const { record } = await evictable("Explore", `run-${i}`, `/sessions/${i}.jsonl`);
+      const { record } = await evictable("Explorer", `run-${i}`, `/sessions/${i}.jsonl`);
       // Distinct ages so "oldest" is well defined; run-0 is the oldest. Set on
       // the record we just made — under fake timers every startedAt is equal,
       // so listAgents() has no meaningful order to index into.
@@ -247,35 +247,35 @@ describe("AgentManager — tombstones outliving the GC", () => {
     await vi.advanceTimersByTimeAsync(TICK);
 
     expect(manager.listTombstones()).toHaveLength(100);
-    expect(manager.resolveMention("explore")).toBeUndefined(); // run-0's handle
-    expect(manager.resolveMention("explore-101")?.kind).toBe("tombstone");
+    expect(manager.resolveMention("explorer")).toBeUndefined(); // run-0's handle
+    expect(manager.resolveMention("explorer-101")?.kind).toBe("tombstone");
   });
 
   it("hands a reclaimed name straight back, numbering nothing", async () => {
     // The resume path's whole contract: `handleBase(type)` cannot reproduce a
     // numbered handle, so the spawn takes the tombstone's names verbatim.
     manager = new AgentManager();
-    await evictable("Explore", "first", "/sessions/first.jsonl");
-    manager.spawn(mockPi, mockCtx, "Explore", "second", { description: "second", isBackground: true });
+    await evictable("Explorer", "first", "/sessions/first.jsonl");
+    manager.spawn(mockPi, mockCtx, "Explorer", "second", { description: "second", isBackground: true });
     await vi.advanceTimersByTimeAsync(TICK);
 
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const id = manager.spawn(mockPi, mockCtx, "Explore", "resumed", {
+    const id = manager.spawn(mockPi, mockCtx, "Explorer", "resumed", {
       description: "first",
       isBackground: true,
-      reclaim: { handle: "explore", alias: "auth-audit" },
+      reclaim: { handle: "explorer", alias: "auth-audit" },
     } as any);
 
-    expect(manager.getRecord(id)).toMatchObject({ handle: "explore", alias: "auth-audit" });
+    expect(manager.getRecord(id)).toMatchObject({ handle: "explorer", alias: "auth-audit" });
   });
 
   it("ignores a reclaim on a nested child, which has no name to hold", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const id = manager.spawn(mockPi, mockCtx, "Explore", "child", {
+    const id = manager.spawn(mockPi, mockCtx, "Explorer", "child", {
       description: "child",
       parentAgentId: "parent-id",
-      reclaim: { handle: "explore", alias: "auth-audit" },
+      reclaim: { handle: "explorer", alias: "auth-audit" },
     } as any);
 
     expect(manager.getRecord(id)).toMatchObject({ handle: undefined, alias: undefined });
@@ -283,41 +283,41 @@ describe("AgentManager — tombstones outliving the GC", () => {
 
   it("stops answering a name once its tombstone is dropped", async () => {
     manager = new AgentManager();
-    await evictable("Explore", "done", "/sessions/done.jsonl");
+    await evictable("Explorer", "done", "/sessions/done.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
-    expect(manager.resolveMention("explore")?.kind).toBe("tombstone");
+    expect(manager.resolveMention("explorer")?.kind).toBe("tombstone");
 
-    manager.dropTombstone("explore");
+    manager.dropTombstone("explorer");
 
-    expect(manager.resolveMention("explore")).toBeUndefined();
+    expect(manager.resolveMention("explorer")).toBeUndefined();
     expect(manager.listTombstones()).toHaveLength(0);
   });
 
   it("frees a dropped name for the next agent of that type", async () => {
     // Otherwise a resumed agent's own handle stays reserved by the corpse and
-    // every later spawn climbs: explore-2, explore-3, …
+    // every later spawn climbs: explorer-2, explorer-3, …
     manager = new AgentManager();
-    await evictable("Explore", "done", "/sessions/done.jsonl");
+    await evictable("Explorer", "done", "/sessions/done.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
-    manager.dropTombstone("explore");
+    manager.dropTombstone("explorer");
 
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const id = manager.spawn(mockPi, mockCtx, "Explore", "next", { description: "next", isBackground: true });
+    const id = manager.spawn(mockPi, mockCtx, "Explorer", "next", { description: "next", isBackground: true });
 
-    expect(manager.getRecord(id)!.handle).toBe("explore");
+    expect(manager.getRecord(id)!.handle).toBe("explorer");
   });
 
   it("forgets every name when the session ends", async () => {
     // A handle from a conversation the user has left must not resolve, or
-    // `@explore` reaches an agent they have no memory of starting.
+    // `@explorer` reaches an agent they have no memory of starting.
     manager = new AgentManager();
-    await evictable("Explore", "prior session", "/sessions/prior.jsonl");
+    await evictable("Explorer", "prior session", "/sessions/prior.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
     expect(manager.listTombstones()).toHaveLength(1);
 
     manager.clearCompleted(true);
 
     expect(manager.listTombstones()).toHaveLength(0);
-    expect(manager.resolveMention("explore")).toBeUndefined();
+    expect(manager.resolveMention("explorer")).toBeUndefined();
   });
 });

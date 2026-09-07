@@ -119,7 +119,7 @@ const unsub = pi.events.on(`subagents:rpc:spawn:reply:${requestId}`, (reply) => 
 });
 pi.events.emit("subagents:rpc:spawn", {
   requestId,
-  type: "general-purpose",
+  type: "Worker",
   prompt: "Inspect the authentication flow and return findings as Markdown.",
   options: { description: "Inspect authentication", isBackground: true },
 });

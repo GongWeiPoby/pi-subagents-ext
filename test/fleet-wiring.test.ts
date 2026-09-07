@@ -127,7 +127,7 @@ describe("FleetView wiring (real extension lifecycle)", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc",
-      { prompt: "go", description: "live one", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "live one", subagent_type: "Worker", run_in_background: true },
       undefined,
       undefined,
       ctxWith(uiCtx()),

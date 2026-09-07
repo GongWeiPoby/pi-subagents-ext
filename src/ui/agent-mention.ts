@@ -4,8 +4,8 @@
  * A subagent is addressable whether or not it is currently running: a live
  * record is messaged or resumed, an evicted one whose session is still on disk
  * is reopened, and an agent *type* with no instance at all is started. That is
- * the point of the handle — `@explore` means the Explore agent, not "the
- * Explore process that happens to exist right now" — so the roster below unions
+ * the point of the handle — `@explorer` means the Explorer agent, not "the
+ * Explorer process that happens to exist right now" — so the roster below unions
  * all three, and the dispatcher and the popup read the same list.
  *
  * Rows are per *agent*, not per handle. An agent given a `name` holds two names
@@ -65,7 +65,7 @@ export type TypeInfo = { name: string; description: string };
  * Everything `@` can reach, in the order the popup lists it: steerable agents
  * first, then the other live ones earliest-launched, then agent types with no
  * live instance. A type whose handle a record already holds is omitted — that
- * name addresses the existing agent, which is what makes `@explore` mean
+ * name addresses the existing agent, which is what makes `@explorer` mean
  * "message the one that's running" and only otherwise "start one".
  */
 export function mentionRoster(

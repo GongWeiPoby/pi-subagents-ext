@@ -51,7 +51,7 @@ async function spawnCompleted(manager: AgentManager, session: any) {
     aborted: false,
     steered: false,
   } as any);
-  const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+  const id = manager.spawn(mockPi, mockCtx, "Worker", "test", {
     description: "test",
     isBackground: true,
   });

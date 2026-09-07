@@ -34,7 +34,7 @@ function runSpending(cost: number) {
 const spawn = (tools: Map<string, any>) =>
   tools.get("Agent").execute(
     "tc-1",
-    { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: false },
+    { prompt: "go", description: "spend", subagent_type: "Worker", run_in_background: false },
     undefined, undefined, ctx(),
   );
 
@@ -98,7 +98,7 @@ describe("cost display", () => {
       // The agent above ran in the foreground; look it up by the handle its
       // type gets, which is how the orchestrator would reach it.
       const text = textOf(await tools.get("get_subagent_result").execute(
-        "tc-2", { agent_id: "general-purpose" }, undefined, undefined, ctx(),
+        "tc-2", { agent_id: "Worker" }, undefined, undefined, ctx(),
       ));
 
       // Pipe-separated `Label: value` fields, matching its neighbours.
@@ -112,7 +112,7 @@ describe("cost display", () => {
       await flush();
 
       const text = textOf(await tools.get("get_subagent_result").execute(
-        "tc-2", { agent_id: "general-purpose" }, undefined, undefined, ctx(),
+        "tc-2", { agent_id: "Worker" }, undefined, undefined, ctx(),
       ));
 
       expect(text).not.toContain("Cost:");
@@ -135,7 +135,7 @@ describe("cost display", () => {
     const spawnBackground = (tools: Map<string, any>) =>
       tools.get("Agent").execute(
         "tc-1",
-        { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: true },
+        { prompt: "go", description: "spend", subagent_type: "Worker", run_in_background: true },
         undefined, undefined, ctx(),
       );
 

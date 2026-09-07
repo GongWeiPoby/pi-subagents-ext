@@ -272,7 +272,7 @@ describe("resume", () => {
 
     const result = await run(
       [
-        'const first = await agent("write the parser", { label: "impl", agentType: "Explore", model: "haiku" });',
+        'const first = await agent("write the parser", { label: "impl", agentType: "Explorer", model: "haiku" });',
         'const second = await agent("now handle escapes", { resume: "impl" });',
         "return [first, second];",
       ].join("\n"),
@@ -290,8 +290,8 @@ describe("resume", () => {
     // Same child, so the same agent id — which is also what makes abort reach it.
     expect(second?.agentId).toBe("wf-agent-0");
     // The revived child keeps the contract it was started with, and the row
-    // says so rather than falling back to general-purpose.
-    expect(second?.agentType).toBe("Explore");
+    // says so rather than falling back to Worker.
+    expect(second?.agentType).toBe("Explorer");
     expect(second?.model).toBe("haiku");
     expect(second?.label).toBe("impl");
     expect(second?.promptPreview).toBe("now handle escapes");
@@ -407,7 +407,7 @@ describe("resume", () => {
       ],
       [
         "agentType",
-        'await agent("b", { resume: "impl", agentType: "Explore" });',
+        'await agent("b", { resume: "impl", agentType: "Explorer" });',
         "agent() opts.resume and opts.agentType are mutually exclusive",
       ],
       [

@@ -133,7 +133,7 @@ describe("Agent tool result — effective model", () => {
 
     const result = await tool.execute(
       "tc-1",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: false },
       undefined,
       vi.fn(),
       ctx(),
@@ -159,7 +159,7 @@ describe("Agent tool result — effective model", () => {
 
     await tool.execute(
       "tc-1b",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: false },
       undefined,
       onUpdate,
       ctx(),
@@ -183,7 +183,7 @@ describe("Agent tool result — effective model", () => {
 
     const result = await tool.execute(
       "tc-2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: false },
       undefined,
       vi.fn(),
       ctx(),
@@ -203,7 +203,7 @@ describe("Agent tool result — effective model", () => {
 
     const result = await tool.execute(
       "tc-3",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", thinking: "max", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", thinking: "max", run_in_background: false },
       undefined,
       vi.fn(),
       ctx(),
@@ -299,7 +299,7 @@ describe("Agent tool result — effective model", () => {
 
     const result = await tool.execute(
       "tc-6",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", thinking: "high", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", thinking: "high", run_in_background: false },
       undefined,
       vi.fn(),
       ctx(),
@@ -326,7 +326,7 @@ describe("Agent tool result — resume", () => {
 
     const first = await tool.execute(
       "tc-7",
-      { prompt: "go", description: "original", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "original", subagent_type: "Worker", run_in_background: false },
       undefined,
       vi.fn(),
       context,
@@ -337,7 +337,7 @@ describe("Agent tool result — resume", () => {
       {
         prompt: "continue",
         description: "changed",
-        subagent_type: "general-purpose",
+        subagent_type: "Worker",
         run_in_background: false,
         model: "anthropic/claude-opus-4-6",
         thinking: "max",

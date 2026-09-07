@@ -385,7 +385,7 @@ describe("sub-status annotations", () => {
             queuedAt: START,
             attempt: 2,
             lastAttemptReason: "throttled",
-            agentType: "Explore",
+            agentType: "Explorer",
             toolCalls: 4,
           }),
         ],
@@ -436,7 +436,7 @@ describe("per-agent detail", () => {
       label: "resume child",
       state: "progress",
       startedAt: START,
-      agentType: "Explore",
+      agentType: "Explorer",
       model: "haiku",
       activity: "tool: read",
       outputPreview: "partial response",
@@ -445,7 +445,7 @@ describe("per-agent detail", () => {
     })];
     const overview = rightRows(dialog({ progress, width: 120 })).map(bare).join("\n");
     expect(overview).toContain(
-      "reading… · ⎿ partial response · Explore · haiku · ↻2 · 1.2k token",
+      "reading… · ⎿ partial response · Explorer · haiku · ↻2 · 1.2k token",
     );
 
     const opened = dialog({ progress, width: 120, state: { level: "agent" } });
@@ -870,7 +870,7 @@ describe("width", () => {
       index: 0,
       label: "an-extremely-long-agent-label-that-would-otherwise-wrap-the-whole-dialog",
       state: "done",
-      agentType: "general-purpose",
+      agentType: "Worker",
       model: "claude-opus-4-5-20260101",
       tokens: 1_240_000,
       toolCalls: 412,

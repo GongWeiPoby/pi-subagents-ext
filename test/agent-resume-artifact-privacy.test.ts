@@ -161,7 +161,7 @@ describe("Agent resume result-body privacy", () => {
       {
         prompt: "continue",
         description: "Forged resume",
-        subagent_type: "general-purpose",
+        subagent_type: "Worker",
         resume: id,
         run_in_background: background,
       },

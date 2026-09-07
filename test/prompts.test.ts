@@ -26,7 +26,7 @@ function getDefaultConfig(name: string): AgentConfig {
 
 describe("buildAgentPrompt", () => {
   it("includes cwd and git info", () => {
-    const config = getDefaultConfig("general-purpose");
+    const config = getDefaultConfig("Worker");
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("/workspace");
     expect(prompt).toContain("Branch: main");
@@ -34,42 +34,48 @@ describe("buildAgentPrompt", () => {
   });
 
   it("handles non-git repos", () => {
-    const config = getDefaultConfig("Explore");
+    const config = getDefaultConfig("Explorer");
     const prompt = buildAgentPrompt(config, "/workspace", envNoGit);
     expect(prompt).toContain("Not a git repository");
     expect(prompt).not.toContain("Branch:");
   });
 
-  it("Explore prompt is read-only", () => {
-    const config = getDefaultConfig("Explore");
+  it("Explorer prompt is read-only", () => {
+    const config = getDefaultConfig("Explorer");
     const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("file search specialist");
+    expect(prompt).toContain("You cannot execute commands");
+    expect(prompt).toContain("codebase investigator");
+    expect(prompt).toContain("Continue truncated reads");
+    expect(prompt).toContain("Coverage and gaps");
   });
 
-  it("Plan prompt is read-only", () => {
-    const config = getDefaultConfig("Plan");
+  it("Reviewer prompt is read-only", () => {
+    const config = getDefaultConfig("Reviewer");
     const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("software architect");
+    expect(prompt).toContain("You cannot execute commands");
+    expect(prompt).toContain("independent reviewer");
+    expect(prompt).toContain("Try to refute");
+    expect(prompt).toContain("No findings is not");
   });
 
-  it("general-purpose uses append mode (parent twin)", () => {
-    const config = getDefaultConfig("general-purpose");
+  it("Worker uses append mode (parent twin)", () => {
+    const config = getDefaultConfig("Worker");
     const parentPrompt = "You are a parent coding agent with full powers.";
     const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
     expect(prompt).toContain("parent coding agent with full powers");
     expect(prompt).toContain("<sub_agent_context>");
     expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).not.toContain("READ-ONLY");
-    // Empty systemPrompt means no <agent_instructions> section
-    expect(prompt).not.toContain("<agent_instructions>");
+    expect(prompt).toContain("<agent_instructions>");
+    expect(prompt).toContain("acceptance criteria");
+    expect(prompt).toContain("You are not alone in the workspace");
+    expect(prompt).toContain("Separate checks actually run");
   });
 
-  it("general-purpose without parent prompt falls back to generic base", () => {
-    const config = getDefaultConfig("general-purpose");
+  it("Worker without parent prompt falls back to generic base", () => {
+    const config = getDefaultConfig("Worker");
     const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("general-purpose coding agent");
+    expect(prompt).toContain("coding task delegate");
     expect(prompt).not.toContain("READ-ONLY");
   });
 
@@ -111,7 +117,7 @@ describe("buildAgentPrompt", () => {
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("/workspace");
-    expect(prompt).toContain("general-purpose coding agent");
+    expect(prompt).toContain("coding task delegate");
     expect(prompt).toContain("Extra custom instructions here.");
   });
 
@@ -175,7 +181,7 @@ describe("buildAgentPrompt", () => {
   });
 
   it("append mode bridge contains tool reminders", () => {
-    const config = getDefaultConfig("general-purpose");
+    const config = getDefaultConfig("Worker");
     const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
     expect(prompt).toContain("Use the read tool instead of cat");
     expect(prompt).toContain("Use the edit tool instead of sed");
@@ -199,7 +205,7 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("<sub_agent_context>");
     expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).toContain("Use the read tool instead of cat");
-    expect(prompt).toContain("general-purpose coding agent");
+    expect(prompt).toContain("coding task delegate");
     expect(prompt).toContain("Extra stuff.");
   });
 

@@ -57,13 +57,13 @@ function controllableRuns() {
 const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
 const fg = (manager: AgentManager, prompt: string, options: any = {}) =>
-  manager.spawnAndWait(mockPi, mockCtx, "general-purpose", prompt, {
+  manager.spawnAndWait(mockPi, mockCtx, "Worker", prompt, {
     description: prompt,
     ...options,
   });
 
 const bg = (manager: AgentManager, prompt: string, options: any = {}) =>
-  manager.spawn(mockPi, mockCtx, "general-purpose", prompt, {
+  manager.spawn(mockPi, mockCtx, "Worker", prompt, {
     description: prompt,
     isBackground: true,
     ...options,
@@ -209,7 +209,7 @@ describe("maxConcurrentForeground", () => {
     manager.setMaxConcurrentForeground(1);
 
     void fg(manager, "holder");
-    manager.spawn(mockPi, mockCtx, "general-purpose", "rpc", {
+    manager.spawn(mockPi, mockCtx, "Worker", "rpc", {
       description: "rpc",
       isBackground: false,
     });
@@ -497,10 +497,10 @@ describe("maxConcurrentForeground", () => {
     const secondHook = vi.fn();
 
     const first = manager.spawnAndWait(
-      mockPi, mockCtx, "general-purpose", "a", { description: "a" }, firstHook,
+      mockPi, mockCtx, "Worker", "a", { description: "a" }, firstHook,
     );
     const second = manager.spawnAndWait(
-      mockPi, mockCtx, "general-purpose", "b", { description: "b" }, secondHook,
+      mockPi, mockCtx, "Worker", "b", { description: "b" }, secondHook,
     );
 
     expect(firstHook).toHaveBeenCalledTimes(1);

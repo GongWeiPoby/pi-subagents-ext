@@ -13,11 +13,11 @@ import { agentMentionReminder, assignHandle, describeMention, handleBase, isRese
 
 describe("handleBase", () => {
   it("lowercases so the handle matches how it is typed", () => {
-    expect(handleBase("Explore")).toBe("explore");
+    expect(handleBase("Explorer")).toBe("explorer");
   });
 
   it("keeps a hyphenated type as-is", () => {
-    expect(handleBase("general-purpose")).toBe("general-purpose");
+    expect(handleBase("custom-worker")).toBe("custom-worker");
   });
 
   it("reduces anything outside [\\w-] to hyphens, without leaving edge hyphens", () => {
@@ -43,7 +43,7 @@ describe("handleBase", () => {
   });
 
   it("only ever produces handles the suggestion trigger can match", () => {
-    for (const type of ["Explore", "general-purpose", "Code Review!", "!!!", "デバッグ"]) {
+    for (const type of ["Explorer", "Worker", "Code Review!", "!!!", "デバッグ"]) {
       expect(MENTION_TRIGGER.test(`@${handleBase(type)}`)).toBe(true);
     }
   });
@@ -51,15 +51,15 @@ describe("handleBase", () => {
 
 describe("assignHandle", () => {
   it("takes the plain base when it is free", () => {
-    expect(assignHandle("explore", new Set())).toBe("explore");
+    expect(assignHandle("explorer", new Set())).toBe("explorer");
   });
 
   it("numbers from 2 on the first collision", () => {
-    expect(assignHandle("explore", new Set(["explore"]))).toBe("explore-2");
+    expect(assignHandle("explorer", new Set(["explorer"]))).toBe("explorer-2");
   });
 
   it("keeps counting past every taken form", () => {
-    expect(assignHandle("explore", new Set(["explore", "explore-2"]))).toBe("explore-3");
+    expect(assignHandle("explorer", new Set(["explorer", "explorer-2"]))).toBe("explorer-3");
   });
 
   it("never hands out the reserved main handle", () => {
@@ -69,18 +69,18 @@ describe("assignHandle", () => {
   });
 
   it("skips a gap rather than reusing a live handle", () => {
-    // explore-2 finished and was evicted; reusing it is fine, but explore-3
+    // explorer-2 finished and was evicted; reusing it is fine, but explorer-3
     // is still running and must not be shadowed.
-    expect(assignHandle("explore", new Set(["explore", "explore-3"]))).toBe("explore-2");
+    expect(assignHandle("explorer", new Set(["explorer", "explorer-3"]))).toBe("explorer-2");
   });
 });
 
 describe("resolveHandleToType", () => {
-  const TYPES = ["general-purpose", "Explore", "Code Review!"];
+  const TYPES = ["Worker", "Explorer", "Code Review!"];
 
   it("finds the type a handle was derived from, whatever its casing", () => {
-    expect(resolveHandleToType("explore", TYPES)).toBe("Explore");
-    expect(resolveHandleToType("EXPLORE", TYPES)).toBe("Explore");
+    expect(resolveHandleToType("explorer", TYPES)).toBe("Explorer");
+    expect(resolveHandleToType("EXPLORER", TYPES)).toBe("Explorer");
   });
 
   it("resolves a type whose slug differs from its name", () => {
@@ -89,7 +89,7 @@ describe("resolveHandleToType", () => {
 
   it("is exact, not a prefix match — a partial handle must not start an agent", () => {
     expect(resolveHandleToType("ex", TYPES)).toBeUndefined();
-    expect(resolveHandleToType("explore-2", TYPES)).toBeUndefined();
+    expect(resolveHandleToType("explorer-2", TYPES)).toBeUndefined();
   });
 
   it("round-trips every registered type", () => {
@@ -111,7 +111,7 @@ describe("isReservedHandle", () => {
   });
 
   it("leaves every ordinary handle alone", () => {
-    for (const handle of ["explore", "mainframe", "main-2", "ma"]) {
+    for (const handle of ["explorer", "mainframe", "main-2", "ma"]) {
       expect(isReservedHandle(handle)).toBe(false);
     }
   });
@@ -119,7 +119,7 @@ describe("isReservedHandle", () => {
 
 describe("stripAgentPrefix", () => {
   it("unwraps Claude Code's manual @agent-<type> spelling", () => {
-    expect(stripAgentPrefix("agent-explore")).toBe("explore");
+    expect(stripAgentPrefix("agent-explorer")).toBe("explorer");
   });
 
   it("keeps the remainder intact when it is itself prefixed", () => {
@@ -127,15 +127,15 @@ describe("stripAgentPrefix", () => {
   });
 
   it("returns nothing when there is no prefix or nothing behind it", () => {
-    expect(stripAgentPrefix("explore")).toBeUndefined();
+    expect(stripAgentPrefix("explorer")).toBeUndefined();
     expect(stripAgentPrefix("agent-")).toBeUndefined();
     expect(stripAgentPrefix("agentexplore")).toBeUndefined();
   });
 
   it("only unwraps a prefix at the very start", () => {
-    // `@sub-agent-explore` names an agent called `sub-agent-explore`. Matching
-    // `agent-` anywhere would silently redirect it to `@explore`.
-    expect(stripAgentPrefix("sub-agent-explore")).toBeUndefined();
+    // `@sub-agent-explorer` names an agent called `sub-agent-explorer`. Matching
+    // `agent-` anywhere would silently redirect it to `@explorer`.
+    expect(stripAgentPrefix("sub-agent-explorer")).toBeUndefined();
   });
 });
 
@@ -157,21 +157,21 @@ describe("describeMention", () => {
 
 describe("parseMention", () => {
   it("splits a leading handle from its message", () => {
-    expect(parseMention("@explore check the RPC path")).toEqual({
-      handle: "explore",
+    expect(parseMention("@explorer check the RPC path")).toEqual({
+      handle: "explorer",
       message: "check the RPC path",
     });
   });
 
   it("trims the message and accepts a newline as the separator", () => {
-    expect(parseMention("@explore   spaced   ")).toEqual({ handle: "explore", message: "spaced" });
-    expect(parseMention("@explore\nline1\nline2")).toEqual({ handle: "explore", message: "line1\nline2" });
+    expect(parseMention("@explorer   spaced   ")).toEqual({ handle: "explorer", message: "spaced" });
+    expect(parseMention("@explorer\nline1\nline2")).toEqual({ handle: "explorer", message: "line1\nline2" });
   });
 
   it("rejects a bare handle — that belongs to the main model", () => {
-    expect(parseMention("@explore")).toBeNull();
-    expect(parseMention("@explore ")).toBeNull();
-    expect(parseMention("@explore \t ")).toBeNull();
+    expect(parseMention("@explorer")).toBeNull();
+    expect(parseMention("@explorer ")).toBeNull();
+    expect(parseMention("@explorer \t ")).toBeNull();
   });
 
   it("rejects a leading file path so pi's @-attachment keeps working", () => {
@@ -180,8 +180,8 @@ describe("parseMention", () => {
   });
 
   it("rejects a mention that is not at the start of the input", () => {
-    expect(parseMention("hey @explore look at this")).toBeNull();
-    expect(parseMention(" @explore look at this")).toBeNull();
+    expect(parseMention("hey @explorer look at this")).toBeNull();
+    expect(parseMention(" @explorer look at this")).toBeNull();
   });
 });
 
@@ -197,6 +197,6 @@ describe("agentMentionReminder", () => {
   });
 
   it("names the agent it was given", () => {
-    expect(agentMentionReminder("Plan")).toContain('invoke the agent "Plan"');
+    expect(agentMentionReminder("Reviewer")).toContain('invoke the agent "Reviewer"');
   });
 });

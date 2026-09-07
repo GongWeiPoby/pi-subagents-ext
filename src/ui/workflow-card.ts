@@ -5,11 +5,11 @@
  * ▸ Workflow  review-changes                       3/7 agents · 1m12s
  *   Review changed files across dimensions, verify each finding
  *   ╭─ Review
- *   │ ├─ ✔ review:bugs      · Explore · haiku · 18.4k · 12 tool calls · 42s
- *   │ ├─ ⟳ review:perf      · Explore · 8 tool calls · 21s
+ *   │ ├─ ✔ review:bugs      · Explorer · haiku · 18.4k · 12 tool calls · 42s
+ *   │ ├─ ⟳ review:perf      · Explorer · 8 tool calls · 21s
  *   │ └─ ⟳ review:security
  *   ╰─ Verify
- *     └─ ⟳ verify:auth.ts   · Plan · 3 tool calls · 9s
+ *     └─ ⟳ verify:auth.ts   · Reviewer · 3 tool calls · 9s
  *   ⎿  scanned 41 changed files
  * ```
  *

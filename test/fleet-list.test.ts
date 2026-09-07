@@ -52,7 +52,7 @@ const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "a1",
-    type: "general-purpose",
+    type: "Worker",
     description: "Sleep then report 1",
     status: "running",
     toolUses: 0,
@@ -264,7 +264,7 @@ describe("FleetList navigation", () => {
     expect(selected).toContain("<text>one</text>");
     expect(selected).toMatch(/<text>\d+s · ↓ [\d.]+k? tokens<\/text>/);
     // Agent display name rendered with the text token too (this type has no badge).
-    expect(selected).toContain(`<text>${getDisplayName("general-purpose")}</text>`);
+    expect(selected).toContain(`<text>${getDisplayName("Worker")}</text>`);
     // Inactive rows keep the muted/dim treatment.
     const unselected = h.render().find(l => l.includes("two"))!;
     expect(unselected).toContain("<dim>○</dim>");
@@ -421,7 +421,7 @@ describe("FleetList rendering", () => {
   it("shows workflow phases and children as a tree without promoting them to top-level agents", () => {
     const child = makeRecord({
       id: "workflow-child",
-      type: "Explore",
+      type: "Explorer",
       description: "inspect workflow state",
       workflowId: "wf_abc123",
     });
@@ -434,7 +434,7 @@ describe("FleetList rendering", () => {
         index: 0,
         label: "inspect workflow state",
         state: "running",
-        agentType: "Explore",
+        agentType: "Explorer",
         model: "haiku",
         recordId: child.id,
         activity: "tool: read",
@@ -461,7 +461,7 @@ describe("FleetList rendering", () => {
     const expanded = h.render(200).map(plain).join("\n");
     expect(expanded).toContain("phase  Inspect");
     expect(expanded).toContain("inspect workflow state");
-    expect(expanded).toContain("Explore");
+    expect(expanded).toContain("Explorer");
     expect(expanded).toContain("haiku");
     expect(expanded).toContain("reading… · ↻2");
     expect(expanded).not.toContain("partial response");
@@ -477,7 +477,7 @@ describe("FleetList rendering", () => {
   });
 
   it("keeps child identity visible when a responding output preview is maximal", () => {
-    const child = makeRecord({ id: "streaming-child", type: "Explore", workflowId: "wf_abc123" });
+    const child = makeRecord({ id: "streaming-child", type: "Explorer", workflowId: "wf_abc123" });
     const h = harness([child]);
     h.setWorkflows([makeWorkflow({
       doneCount: 0,
@@ -491,7 +491,7 @@ describe("FleetList rendering", () => {
           index: 0,
           label: "streaming child",
           state: "running",
-          agentType: "Explore",
+          agentType: "Explorer",
           recordId: child.id,
           activity: "responding",
           outputPreview: "x".repeat(200),
@@ -526,7 +526,7 @@ describe("FleetList rendering", () => {
             index: 0,
             label: "first child",
             state: "done",
-            agentType: "Explore",
+            agentType: "Explorer",
             tokens: 10,
             startedAt: 1_000,
             completedAt: 2_000,
@@ -541,7 +541,7 @@ describe("FleetList rendering", () => {
             index: 1,
             label: "second child",
             state: "interrupted",
-            agentType: "Explore",
+            agentType: "Explorer",
             tokens: 20,
             startedAt: 3_000,
             completedAt: 6_000,
@@ -565,13 +565,13 @@ describe("FleetList rendering", () => {
       const rows = rendered.filter(row => row.includes("phase") || row.includes("child"));
       expect(rows).toEqual([
         "  ○   ├─ phase  Discover".padEnd(width - "1/1".length) + "1/1",
-        "  ○   │  └─ ✓ Explore  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
+        "  ○   │  └─ ✓ Explorer  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
         "  ○   └─ phase  Verify".padEnd(width - "0/1".length) + "0/1",
-        "  ○      └─ ■ Explore  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
+        "  ○      └─ ■ Explorer  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
       ]);
       const ordinaryStats = "1s · ↓ 13.1k tokens";
       expect(rendered.find(row => row.includes("ordinary top-level"))).toBe(
-        `  ● ${getDisplayName("general-purpose")}  ordinary top-level`.padEnd(width - ordinaryStats.length)
+        `  ● ${getDisplayName("Worker")}  ordinary top-level`.padEnd(width - ordinaryStats.length)
           + ordinaryStats,
       );
       h.fleet.dispose();
@@ -594,7 +594,7 @@ describe("FleetList rendering", () => {
             index: 0,
             label: "first child",
             state: "done",
-            agentType: "Explore",
+            agentType: "Explorer",
             tokens: 10,
             startedAt: 1_000,
             completedAt: 2_000,
@@ -603,7 +603,7 @@ describe("FleetList rendering", () => {
             index: 1,
             label: "second child",
             state: "done",
-            agentType: "Explore",
+            agentType: "Explorer",
             tokens: 20,
             startedAt: 3_000,
             completedAt: 6_000,
@@ -620,8 +620,8 @@ describe("FleetList rendering", () => {
       const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
       const rows = h.render(width, plainTheme).filter(row => row.includes("child"));
       expect(rows).toEqual([
-        "  ○      ├─ ✓ Explore  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
-        "  ○      └─ ✓ Explore  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
+        "  ○      ├─ ✓ Explorer  first child".padEnd(width - "10 token · 1s".length) + "10 token · 1s",
+        "  ○      └─ ✓ Explorer  second child".padEnd(width - "20 token · 3s".length) + "20 token · 3s",
       ]);
       h.fleet.dispose();
     } finally {
@@ -637,7 +637,7 @@ describe("FleetList rendering", () => {
     expect(lines.find(l => l.includes("main"))).toContain("●"); // main selected by default
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
     expect(agentLine).toContain("○");
-    expect(agentLine).toContain(getDisplayName("general-purpose"));
+    expect(agentLine).toContain(getDisplayName("Worker"));
     expect(agentLine).toContain("↓ 13.1k tokens");
     expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
   });
@@ -1048,7 +1048,7 @@ describe("FleetList workflow rows", () => {
           index: 0,
           label: "interrupted child",
           state: "interrupted",
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
           startedAt: 1_000,
           completedAt: 5_000,

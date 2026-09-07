@@ -64,10 +64,10 @@ The inline workflow card shows the controller, dynamic child total, phases, chil
 ▸ SubagentWorkflow  auth-audit                3/7 agents so far · 1m12s
   Find routes missing auth checks, then verify each finding
   ╭─ Scan
-  │ └─ ✓ discover        · Explore · ↻2 · 8 tool uses · 26.4k token · 25.0s
+  │ └─ ✓ discover        · Explorer · ↻2 · 8 tool uses · 26.4k token · 25.0s
   ╰─ Audit
-    ├─ ✓ audit:src/a.ts  · Explore · ↻3 · 12 tool uses · 18.4k token · 42.0s
-    ├─ ⟳ audit:src/b.ts  · Explore · ↻2 · 8 tool uses · 21.0s
+    ├─ ✓ audit:src/a.ts  · Explorer · ↻3 · 12 tool uses · 18.4k token · 42.0s
+    ├─ ⟳ audit:src/b.ts  · Explorer · ↻2 · 8 tool uses · 21.0s
     │    ⎿  inspecting route guards…
     └─ ⟳ audit:src/c.ts
   ⎿  auditing 6 route files
@@ -144,7 +144,7 @@ Use exactly one source among `script`, `scriptPath`, and `name`. A resume may om
 |---|---|---|
 | `label` | string | Display label and the name used by `resume` |
 | `phase` | string | Explicit progress group, useful inside `pipeline` or `parallel` stages |
-| `agentType` | string | Agent definition; defaults to `general-purpose` |
+| `agentType` | string | Agent definition; defaults to `Worker` |
 | `model` | string | Provider/model ID or fuzzy model name |
 | `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `isolation` | `"worktree"` | Run the child in an isolated git worktree; changes are preserved on a branch when it settles |

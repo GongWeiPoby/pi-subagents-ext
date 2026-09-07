@@ -486,15 +486,18 @@ describe("worktree isolation switch", () => {
   // The switch gates callers; it deliberately does not disarm createWorktree
   // itself, so a caller that has already decided (agent-manager checks first)
   // still gets a real worktree rather than a silent no-op.
-  it("does not disable createWorktree directly", () => {
+  it("does not disable createWorktree directly", async () => {
     const repoDir = initGitRepo();
+    const pi = mockPi();
+    let wt: Awaited<ReturnType<typeof createWorktree>>;
     try {
       setWorktreeIsolationEnabled(false);
-      const wt = createWorktree(repoDir, "switch-test");
+      wt = await createWorktree(pi, repoDir, "switch-test");
       expect(wt).toBeDefined();
-      cleanupWorktree(repoDir, wt!, "switch test");
+      expect(existsSync(wt!.path)).toBe(true);
     } finally {
-      pruneWorktrees(repoDir);
+      if (wt) await cleanupWorktree(pi, repoDir, wt, "switch test");
+      await pruneWorktrees(pi, repoDir);
       rmSync(repoDir, { recursive: true, force: true });
     }
   });

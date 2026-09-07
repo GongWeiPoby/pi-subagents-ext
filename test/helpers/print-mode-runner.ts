@@ -173,7 +173,7 @@ export interface PrintModeRun {
 
 /**
  * Build an `Agent` tool call for a faux assistant turn. `subagent_type` defaults
- * to "general-purpose"; everything else is passed straight through as tool args.
+ * to "Worker"; everything else is passed straight through as tool args.
  */
 export function agentCall(
   args: {
@@ -185,7 +185,7 @@ export function agentCall(
   },
   opts?: { id?: string },
 ): ToolCall {
-  return fauxToolCall("Agent", { subagent_type: "general-purpose", ...args }, opts);
+  return fauxToolCall("Agent", { subagent_type: "Worker", ...args }, opts);
 }
 
 function resolveReply(

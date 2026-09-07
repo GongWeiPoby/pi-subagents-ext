@@ -503,11 +503,11 @@ Real.`);
   });
 
   it("allows agents with names matching defaults (overrides them)", () => {
-    writeAgent("Explore", `---
-description: Custom Explore
+    writeAgent("Explorer", `---
+description: Custom Explorer
 ---
 
-Custom explore agent.`);
+Custom explorer agent.`);
     writeAgent("custom", `---
 description: Custom Agent
 ---
@@ -515,8 +515,8 @@ description: Custom Agent
 Should be loaded.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.has("Explore")).toBe(true);
-    expect(result.get("Explore")!.description).toBe("Custom Explore");
+    expect(result.has("Explorer")).toBe(true);
+    expect(result.get("Explorer")!.description).toBe("Custom Explorer");
     expect(result.has("custom")).toBe(true);
   });
 
@@ -1092,7 +1092,7 @@ Good body.`);
         model: "anthropic/claude-haiku-4-5",
         thinking: "low",
         maxTurns: 7,
-        allowedSubagents: ["Explore"],
+        allowedSubagents: ["Explorer"],
         excludeExtensions: ["ext-beta"],
         disallowedTools: ["write"],
         inheritContext: true,
@@ -1106,7 +1106,7 @@ Good body.`);
       expect(loaded.model).toBe("anthropic/claude-haiku-4-5");
       expect(loaded.thinking).toBe("low");
       expect(loaded.maxTurns).toBe(7);
-      expect(loaded.allowedSubagents).toEqual(["Explore"]);
+      expect(loaded.allowedSubagents).toEqual(["Explorer"]);
       expect(loaded.excludeExtensions).toEqual(["ext-beta"]);
       expect(loaded.disallowedTools).toEqual(["write"]);
       expect(loaded.inheritContext).toBe(true);
@@ -1154,8 +1154,8 @@ Good body.`);
 
     it("preserves allowed_subagents in both its list and `all` forms", () => {
       expect(roundTrip({ allowedSubagents: "all" }).allowedSubagents).toBe("all");
-      expect(roundTrip({ allowedSubagents: ["Explore", "Plan"] }).allowedSubagents)
-        .toEqual(["Explore", "Plan"]);
+      expect(roundTrip({ allowedSubagents: ["Explorer", "Reviewer"] }).allowedSubagents)
+        .toEqual(["Explorer", "Reviewer"]);
     });
 
     it("preserves a description containing a colon", () => {

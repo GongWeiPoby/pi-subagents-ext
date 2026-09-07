@@ -90,7 +90,7 @@ async function runForegroundSteeredAgent(tools: Map<string, any>) {
     {
       prompt: "Perform a very thorough read-only codebase exploration.",
       description: "Locate organization-scope changes",
-      subagent_type: "Explore",
+      subagent_type: "Explorer",
       max_turns: 20,
       run_in_background: false,
     },

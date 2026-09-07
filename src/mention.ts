@@ -13,7 +13,7 @@
  *
  * A record's own identity is a UUID plus a deliberately non-unique description,
  * neither of which is typeable, so the handle is derived from the agent type.
- * Colliding handles are numbered (`explore`, `explore-2`), which is also what
+ * Colliding handles are numbered (`explorer`, `explorer-2`), which is also what
  * Claude Code's `allocateName` does — it recycles a name only once the task
  * behind it is gone. Its SendMessage prompt describes the *registry* as
  * latest-wins, which is a different thing and not how names are allocated.
@@ -75,8 +75,8 @@ export function assignHandle(base: string, taken: ReadonlySet<string>): string {
 }
 
 /**
- * Map a typed handle back to a registered agent type, so `@explore fix it`
- * reaches the Explore agent even when no instance has ever run. `handleBase` is
+ * Map a typed handle back to a registered agent type, so `@explorer fix it`
+ * reaches the Explorer agent even when no instance has ever run. `handleBase` is
  * the single source of truth in both directions, so a type is addressable by
  * exactly the handle its instances would be given.
  */

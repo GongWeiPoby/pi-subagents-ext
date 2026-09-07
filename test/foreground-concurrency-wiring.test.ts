@@ -82,7 +82,7 @@ function callForeground(tools: Map<string, any>, prompt: string, opts: {
 } = {}) {
   return tools.get("Agent").execute(
     `tc-${prompt}`,
-    { prompt, description: prompt, subagent_type: "general-purpose", run_in_background: false },
+    { prompt, description: prompt, subagent_type: "Worker", run_in_background: false },
     opts.signal,
     opts.onUpdate,
     ctx(),

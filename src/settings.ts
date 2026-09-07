@@ -101,7 +101,7 @@ export interface SubagentsSettings {
    */
   strictAgentFiles?: boolean;
   /**
-   * When true, the three built-in default agents (general-purpose, Explore, Plan)
+   * When true, the three built-in default agents (Worker, Explorer, Reviewer)
    * are not registered at startup. User-defined agents from project/global custom
    * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
    * Defaults to false.
@@ -229,7 +229,7 @@ export interface SubagentsSettings {
   /**
    * Agent type substituted when a caller-supplied `subagent_type` doesn't
    * resolve to exactly one enabled agent (unknown, disabled, or ambiguous by
-   * case). Omitted keeps the historical `general-purpose` fallback; a type name
+   * case). Omitted keeps the historical `Worker` fallback; a type name
    * routes those calls to that agent instead; `"none"` disables the fallback so
    * dispatch fails closed with an error naming the available types.
    *

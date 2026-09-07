@@ -97,7 +97,7 @@ describe("toolDescriptionMode", () => {
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("## Usage notes");
     expect(desc).toContain("## Writing the prompt");
-    // Full agent descriptions are embedded (a late Explore sentence survives).
+    // Full agent descriptions are embedded (a late Explorer sentence survives).
     expect(desc).toContain("very thorough");
   });
 
@@ -108,11 +108,36 @@ describe("toolDescriptionMode", () => {
     expect(desc).not.toContain("## Usage notes");
     expect(desc).not.toContain("## Writing the prompt");
     // Type list keeps every agent but only the first sentence of each description.
-    expect(desc).toContain("- general-purpose:");
-    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+    expect(desc).toContain("- Worker:");
+    expect(desc).toContain("- Explorer: Read-only code investigator for scoped questions. (Tools:");
     expect(desc).not.toContain("very thorough");
     // The point of the feature: materially smaller than the full version.
     expect(desc.length).toBeLessThan(1600);
+  });
+
+  it.each(["full", "compact"])("%s keeps delegation optional in description and prompt guidelines", (mode) => {
+    const tool = setup({ toolDescriptionMode: mode }).get("Agent");
+    expect(tool.description).toMatch(/Default to (?:completing work directly|direct work)/);
+    expect(tool.description).toContain("parallelism");
+    expect(tool.description).toContain("context isolation");
+    expect(tool.description).toContain("not to delegate");
+    expect(tool.promptGuidelines.join("\n")).toContain("A plan or multiple steps alone is not a reason to delegate");
+    expect(tool.promptGuidelines.join("\n")).toContain("keep one writer per checkout");
+    expect(tool.promptSnippet).toContain("only when a separate agent adds value");
+  });
+
+  it("advertises exactly the new built-in roles and their tool boundaries", () => {
+    const tool = setup().get("Agent");
+    const desc: string = tool.description;
+    expect(desc).toContain("- Explorer:");
+    expect(desc).toContain("- Worker:");
+    expect(desc).toContain("- Reviewer:");
+    expect(desc).not.toMatch(/^- (?:Explore|Plan|general-purpose):/m);
+    for (const name of ["Explorer", "Reviewer"]) {
+      expect(desc.split("\n").find(line => line.startsWith(`- ${name}:`)))
+        .toContain("(Tools: read, grep, find, ls)");
+    }
+    expect(tool.parameters.properties.subagent_type.description).toContain("Explorer, Worker, Reviewer");
   });
 
   it("invalid mode in the settings file is dropped — full description", () => {
@@ -181,7 +206,7 @@ describe("toolDescriptionMode", () => {
     });
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("My agents:");
-    expect(desc).toContain("- general-purpose:"); // {{typeList}} expanded
+    expect(desc).toContain("- Worker:"); // {{typeList}} expanded
     expect(desc).toContain(`Global dir: ${hermeticAgentDir}`); // {{agentDir}} expanded
     expect(desc).toContain("Unknown: {{nope}}"); // unknown placeholder left verbatim
     expect(desc).toContain("Cost: $& stays literal"); // no $-pattern expansion
@@ -194,7 +219,7 @@ describe("toolDescriptionMode", () => {
     });
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("GLOBAL CUSTOM");
-    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+    expect(desc).toContain("- Explorer: Read-only code investigator for scoped questions. (Tools:");
   });
 
   it("{{scheduleGuideline}} expands to the schedule bullet when scheduling is on (default)", () => {
@@ -319,7 +344,8 @@ describe("toolDescriptionMode", () => {
       const tools = setup({ worktreeIsolation: false });
       const names = props(tools);
       expect(names).not.toContain("isolation");
-      expect(tools.get("Agent").description).not.toContain("isolation");
+      // Context isolation is a delegation benefit, not the disabled filesystem option.
+      expect(tools.get("Agent").description).not.toContain('isolation: "worktree"');
       // One field, not the tool — and the neighbouring gate is unaffected.
       expect(names).toEqual(expect.arrayContaining(["prompt", "description", "subagent_type", "schedule"]));
     });
@@ -331,7 +357,7 @@ describe("toolDescriptionMode", () => {
 
     it("compact mode says nothing about isolation when disabled", () => {
       const tools = setup({ toolDescriptionMode: "compact", worktreeIsolation: false });
-      expect(tools.get("Agent").description).not.toContain("isolation");
+      expect(tools.get("Agent").description).not.toContain('isolation: "worktree"');
       // The bullet above it survives — the gate trims a suffix, not the list.
       expect(tools.get("Agent").description).toContain("resume continues a previous agent by ID");
     });

@@ -31,7 +31,7 @@ function builtIn() {
 function record(over: Partial<AgentRecord>): AgentRecord {
   return {
     id: `id-${over.handle}`,
-    type: "Explore",
+    type: "Explorer",
     description: "find flaky tests",
     status: "running",
     toolUses: 0,
@@ -60,11 +60,11 @@ function managerWithTombstones(...entries: AgentTombstone[]): AgentManager {
 
 function tombstone(over: Partial<AgentTombstone> = {}): AgentTombstone {
   return {
-    handle: "explore",
+    handle: "explorer",
     id: "t1",
-    type: "Explore" as AgentTombstone["type"],
+    type: "Explorer" as AgentTombstone["type"],
     description: "audit the RPC path",
-    sessionFile: "/sessions/explore.jsonl",
+    sessionFile: "/sessions/explorer.jsonl",
     completedAt: 5000,
     ...over,
   };
@@ -85,13 +85,13 @@ const agentRows = (result: Awaited<ReturnType<typeof suggest>>) =>
 describe("agent suggestions", () => {
   it("lists matching handles above pi's files rather than instead of them", async () => {
     const current = builtIn();
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     const result = await suggest(provider, "@ex");
 
     expect(result).toEqual({
       items: [
-        { value: "@explore", label: "@explore", description: "send message · running · find flaky tests" },
+        { value: "@explorer", label: "@explorer", description: "send message · running · find flaky tests" },
         ...FILE_SUGGESTIONS.items,
       ],
       // Ours, not the stub's: when both match, both describe the same span (see
@@ -110,22 +110,22 @@ describe("agent suggestions", () => {
     // the one gesture people use to browse — `@` alone.
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "explore" }), record({ handle: "plan", startedAt: 2000 })), []),
+      () => mentionRoster(managerWith(record({ handle: "explorer" }), record({ handle: "reviewer", startedAt: 2000 })), []),
       () => true,
     );
 
     const result = await suggest(provider, "@");
 
-    expect(result?.items.map(i => i.value)).toEqual(["@explore", "@plan", "@src/index.ts"]);
+    expect(result?.items.map(i => i.value)).toEqual(["@explorer", "@reviewer", "@src/index.ts"]);
   });
 
   it("offers agents alone when no file matched", async () => {
     const current = builtIn();
     current.getSuggestions.mockResolvedValue(null);
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect(await suggest(provider, "@ex")).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
+      items: [{ value: "@explorer", label: "@explorer", description: "send message · running · find flaky tests" }],
       prefix: "@ex",
     });
   });
@@ -136,10 +136,10 @@ describe("agent suggestions", () => {
     // rejection there must not delete the handle rows too.
     const current = builtIn();
     current.getSuggestions.mockRejectedValue(new Error("inner provider exploded"));
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect(await suggest(provider, "@ex")).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
+      items: [{ value: "@explorer", label: "@explorer", description: "send message · running · find flaky tests" }],
       prefix: "@ex",
     });
   });
@@ -149,10 +149,10 @@ describe("agent suggestions", () => {
     // throw never yields a promise to attach to, so only try/catch holds it.
     const current = builtIn();
     current.getSuggestions.mockImplementation(() => { throw new Error("sync boom"); });
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect(await suggest(provider, "@ex")).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
+      items: [{ value: "@explorer", label: "@explorer", description: "send message · running · find flaky tests" }],
       prefix: "@ex",
     });
   });
@@ -165,7 +165,7 @@ describe("agent suggestions", () => {
     try {
       const current = builtIn();
       current.getSuggestions.mockRejectedValue(new Error("inner provider exploded"));
-      const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+      const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
       for (const line of ["@e", "@ex", "@exp"]) await suggest(provider, line);
 
@@ -186,28 +186,28 @@ describe("agent suggestions", () => {
     const provider = createMentionProvider(
       builtIn(),
       () => mentionRoster(managerWith(
-        record({ handle: "explore", status: "completed", startedAt: 1000 }),
-        record({ handle: "explore-3", status: "running", startedAt: 3000 }),
-        record({ handle: "explore-2", status: "running", startedAt: 2000 }),
+        record({ handle: "explorer", status: "completed", startedAt: 1000 }),
+        record({ handle: "explorer-3", status: "running", startedAt: 3000 }),
+        record({ handle: "explorer-2", status: "running", startedAt: 2000 }),
       ), []),
       () => true,
     );
 
     const result = await suggest(provider, "@ex");
 
-    expect(agentRows(result).map(i => i.value)).toEqual(["@explore-2", "@explore-3", "@explore"]);
+    expect(agentRows(result).map(i => i.value)).toEqual(["@explorer-2", "@explorer-3", "@explorer"]);
   });
 
   it("matches case-insensitively", async () => {
-    const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
-    expect(agentRows(await suggest(provider, "@EX")).map(i => i.value)).toEqual(["@explore"]);
+    expect(agentRows(await suggest(provider, "@EX")).map(i => i.value)).toEqual(["@explorer"]);
   });
 
   it("completes a mention typed mid-message", async () => {
     // The trigger fires at any token boundary, even though only a LEADING
     // mention is actually sent — same split as Claude Code.
-    const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect((await suggest(provider, "ask @ex"))?.prefix).toBe("@ex");
   });
@@ -215,7 +215,7 @@ describe("agent suggestions", () => {
 
 describe("agents that have never run", () => {
   const TYPES = [
-    { name: "Explore", description: "Fast codebase exploration. Read-only, medium breadth." },
+    { name: "Explorer", description: "Fast codebase exploration. Read-only, medium breadth." },
     { name: "code-review", description: "Reviews a diff." },
   ];
 
@@ -225,8 +225,8 @@ describe("agents that have never run", () => {
     const result = await suggest(provider, "@ex");
 
     expect(agentRows(result)).toEqual([{
-      value: "@explore",
-      label: "@explore",
+      value: "@explorer",
+      label: "@explorer",
       description: "start agent · Fast codebase exploration.",
     }]);
     // Kept from before the merge: the span the rows are inserted over is the
@@ -235,24 +235,24 @@ describe("agents that have never run", () => {
   });
 
   it("lets a live agent own its handle instead of listing the type twice", async () => {
-    // `@explore` has to mean the running Explore, or the mention would start a
+    // `@explorer` has to mean the running Explorer, or the mention would start a
     // second one while the first is mid-task.
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "explore" })), TYPES),
+      () => mentionRoster(managerWith(record({ handle: "explorer" })), TYPES),
       () => true,
     );
 
     const result = await suggest(provider, "@ex");
 
-    expect(agentRows(result).map(i => i.value)).toEqual(["@explore"]);
+    expect(agentRows(result).map(i => i.value)).toEqual(["@explorer"]);
     expect(agentRows(result)[0].description).toBe("send message · running · find flaky tests");
   });
 
   it("still offers the type once its only instance has finished, as a resume", async () => {
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "explore", status: "completed" })), TYPES),
+      () => mentionRoster(managerWith(record({ handle: "explorer", status: "completed" })), TYPES),
       () => true,
     );
 
@@ -263,19 +263,19 @@ describe("agents that have never run", () => {
   it("lists live agents before startable types", async () => {
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "plan" })), TYPES),
+      () => mentionRoster(managerWith(record({ handle: "reviewer" })), TYPES),
       () => true,
     );
 
     expect(agentRows(await suggest(provider, "@")).map(i => i.value))
-      .toEqual(["@plan", "@explore", "@code-review"]);
+      .toEqual(["@reviewer", "@explorer", "@code-review"]);
   });
 });
 
 describe("delegation to pi's provider", () => {
   it("delegates when no handle matches the typed prefix", async () => {
     const current = builtIn();
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect(await suggest(provider, "@zz")).toBe(FILE_SUGGESTIONS);
     expect(current.getSuggestions).toHaveBeenCalled();
@@ -283,22 +283,22 @@ describe("delegation to pi's provider", () => {
 
   it("delegates a path-shaped token even when its first segment names an agent", async () => {
     const current = builtIn();
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
-    expect(await suggest(provider, "@explore/notes.md")).toBe(FILE_SUGGESTIONS);
+    expect(await suggest(provider, "@explorer/notes.md")).toBe(FILE_SUGGESTIONS);
     expect(current.getSuggestions).toHaveBeenCalled();
   });
 
   it("delegates an @ that is not at a token boundary", async () => {
     const current = builtIn();
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
     expect(await suggest(provider, "mail@ex")).toBe(FILE_SUGGESTIONS);
   });
 
   it("never claims nested children — nothing can address them", async () => {
     const current = builtIn();
-    const nested = record({ handle: "explore", parentAgentId: "parent-1" });
+    const nested = record({ handle: "explorer", parentAgentId: "parent-1" });
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(nested), []), () => true);
 
     expect(await suggest(provider, "@ex")).toBe(FILE_SUGGESTIONS);
@@ -306,7 +306,7 @@ describe("delegation to pi's provider", () => {
 
   it("delegates everything while mentions are disabled", async () => {
     const current = builtIn();
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => false);
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => false);
 
     expect(await suggest(provider, "@ex")).toBe(FILE_SUGGESTIONS);
   });
@@ -317,7 +317,7 @@ describe("composing with another extension's provider", () => {
   // order (interactive-mode.js:428), so an extension is either inside us or
   // outside us depending on load order. Both directions have to work, and
   // neither is under our control.
-  const TYPES = [{ name: "Explore", description: "Fast codebase exploration." }];
+  const TYPES = [{ name: "Explorer", description: "Fast codebase exploration." }];
 
   /** A foreign wrapper that owns `#` and delegates everything else. */
   function hashWrapper(current: any) {
@@ -340,7 +340,7 @@ describe("composing with another extension's provider", () => {
     );
 
     // ours wins for @, the inner wrapper still owns #, files still reach base
-    expect(agentRows(await suggest(provider, "@ex")).map(i => i.value)).toEqual(["@explore"]);
+    expect(agentRows(await suggest(provider, "@ex")).map(i => i.value)).toEqual(["@explorer"]);
     expect((await suggest(provider, "#gen"))?.items.map(i => i.value)).toEqual(["#general"]);
     expect(await suggest(provider, "@src/")).toBe(FILE_SUGGESTIONS);
   });
@@ -351,7 +351,7 @@ describe("composing with another extension's provider", () => {
     const outer = hashWrapper(ours) as any;
 
     expect(agentRows(await outer.getSuggestions(["@ex"], 0, 3, { signal: new AbortController().signal }))
-      .map(i => i.value)).toEqual(["@explore"]);
+      .map(i => i.value)).toEqual(["@explorer"]);
     expect((await outer.getSuggestions(["#g"], 0, 2, { signal: new AbortController().signal }))
       ?.items.map((i: any) => i.value)).toEqual(["#general"]);
   });
@@ -379,7 +379,7 @@ describe("composing with another extension's provider", () => {
   it("can be rebuilt from the same factory without accumulating state", () => {
     // Every later addAutocompleteProvider call re-runs the whole chain from a
     // fresh base, so our factory is invoked again each time.
-    const roster = () => mentionRoster(managerWith(record({ handle: "explore" })), []);
+    const roster = () => mentionRoster(managerWith(record({ handle: "explorer" })), []);
     const first = createMentionProvider(builtIn(), roster, () => true);
     const second = createMentionProvider(builtIn(), roster, () => true);
 
@@ -393,16 +393,16 @@ describe("against pi's real provider", () => {
   // Getting `prefix` wrong by a character silently eats input on completion.
   const real = () => new CombinedAutocompleteProvider([], process.cwd(), null);
   const provider = () =>
-    createMentionProvider(real(), () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    createMentionProvider(real(), () => mentionRoster(managerWith(record({ handle: "explorer" })), []), () => true);
 
   it("inserts the handle and a trailing space at the start of a line", async () => {
     const p = provider();
     const suggestions = (await suggest(p, "@ex"))!;
 
     expect(p.applyCompletion(["@ex"], 0, 3, suggestions.items[0], suggestions.prefix)).toEqual({
-      lines: ["@explore "],
+      lines: ["@explorer "],
       cursorLine: 0,
-      cursorCol: 9,
+      cursorCol: 10,
     });
   });
 
@@ -411,9 +411,9 @@ describe("against pi's real provider", () => {
     const suggestions = (await suggest(p, "ask @ex"))!;
 
     expect(p.applyCompletion(["ask @ex"], 0, 7, suggestions.items[0], suggestions.prefix)).toEqual({
-      lines: ["ask @explore "],
+      lines: ["ask @explorer "],
       cursorLine: 0,
-      cursorCol: 13,
+      cursorCol: 14,
     });
   });
 
@@ -422,7 +422,7 @@ describe("against pi's real provider", () => {
     const suggestions = (await suggest(p, "@ex"))!;
 
     expect(p.applyCompletion(["@ex please"], 0, 3, suggestions.items[0], suggestions.prefix).lines)
-      .toEqual(["@explore  please"]);
+      .toEqual(["@explorer  please"]);
   });
 
   it("inserts a FILE-shaped row from OUR prefix, character for character", async () => {
@@ -461,7 +461,7 @@ describe("insertion and trigger plumbing", () => {
   it("hands applyCompletion to pi — its @-branch already inserts value plus a space", () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(), []), () => true);
-    const item = { value: "@explore", label: "@explore" };
+    const item = { value: "@explorer", label: "@explorer" };
 
     expect(provider.applyCompletion(["@ex"], 0, 3, item, "@ex")).toEqual({
       lines: ["applied"],
@@ -494,19 +494,19 @@ describe("named agents and evicted ones", () => {
     // alone says nothing about what it is, which the handle used to carry.
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "explore", alias: "auth-audit", type: "Explore", status: "running", description: "audit the auth flow" })), []),
+      () => mentionRoster(managerWith(record({ handle: "explorer", alias: "auth-audit", type: "Explorer", status: "running", description: "audit the auth flow" })), []),
       () => true,
     );
 
     expect(agentRows(await suggest(provider, "@"))).toEqual([
-      { value: "@auth-audit", label: "@auth-audit", description: "send message · Explore · running · audit the auth flow" },
+      { value: "@auth-audit", label: "@auth-audit", description: "send message · Explorer · running · audit the auth flow" },
     ]);
   });
 
   it("leaves an unnamed agent's row free of a redundant type", async () => {
     const provider = createMentionProvider(
       builtIn(),
-      () => mentionRoster(managerWith(record({ handle: "explore", type: "Explore", status: "running", description: "find flaky tests" })), []),
+      () => mentionRoster(managerWith(record({ handle: "explorer", type: "Explorer", status: "running", description: "find flaky tests" })), []),
       () => true,
     );
 
@@ -514,11 +514,11 @@ describe("named agents and evicted ones", () => {
   });
 
   it("still resolves the unlisted type handle of a named agent", () => {
-    // The row shows the alias, but `@explore` must keep reaching this agent —
-    // that is what stops it from starting a second Explore.
+    // The row shows the alias, but `@explorer` must keep reaching this agent —
+    // that is what stops it from starting a second Explorer.
     const roster = mentionRoster(
-      managerWith(record({ handle: "explore", alias: "auth-audit", type: "Explore", status: "running" })),
-      [{ name: "Explore", description: "search" }],
+      managerWith(record({ handle: "explorer", alias: "auth-audit", type: "Explorer", status: "running" })),
+      [{ name: "Explorer", description: "search" }],
     );
 
     // The type is NOT offered as startable: its handle belongs to the live agent.
@@ -533,7 +533,7 @@ describe("named agents and evicted ones", () => {
     );
 
     expect(agentRows(await suggest(provider, "@"))).toEqual([
-      { value: "@explore", label: "@explore", description: "resume · Explore · audit the RPC path" },
+      { value: "@explorer", label: "@explorer", description: "resume · Explorer · audit the RPC path" },
     ]);
   });
 
@@ -541,29 +541,29 @@ describe("named agents and evicted ones", () => {
     // A running agent is the likelier target, and a resume is the slower,
     // more surprising action to land on by pressing Enter too quickly.
     const manager = {
-      listAgents: () => [record({ handle: "plan", type: "Plan", status: "running" })],
+      listAgents: () => [record({ handle: "reviewer", type: "Reviewer", status: "running" })],
       listTombstones: () => [tombstone()],
     } as unknown as AgentManager;
     const provider = createMentionProvider(builtIn(), () => mentionRoster(manager, []), () => true);
 
-    expect(agentRows(await suggest(provider, "@")).map(i => i.value)).toEqual(["@plan", "@explore"]);
+    expect(agentRows(await suggest(provider, "@")).map(i => i.value)).toEqual(["@reviewer", "@explorer"]);
   });
 
   it("keeps an aliased tombstone's type handle reserved too", () => {
-    // It lists under its alias, but `@explore` still resumes it — so the
-    // Explore type must not also be offered as startable under that name.
+    // It lists under its alias, but `@explorer` still resumes it — so the
+    // Explorer type must not also be offered as startable under that name.
     const roster = mentionRoster(
-      managerWithTombstones(tombstone({ handle: "explore", alias: "auth-audit" })),
-      [{ name: "Explore", description: "search" }],
+      managerWithTombstones(tombstone({ handle: "explorer", alias: "auth-audit" })),
+      [{ name: "Explorer", description: "search" }],
     );
 
     expect(roster.map(t => t.handle)).toEqual(["auth-audit"]);
   });
 
   it("does not offer a startable type whose handle a tombstone still holds", () => {
-    // `@explore` resumes the old conversation, so advertising "start agent"
+    // `@explorer` resumes the old conversation, so advertising "start agent"
     // under the same name would promise the wrong action.
-    const roster = mentionRoster(managerWithTombstones(tombstone()), [{ name: "Explore", description: "search" }]);
+    const roster = mentionRoster(managerWithTombstones(tombstone()), [{ name: "Explorer", description: "search" }]);
 
     expect(roster).toHaveLength(1);
     expect(roster[0].kind).toBe("tombstone");
@@ -574,13 +574,13 @@ describe("named agents and evicted ones", () => {
 // `display_name` (via getConfig). The popup rendering the raw type instead would
 // make `@` the one surface that calls the same agent something else.
 describe("rows carry the display name, not the raw type", () => {
-  const label = (type: string) => (type === "Explore" ? "Auth Auditor" : type);
+  const label = (type: string) => (type === "Explorer" ? "Auth Auditor" : type);
 
   it("names an aliased agent by its label", async () => {
     const provider = createMentionProvider(
       builtIn(),
       () => mentionRoster(
-        managerWith(record({ handle: "explore", alias: "auth-audit", type: "Explore", status: "running", description: "audit the auth flow" })),
+        managerWith(record({ handle: "explorer", alias: "auth-audit", type: "Explorer", status: "running", description: "audit the auth flow" })),
         [],
         label,
       ),
@@ -611,6 +611,6 @@ describe("rows carry the display name, not the raw type", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items[0].description).toContain("· Explore ·");
+    expect((await suggest(provider, "@"))!.items[0].description).toContain("· Explorer ·");
   });
 });

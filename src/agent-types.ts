@@ -38,8 +38,8 @@ export const NO_FALLBACK = "none";
 
 /**
  * Agent type substituted when a caller-supplied `subagent_type` doesn't resolve
- * to exactly one enabled agent. `undefined` keeps the historical behavior
- * (general-purpose); `NO_FALLBACK` makes dispatch fail closed. Set from
+ * to exactly one enabled agent. `undefined` keeps permissive fallback to
+ * Worker; `NO_FALLBACK` makes dispatch fail closed. Set from
  * `subagents.json` (`fallbackSubagent`).
  *
  * Module state rather than an index.ts closure because every caller-supplied
@@ -47,10 +47,10 @@ export const NO_FALLBACK = "none";
  */
 let fallbackSubagent: string | undefined;
 
-/** Get the configured fallback agent type. undefined = general-purpose. */
+/** Get the configured fallback agent type. undefined = Worker. */
 export function getFallbackSubagent(): string | undefined { return fallbackSubagent; }
 
-/** Set the configured fallback agent type. undefined = general-purpose. */
+/** Set the configured fallback agent type. undefined = Worker. */
 export function setFallbackSubagent(v: string | undefined): void { fallbackSubagent = v; }
 
 /**
@@ -162,7 +162,7 @@ export type SpawnTypeResolution =
  * `fallbackSubagent` policy. The single decision point for every caller-supplied
  * spawn — the Agent tool, the scheduler, cross-extension RPC, and the nested
  * tools — so a type that fails here never reaches `runAgent`, where `getConfig`
- * would silently substitute general-purpose.
+ * would silently substitute Worker.
  *
  * Unknown, disabled, and case-ambiguous names are all treated the same way:
  * the caller named something that doesn't identify exactly one enabled agent.
@@ -197,7 +197,7 @@ export function resolveSpawnTypeIn(
   if (configured !== undefined) {
     // An explicitly configured fallback that is itself unusable is a
     // misconfiguration, not a second chance to guess — say so rather than
-    // quietly dropping to general-purpose.
+    // quietly dropping to Worker.
     const fallbackKey = resolveUnambiguousKeyIn(registry, configured);
     if (fallbackKey === undefined || registry.get(fallbackKey)?.enabled === false) {
       return {
@@ -210,12 +210,10 @@ export function resolveSpawnTypeIn(
     return { ok: true, type: fallbackKey, fellBackFrom: raw };
   }
 
-  // Unset: historical behavior, deliberately unchanged. #183 asks for the
-  // fallback to remain the default, so the pre-existing hole it leaves — an
-  // unregistered general-purpose resolving to `getConfig`'s all-tools hardcoded
-  // tier — is what `fallbackSubagent: none` is for, not something to close
-  // under everyone silently.
-  return { ok: true, type: "general-purpose", fellBackFrom: raw };
+  // Keep the permissive fallback policy, now using the Worker role. When
+  // defaults are disabled, getConfig still supplies the all-tools tier;
+  // fallbackSubagent: none opts into strict dispatch.
+  return { ok: true, type: "Worker", fellBackFrom: raw };
 }
 
 /** Resolve a caller-supplied agent type against the process-wide registry. */
@@ -292,7 +290,7 @@ export function getToolNamesForType(type: string): string[] {
   return config?.builtinToolNames ?? [...BUILTIN_TOOL_NAMES];
 }
 
-/** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */
+/** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to Worker. */
 export function getConfig(type: string): {
   displayName: string;
   color?: string;
@@ -318,8 +316,8 @@ export function getConfig(type: string): {
     };
   }
 
-  // Fallback for unknown/disabled types — general-purpose config
-  const gp = agents.get("general-purpose");
+  // Fallback for unknown/disabled types — Worker config
+  const gp = agents.get("Worker");
   if (gp && gp.enabled !== false) {
     return {
       displayName: gp.displayName ?? gp.name,
@@ -335,8 +333,8 @@ export function getConfig(type: string): {
 
   // Absolute fallback (should never happen)
   return {
-    displayName: "Agent",
-    description: "General-purpose agent for complex, multi-step tasks",
+    displayName: "Worker",
+    description: "Execution delegate for a bounded task",
     builtinToolNames: BUILTIN_TOOL_NAMES,
     extensions: true,
     skills: true,

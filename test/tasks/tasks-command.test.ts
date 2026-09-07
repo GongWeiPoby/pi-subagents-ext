@@ -196,7 +196,7 @@ describe("/tasks clearing", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Agent starting",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const launching = mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -245,7 +245,7 @@ describe("/tasks clearing", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Running",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -279,7 +279,7 @@ describe("/tasks clearing", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Running",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -313,7 +313,7 @@ describe("/tasks clearing", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Running",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const scripted = scriptedUI([2, undefined]);

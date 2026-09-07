@@ -75,7 +75,7 @@ describe("one Agent call, one sweep of the agent directories", () => {
 
     await agent.execute(
       "tc-1",
-      { subagent_type: "general-purpose", description: "d", prompt: "p", run_in_background: true },
+      { subagent_type: "Worker", description: "d", prompt: "p", run_in_background: true },
       undefined,
       undefined,
       ctx(),
@@ -92,7 +92,7 @@ describe("one Agent call, one sweep of the agent directories", () => {
     for (let i = 0; i < 5; i++) {
       await agent.execute(
         `tc-${i}`,
-        { subagent_type: "general-purpose", description: "d", prompt: "p", run_in_background: true },
+        { subagent_type: "Worker", description: "d", prompt: "p", run_in_background: true },
         undefined,
         undefined,
         ctx(),

@@ -4,8 +4,8 @@ import type { AgentConfig } from "../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
-    name: "Explore",
-    description: "Explore",
+    name: "Explorer",
+    description: "Explorer",
     builtinToolNames: ["read"],
     extensions: false,
     skills: false,

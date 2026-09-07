@@ -132,11 +132,11 @@ describe("Agent tool — background spawn", () => {
    * ±42% rme, replacing a known bias with unusable noise.
    */
   bench(
-    "general-purpose, run_in_background",
+    "Worker, run_in_background",
     async () => {
       await agent.execute(
         `bench-${i++}`,
-        { subagent_type: "general-purpose", description: "bench spawn", prompt: "go", run_in_background: true },
+        { subagent_type: "Worker", description: "bench spawn", prompt: "go", run_in_background: true },
         undefined,
         undefined,
         c,

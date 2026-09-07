@@ -20,7 +20,7 @@ function makeJob(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent 
     schedule: "5m",
     scheduleType: "interval",
     intervalMs: 5 * 60_000,
-    subagent_type: "general-purpose",
+    subagent_type: "Worker",
     prompt: "hello",
     enabled: true,
     createdAt: new Date().toISOString(),

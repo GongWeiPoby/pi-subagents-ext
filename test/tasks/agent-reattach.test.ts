@@ -46,7 +46,7 @@ async function sessionWithRunningAgent() {
   const mock = mockPi();
   const rpc = installSubagentsMock(mock.pi);
   initExtension(mock.pi as any);
-  await mock.executeTool("TaskCreate", { subject: "Long job", description: "d", agentType: "general-purpose" });
+  await mock.executeTool("TaskCreate", { subject: "Long job", description: "d", agentType: "Worker" });
   await mock.executeTool("TaskExecute", { task_ids: ["1"] });
   const taskExecutionRef = rpc.taskExecutionRef("agent-1")!;
   rpc.unsub();
@@ -129,12 +129,12 @@ describe("reattaching subagents after reload", () => {
     await first.executeTool("TaskCreate", {
       subject: "Blocker",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await first.executeTool("TaskCreate", {
       subject: "Dependent",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await first.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
     await first.executeTool("TaskExecute", {
@@ -186,7 +186,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Retry me",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -207,7 +207,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "No stale result",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", metadata: { result: "old result" } });
@@ -234,7 +234,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Retry safely",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
@@ -262,7 +262,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Protected event",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const claim = rpc.spawned[0].options.taskExecution as Record<string, unknown>;
@@ -309,7 +309,7 @@ describe("reattaching subagents after reload", () => {
     initExtension(mock.pi as any);
 
     await mock.fireLifecycle("session_start", { reason: "startup" }, mockSessionCtx("session-a"));
-    await mock.executeTool("TaskCreate", { subject: "A's job", description: "d", agentType: "general-purpose" });
+    await mock.executeTool("TaskCreate", { subject: "A's job", description: "d", agentType: "Worker" });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
     await mock.fireLifecycle("session_start", { reason: "new" }, mockSessionCtx("session-b"));
@@ -332,7 +332,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Reset during spawn",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
 
     const delayed = mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -353,7 +353,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "CAS launch",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
       metadata: { keep: "current" },
     });
 
@@ -393,7 +393,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Original subject",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -454,7 +454,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Original subject",
       description: "Original description",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -483,7 +483,7 @@ describe("reattaching subagents after reload", () => {
 
   it("revokes a stale workflow binding on reload so the task can be claimed again", async () => {
     const taskStore = new TaskStore(process.env.PI_TASKS);
-    taskStore.create("Stale workflow", "d", undefined, { agentType: "general-purpose" });
+    taskStore.create("Stale workflow", "d", undefined, { agentType: "Worker" });
     const claim = taskStore.claimPending("1", { kind: "workflow" })!.execution!;
     const staleRef = taskStore.bindExecution(claim, "wf_stale")!;
 
@@ -518,7 +518,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "A's running task",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const updating = mock.executeTool("TaskUpdate", { taskId: "1", status: "deleted" });
@@ -544,7 +544,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "Session-bound stop",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
 
@@ -574,7 +574,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "A's running task",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const stopping = mock.executeTool("TaskStop", { task_id: "1" });
@@ -583,7 +583,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "B's running task",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     await stopping;
@@ -607,7 +607,7 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "A's job",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
     const waiting = mock.executeTool("TaskOutput", { task_id: "1", block: true, timeout: 5000 });
@@ -635,12 +635,12 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "A blocker",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "A dependent",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
@@ -673,12 +673,12 @@ describe("reattaching subagents after reload", () => {
     await mock.executeTool("TaskCreate", {
       subject: "A's delayed job",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     await mock.executeTool("TaskCreate", {
       subject: "A's second job",
       description: "d",
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     const delayed = mock.executeTool("TaskExecute", { task_ids: ["1", "2"] });
 
@@ -699,7 +699,7 @@ describe("reattaching subagents after reload", () => {
     const rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
     for (const subject of ["A", "B"]) {
-      await mock.executeTool("TaskCreate", { subject, description: "d", agentType: "general-purpose" });
+      await mock.executeTool("TaskCreate", { subject, description: "d", agentType: "Worker" });
     }
     await mock.executeTool("TaskExecute", { task_ids: ["1", "2"] });
     const refs = [rpc.taskExecutionRef("agent-1")!, rpc.taskExecutionRef("agent-2")!];

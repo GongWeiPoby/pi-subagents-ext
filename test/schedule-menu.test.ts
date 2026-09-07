@@ -54,7 +54,7 @@ describe("showSchedulesMenu", () => {
       name,
       description: name,
       schedule: "0 0 9 * * 1",
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "go",
     });
 

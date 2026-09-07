@@ -81,7 +81,7 @@ function deferredRuns() {
 async function spawnBackground(tools: Map<string, any>): Promise<{ id: string; queued: boolean }> {
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "queued-wait test agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "queued-wait test agent", subagent_type: "Worker", run_in_background: true },
     undefined,
     undefined,
     ctx(),

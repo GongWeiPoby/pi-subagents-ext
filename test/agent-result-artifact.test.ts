@@ -74,7 +74,7 @@ describe("AgentManager result artifacts", () => {
     });
     manager = new AgentManager();
 
-    const id = manager.spawn(mockPi, ctx(), "Explore", "secret prompt", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "secret prompt", {
       description: "caller label must not become a path",
       isBackground: true,
       invocation: { modelId: "provider/model", thinking: "high" },
@@ -123,7 +123,7 @@ describe("AgentManager result artifacts", () => {
       vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     }
     manager = new AgentManager();
-    const id = manager.spawn(mockPi, ctx(), "Explore", "go", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "go", {
       description: "terminal case",
       isBackground: true,
     });
@@ -146,11 +146,11 @@ describe("AgentManager result artifacts", () => {
       new Promise(resolve => { finishes.set(prompt, resolve); }));
     manager = new AgentManager(undefined, 1);
 
-    const runningId = manager.spawn(mockPi, ctx(), "Explore", "running", {
+    const runningId = manager.spawn(mockPi, ctx(), "Explorer", "running", {
       description: "running at shutdown",
       isBackground: true,
     });
-    const queuedId = manager.spawn(mockPi, ctx(), "Explore", "queued", {
+    const queuedId = manager.spawn(mockPi, ctx(), "Explorer", "queued", {
       description: "queued at shutdown",
       isBackground: true,
     });
@@ -297,7 +297,7 @@ describe("AgentManager result artifacts", () => {
       return new Promise(resolve => { resolveResume = resolve; });
     });
     manager = new AgentManager();
-    const id = manager.spawn(mockPi, ctx(), "Explore", "first", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "first", {
       description: "resume stop",
       isBackground: true,
     });
@@ -332,7 +332,7 @@ describe("AgentManager result artifacts", () => {
       return new Promise(resolve => { resolveResume = resolve; });
     });
     manager = new AgentManager();
-    const id = manager.spawn(mockPi, ctx(), "Explore", "first", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "first", {
       description: "resume signal",
       isBackground: true,
     });
@@ -364,7 +364,7 @@ describe("AgentManager result artifacts", () => {
         steered: false,
       });
       manager = new AgentManager(undefined, 1);
-      const id = manager.spawn(mockPi, ctx(), "Explore", "first", {
+      const id = manager.spawn(mockPi, ctx(), "Explorer", "first", {
         description: "resume guard",
         isBackground: true,
       });
@@ -376,7 +376,7 @@ describe("AgentManager result artifacts", () => {
       if (state === "queued") {
         vi.mocked(runAgent).mockImplementation(() =>
           new Promise(resolve => { finishBlocker = resolve; }));
-        blockerId = manager.spawn(mockPi, ctx(), "Explore", "blocker", {
+        blockerId = manager.spawn(mockPi, ctx(), "Explorer", "blocker", {
           description: "pool blocker",
           isBackground: true,
         });
@@ -426,7 +426,7 @@ describe("AgentManager result artifacts", () => {
       return { text: "second" };
     });
     manager = new AgentManager();
-    const id = manager.spawn(mockPi, ctx(), "Explore", "first", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "first", {
       description: "first",
       isBackground: true,
     });
@@ -469,7 +469,7 @@ describe("AgentManager result artifacts", () => {
       kind: "agent" as const,
     });
 
-    const firstId = manager.spawn(mockPi, ctx(), "Explore", "first", {
+    const firstId = manager.spawn(mockPi, ctx(), "Explorer", "first", {
       description: "first",
       isBackground: true,
       taskExecution: taskExecution("one"),
@@ -477,7 +477,7 @@ describe("AgentManager result artifacts", () => {
     await manager.getRecord(firstId)!.promise;
     const firstAttemptId = manager.getRecord(firstId)!.artifactId;
 
-    const retryId = manager.spawn(mockPi, ctx(), "Explore", "retry", {
+    const retryId = manager.spawn(mockPi, ctx(), "Explorer", "retry", {
       description: "retry",
       isBackground: true,
       taskExecution: taskExecution("two"),
@@ -520,7 +520,7 @@ describe("AgentManager result artifacts", () => {
       steered: false,
     });
     manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, writer);
-    const id = manager.spawn(mockPi, ctx(false), "Explore", "go", {
+    const id = manager.spawn(mockPi, ctx(false), "Explorer", "go", {
       description: "ephemeral",
       isBackground: true,
     });
@@ -548,7 +548,7 @@ describe("AgentManager result artifacts", () => {
       undefined,
       () => { throw Object.assign(new Error("disk unavailable"), { code: "EIO" }); },
     );
-    const id = manager.spawn(mockPi, ctx(), "Explore", "go", {
+    const id = manager.spawn(mockPi, ctx(), "Explorer", "go", {
       description: "writer failure",
       isBackground: true,
     });

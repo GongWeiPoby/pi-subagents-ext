@@ -80,7 +80,7 @@ describe("status note reaches the parent through the real handlers", () => {
 
     const res = await tools.get("Agent").execute(
       "tc1",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: false },
       undefined, undefined, ctx(),
     );
 
@@ -117,7 +117,7 @@ describe("status note reaches the parent through the real handlers", () => {
     const parent = new AbortController();
     const call = tools.get("Agent").execute(
       "tc-stop",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: false },
       parent.signal, undefined, ctx(),
     );
 
@@ -155,7 +155,7 @@ describe("status note reaches the parent through the real handlers", () => {
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
     // External registry/RPC callers cannot mint internal ownership metadata.
-    const topId = registry.spawn(pi, ctx(), "general-purpose", "top", {
+    const topId = registry.spawn(pi, ctx(), "Worker", "top", {
       description: "top-level owner",
       isBackground: false,
       parentAgentId: "forged-parent",
@@ -174,7 +174,7 @@ describe("status note reaches the parent through the real handlers", () => {
     pi.events.emit.mockClear();
     pi.appendEntry.mockClear();
     pi.sendMessage.mockClear();
-    const id = rawManager.spawn(pi, ctx(), "general-purpose", "nested", {
+    const id = rawManager.spawn(pi, ctx(), "Worker", "nested", {
       description: "nested child",
       isBackground: true,
       parentAgentId: topId,
@@ -187,7 +187,7 @@ describe("status note reaches the parent through the real handlers", () => {
     for (const [name, params] of [
       ["get_subagent_result", { agent_id: id }],
       ["steer_subagent", { agent_id: id, message: "stop" }],
-      ["Agent", { resume: id, prompt: "continue", description: "resume", subagent_type: "general-purpose" }],
+      ["Agent", { resume: id, prompt: "continue", description: "resume", subagent_type: "Worker" }],
     ] as const) {
       const result = await tools.get(name).execute("tc-nested", params, undefined, undefined, ctx());
       expect(textOf(result)).toContain("Agent not found");
@@ -208,7 +208,7 @@ describe("status note reaches the parent through the real handlers", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "Worker", run_in_background: true },
       undefined, undefined, ctx(),
     );
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
@@ -255,13 +255,13 @@ describe("subagents:compacted", () => {
 
     await tools.get("Agent").execute(
       "tc-compact",
-      { prompt: "go", description: "compacting agent", subagent_type: "general-purpose" },
+      { prompt: "go", description: "compacting agent", subagent_type: "Worker" },
       undefined, undefined, ctx(),
     );
 
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:compacted", expect.objectContaining({
       id: expect.any(String),
-      type: "general-purpose",
+      type: "Worker",
       description: "compacting agent",
       reason: "threshold",
       tokensBefore: 12345,
@@ -280,7 +280,7 @@ describe("subagents:compacted", () => {
 
     await tools.get("Agent").execute(
       "tc-compact2",
-      { prompt: "go", description: "twice", subagent_type: "general-purpose" },
+      { prompt: "go", description: "twice", subagent_type: "Worker" },
       undefined, undefined, ctx(),
     );
 
@@ -299,14 +299,14 @@ describe("subagents:compacted", () => {
 
     await tools.get("Agent").execute(
       "tc-parent",
-      { prompt: "go", description: "parent", subagent_type: "general-purpose" },
+      { prompt: "go", description: "parent", subagent_type: "Worker" },
       undefined, undefined, ctx(),
     );
     const rawManager = vi.mocked(runAgent).mock.calls[0][3].nestedRuntime.manager;
     const parentId = vi.mocked(runAgent).mock.calls[0][3].nestedRuntime.parentAgentId;
     pi.events.emit.mockClear();
 
-    rawManager.spawn(pi, ctx(), "general-purpose", "nested", {
+    rawManager.spawn(pi, ctx(), "Worker", "nested", {
       description: "nested child",
       isBackground: true,
       parentAgentId: parentId,

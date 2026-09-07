@@ -97,7 +97,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
       name: "e2e-once",
       description: "test",
       schedule: future,
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "hello",
     });
     expect(job.scheduleType).toBe("once");
@@ -124,7 +124,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
       name: "e2e-fail",
       description: "test",
       schedule: future,
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "fail",
     });
 
@@ -145,7 +145,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
       name: "e2e-interval",
       description: "test",
       schedule: "100s",  // Will be too long; override below.
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "tick",
     });
     // Replace with a literal 100ms interval — easier than crafting a parseable shorthand for ms.
@@ -172,7 +172,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
       name: "persistent",
       description: "x",
       schedule: future,
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "x",
     });
 
@@ -193,7 +193,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
       name: "shape-test",
       description: "x",
       schedule: "1h",
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       prompt: "x",
     });
 
@@ -217,7 +217,7 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
     const future = new Date(Date.now() + 100).toISOString();
     const job = scheduler.addJob({
       name: "events", description: "x", schedule: future,
-      subagent_type: "general-purpose", prompt: "x",
+      subagent_type: "Worker", prompt: "x",
     });
 
     await waitFor(() => manager.spawn.mock.calls.length === 1);

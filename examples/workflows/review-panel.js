@@ -1,8 +1,8 @@
 /**
  * review-panel.js — the case where a barrier is actually earned.
  *
- * Demonstrates: `parallel` used correctly, `effort` tiering (cheap reviewers,
- * an expensive judge), and a `model` override.
+ * Demonstrates: `parallel` used correctly and independent read-only Reviewers
+ * followed by a synthesis step with higher reasoning effort.
  *
  * Most of the time `pipeline` beats `parallel`, because a barrier idles every
  * fast agent until the slowest finishes. This is the exception: the synthesis
@@ -10,7 +10,9 @@
  * every one of them is in. That — a prompt that compares results against each
  * other — is what justifies a barrier.
  *
- * args: { target?: string, lenses?: string[] }
+ * args: { target?: string, diff?: string, lenses?: string[] }
+ * Supply concrete target paths and a diff when requesting a change review:
+ * Reviewers cannot run Git. This example is opt-in, not a default review pipeline.
  *
  * Run: ask the model — "run the workflow at examples/workflows/review-panel.js
  * against src/auth.ts".
@@ -30,8 +32,9 @@ phase('Review')
 // catch failure modes that three identical ones cannot.
 const reviews = await parallel(
   lenses.map(lens => () =>
-    agent(`Review ${target} through the lens of ${lens} alone. Be specific and brief.`, {
+    agent(`Review ${target} through the lens of ${lens} alone. Be specific and brief.\n${args?.diff ?? 'If a required comparison baseline is missing, report that limitation.'}`, {
       label: `review:${lens}`,
+      agentType: 'Reviewer',
       // Cheap for the survey work; the judge below gets the depth.
       effort: 'low',
     }),
@@ -57,7 +60,7 @@ const verdict = await agent(
     `Reconcile these reviews of ${target}. Where they disagree, say which is right and why.`,
     ...usable.map(r => `\n## ${r.lens}\n${r.text}`),
   ].join('\n'),
-  { label: 'synthesize', effort: 'high', agentType: 'Plan' },
+  { label: 'synthesize', effort: 'high', agentType: 'Reviewer' },
 )
 
 return { reviewed: usable.length, verdict }

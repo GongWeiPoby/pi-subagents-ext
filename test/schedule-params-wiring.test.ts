@@ -68,7 +68,7 @@ async function scheduleAndReadBack(
 describe("Agent tool → persisted scheduled job", () => {
   it("persists the run-shaping params the job will fire with", async () => {
     const { job, restore } = await scheduleAndReadBack({
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       thinking: "high",
       isolated: true,
       isolation: "worktree",
@@ -90,7 +90,7 @@ describe("Agent tool → persisted scheduled job", () => {
     // would give the scheduled run a different limit from an identical
     // immediate run — and only at fire time.
     const { job, restore } = await scheduleAndReadBack({
-      subagent_type: "general-purpose",
+      subagent_type: "Worker",
       max_turns: 0, // 0 means "unlimited", not "zero turns"
     });
     try {
@@ -101,7 +101,7 @@ describe("Agent tool → persisted scheduled job", () => {
   });
 
   it("falls back to the configured default turn limit when the call omits one", async () => {
-    const { job, restore } = await scheduleAndReadBack({ subagent_type: "general-purpose" });
+    const { job, restore } = await scheduleAndReadBack({ subagent_type: "Worker" });
     try {
       expect(job.max_turns).toBe(normalizeMaxTurns(getDefaultMaxTurns()));
     } finally {
@@ -149,7 +149,7 @@ describe("Agent tool → schedule restrictions", () => {
           prompt: "do the thing",
           description: "nightly sweep",
           schedule: "0 3 * * * *",
-          subagent_type: "general-purpose",
+          subagent_type: "Worker",
           ...params,
         },
         undefined,

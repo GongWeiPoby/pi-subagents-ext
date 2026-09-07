@@ -60,7 +60,7 @@ describe("journalKey", () => {
     const keys = new Set([
       journalKey(base),
       journalKey({ ...base, model: "haiku" }),
-      journalKey({ ...base, agentType: "Explore" }),
+      journalKey({ ...base, agentType: "Explorer" }),
       journalKey({ ...base, effort: "high" }),
       journalKey({ ...base, isolation: "worktree" }),
       journalKey({ ...base, gate: "npm test" }),
@@ -74,6 +74,7 @@ describe("journalKey", () => {
       prompt: "audit",
       label: "one",
       model: "haiku",
+      // Historical input pins the hash algorithm, not today's built-in roster.
       agentType: "Explore",
       effort: "high",
       isolation: "worktree",

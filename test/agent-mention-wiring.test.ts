@@ -5,7 +5,7 @@
  * This handler sits in front of every prompt the user types, and returning
  * `handled` discards the text. So the two failures that matter are opposite:
  * claiming input that was meant for the main model (silently eating it), and
- * failing to claim a real mention (sending "@explore fix it" to the main model
+ * failing to claim a real mention (sending "@explorer fix it" to the main model
  * as if it were prose). Each case below pins one side.
  *
  * Booted through the real extension so the assertions cover the actual wiring —
@@ -105,7 +105,7 @@ function bootDirect(settings: Record<string, unknown> = {}) {
   return boot({ agentMentions: "direct", ...settings });
 }
 
-async function spawnBackground(tools: Map<string, any>, subagent_type = "Explore"): Promise<string> {
+async function spawnBackground(tools: Map<string, any>, subagent_type = "Explorer"): Promise<string> {
   const r = await tools.get("Agent").execute(
     "tc-spawn",
     { prompt: "go", description: "find flaky tests", subagent_type, run_in_background: true },
@@ -130,13 +130,13 @@ describe("messaging a running agent", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore also check the RPC path", source: "interactive" },
+      { type: "input", text: "@explorer also check the RPC path", source: "interactive" },
       uiCtx,
     );
 
     expect(result).toEqual({ action: "handled" });
     expect(session.steer).toHaveBeenCalledWith("also check the RPC path");
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Sent to @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Sent to @explorer", "info");
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
   });
@@ -153,7 +153,7 @@ describe("messaging a running agent", () => {
     const record = (globalThis as any)[Symbol.for("pi-subagents:manager")].getRecord(id);
     record.resultConsumed = true;
 
-    await send(lifecycle, "@explore keep going");
+    await send(lifecycle, "@explorer keep going");
 
     expect(record.resultConsumed).toBe(false);
 
@@ -171,7 +171,7 @@ describe("messaging a running agent", () => {
     await spawnBackground(tools);
     await flush();
 
-    await send(lifecycle, "@explore-2 you take the second half");
+    await send(lifecycle, "@explorer-2 you take the second half");
 
     expect(second.steer).toHaveBeenCalledWith("you take the second half");
     expect(first.steer).not.toHaveBeenCalled();
@@ -191,13 +191,13 @@ describe("messaging a finished agent", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore anything else?", source: "interactive" },
+      { type: "input", text: "@explorer anything else?", source: "interactive" },
       uiCtx,
     );
 
     expect(result).toEqual({ action: "handled" });
     expect(resumeAgent).toHaveBeenCalledWith(session, "anything else?", expect.anything());
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explorer", "info");
 
   });
 
@@ -240,7 +240,7 @@ describe("messaging a finished agent", () => {
     await flush();
     vi.mocked(pi.sendMessage).mockClear();
 
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     await new Promise(r => setTimeout(r, 400));
 
     const [message] = vi.mocked(pi.sendMessage).mock.calls[0];
@@ -261,7 +261,7 @@ describe("messaging a finished agent", () => {
     await flush();
     vi.mocked(pi.sendMessage).mockClear();
 
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     await new Promise(r => setTimeout(r, 400));
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
@@ -325,7 +325,7 @@ describe("stacking the suggestion provider on pi's", () => {
     const provider = factory({ getSuggestions: vi.fn().mockResolvedValue(null), applyCompletion: vi.fn() });
     const result = await provider.getSuggestions(["@ex"], 0, 3, { signal: new AbortController().signal });
 
-    expect(result.items.map((i: any) => i.value)).toEqual(["@explore"]);
+    expect(result.items.map((i: any) => i.value)).toEqual(["@explorer"]);
 
   });
 });
@@ -342,7 +342,7 @@ describe("resolving which agent a handle means", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@EXPLORE shout")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@EXPLORER shout")).toEqual({ action: "handled" });
     expect(session.steer).toHaveBeenCalledWith("shout");
 
   });
@@ -374,7 +374,7 @@ describe("resolving which agent a handle means", () => {
     const queued = managerRegistry().getRecord(queuedId);
     expect(queued.status).toBe("queued");
 
-    expect(await send(lifecycle, "@explore-2 wait for me")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@explorer-2 wait for me")).toEqual({ action: "handled" });
     expect(queued.pendingSteers).toEqual(["wait for me"]);
 
   });
@@ -382,7 +382,7 @@ describe("resolving which agent a handle means", () => {
   it("never reaches into a nested child, and starts a top-level agent instead", async () => {
     // Nested agents are hidden from every top-level surface and only their
     // owner may steer them. The handle still resolves — to a NEW top-level
-    // Explore — rather than punching through the ownership boundary.
+    // Explorer — rather than punching through the ownership boundary.
     const { tools, lifecycle } = bootDirect();
     const child = fakeSession();
     heldRun(child);
@@ -392,10 +392,10 @@ describe("resolving which agent a handle means", () => {
     managerRegistry().getRecord(id).parentAgentId = "some-parent";
     vi.mocked(runAgent).mockClear();
 
-    expect(await send(lifecycle, "@explore reach into a child")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@explorer reach into a child")).toEqual({ action: "handled" });
     expect(child.steer).not.toHaveBeenCalled();
     expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(), "Explore", "reach into a child", expect.anything(),
+      expect.anything(), "Explorer", "reach into a child", expect.anything(),
     );
   });
 
@@ -415,10 +415,10 @@ describe("resolving which agent a handle means", () => {
     vi.mocked(runAgent).mockClear();
     heldRun(fakeSession());
 
-    await send(lifecycle, "@explore start over");
+    await send(lifecycle, "@explorer start over");
 
     expect(resumeAgent).not.toHaveBeenCalled();
-    expect(runAgent).toHaveBeenCalledWith(expect.anything(), "Explore", "start over", expect.anything());
+    expect(runAgent).toHaveBeenCalledWith(expect.anything(), "Explorer", "start over", expect.anything());
 
   });
 });
@@ -430,18 +430,18 @@ describe("mentioning an agent that has never run", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore find every retry marker", source: "interactive" },
+      { type: "input", text: "@explorer find every retry marker", source: "interactive" },
       uiCtx,
     );
 
     expect(result).toEqual({ action: "handled" });
     expect(runAgent).toHaveBeenCalledWith(
       expect.anything(),
-      "Explore",
+      "Explorer",
       "find every retry marker",
       expect.anything(),
     );
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Started @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Started @explorer", "info");
 
   });
 
@@ -451,7 +451,7 @@ describe("mentioning an agent that has never run", () => {
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 
-    await send(lifecycle, "@explore go");
+    await send(lifecycle, "@explorer go");
 
     const opts = vi.mocked(runAgent).mock.calls[0][3] as any;
     expect(opts.model).toBeUndefined();
@@ -479,7 +479,7 @@ describe("mentioning an agent that has never run", () => {
       });
       await lifecycle.get("session_start")({}, uiCtx);
 
-      await lifecycle.get("input")({ type: "input", text: "@explore go", source: "interactive" }, uiCtx);
+      await lifecycle.get("input")({ type: "input", text: "@explorer go", source: "interactive" }, uiCtx);
       await flush();
 
       const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
@@ -498,7 +498,7 @@ describe("mentioning an agent that has never run", () => {
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 
-    await send(lifecycle, "@explore go");
+    await send(lifecycle, "@explorer go");
 
     const opts = vi.mocked(runAgent).mock.calls[0][3] as any;
     expect(opts.onToolActivity).toBeTypeOf("function");
@@ -510,7 +510,7 @@ describe("mentioning an agent that has never run", () => {
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 
-    await send(lifecycle, "@explore go");
+    await send(lifecycle, "@explorer go");
     const record = (globalThis as any)[Symbol.for("pi-subagents:manager")]
       .getRecord(vi.mocked(runAgent).mock.calls[0][3].agentId);
 
@@ -524,11 +524,11 @@ describe("mentioning an agent that has never run", () => {
     const session = fakeSession();
     heldRun(session);
 
-    await send(lifecycle, "@explore first task");
+    await send(lifecycle, "@explorer first task");
     await flush();
     vi.mocked(runAgent).mockClear();
 
-    await send(lifecycle, "@explore actually do this instead");
+    await send(lifecycle, "@explorer actually do this instead");
 
     expect(runAgent).not.toHaveBeenCalled();
     expect(session.steer).toHaveBeenCalledWith("actually do this instead");
@@ -543,13 +543,13 @@ describe("mentioning an agent that has never run", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore go", source: "interactive" },
+      { type: "input", text: "@explorer go", source: "interactive" },
       uiCtx,
     );
 
     expect(result).toEqual({ action: "handled" });
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Could not start @explore"),
+      expect.stringContaining("Could not start @explorer"),
       "error",
     );
 
@@ -568,7 +568,7 @@ describe("letting a clone of the conversation start the agent", () => {
     const { pi, lifecycle } = boot();
     cloneReturns({ spawned: true });
 
-    const result = await send(lifecycle, "@explore find the flaky test");
+    const result = await send(lifecycle, "@explorer find the flaky test");
     await flush();
 
     expect(result).toEqual({ action: "handled" });
@@ -583,12 +583,12 @@ describe("letting a clone of the conversation start the agent", () => {
     const { tools, lifecycle } = boot();
     cloneReturns({ spawned: true });
 
-    await send(lifecycle, "@plan sketch the migration");
+    await send(lifecycle, "@reviewer sketch the migration");
     await flush();
 
     expect(runMentionClone).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "Plan",
+        type: "Reviewer",
         message: "sketch the migration",
         agentTool: tools.get("Agent"),
       }),
@@ -606,7 +606,7 @@ describe("letting a clone of the conversation start the agent", () => {
       }),
     );
 
-    const result = await send(lifecycle, "@explore find the flaky test");
+    const result = await send(lifecycle, "@explorer find the flaky test");
 
     expect(result).toEqual({ action: "handled" });
     release?.();
@@ -618,13 +618,13 @@ describe("letting a clone of the conversation start the agent", () => {
 
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
+      { type: "input", text: "@explorer find the flaky test", source: "interactive" },
       uiCtx,
     );
 
     // The clone's turn happens first, so the agent does not exist yet. `direct`
-    // mode's "Started @explore" is the contrast: there, it does.
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Prompting @explore…", "info");
+    // mode's "Started @explorer" is the contrast: there, it does.
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Prompting @explorer…", "info");
   });
 
   it("starts the agent directly when the clone cannot", async () => {
@@ -636,14 +636,14 @@ describe("letting a clone of the conversation start the agent", () => {
 
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
+      { type: "input", text: "@explorer find the flaky test", source: "interactive" },
       uiCtx,
     );
     await flush();
 
     expect(runAgent).toHaveBeenCalled();
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      "Started @explore directly — no session file",
+      "Started @explorer directly — no session file",
       "warning",
     );
   });
@@ -657,13 +657,13 @@ describe("letting a clone of the conversation start the agent", () => {
 
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
+      { type: "input", text: "@explorer find the flaky test", source: "interactive" },
       uiCtx,
     );
     await flush();
 
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Could not start @explore"),
+      expect.stringContaining("Could not start @explorer"),
       "error",
     );
   });
@@ -676,7 +676,7 @@ describe("letting a clone of the conversation start the agent", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@explore also check the RPC path")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@explorer also check the RPC path")).toEqual({ action: "handled" });
     expect(session.steer).toHaveBeenCalledWith("also check the RPC path");
     expect(runMentionClone).not.toHaveBeenCalled();
   });
@@ -690,7 +690,7 @@ describe("letting a clone of the conversation start the agent", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@explore anything else?")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@explorer anything else?")).toEqual({ action: "handled" });
     expect(resumeAgent).toHaveBeenCalledWith(session, "anything else?", expect.anything());
     expect(runMentionClone).not.toHaveBeenCalled();
   });
@@ -711,7 +711,7 @@ describe("letting a clone of the conversation start the agent", () => {
     cloneReturns({ spawned: true });
 
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
+      { type: "input", text: "@explorer find the flaky test", source: "interactive" },
       ctx({ mode: "print" }),
     );
     await flush();
@@ -729,7 +729,7 @@ describe("letting a clone of the conversation start the agent", () => {
     await flush();
 
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore also check the RPC path", source: "interactive" },
+      { type: "input", text: "@explorer also check the RPC path", source: "interactive" },
       ctx({ mode: "print" }),
     );
 
@@ -741,7 +741,7 @@ describe("letting a clone of the conversation start the agent", () => {
   it("clones nothing when mentions are off", async () => {
     const { lifecycle } = boot({ agentMentions: "off" });
 
-    expect(await send(lifecycle, "@explore find the flaky test")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer find the flaky test")).toEqual({ action: "continue" });
     expect(runMentionClone).not.toHaveBeenCalled();
   });
 
@@ -749,7 +749,7 @@ describe("letting a clone of the conversation start the agent", () => {
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 
-    expect(await send(lifecycle, "@explore find the flaky test")).toEqual({ action: "handled" });
+    expect(await send(lifecycle, "@explorer find the flaky test")).toEqual({ action: "handled" });
     expect(runAgent).toHaveBeenCalled();
     expect(runMentionClone).not.toHaveBeenCalled();
   });
@@ -770,7 +770,7 @@ describe("input that is not a mention", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@explore")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer")).toEqual({ action: "continue" });
     expect(session.steer).not.toHaveBeenCalled();
 
   });
@@ -796,13 +796,13 @@ describe("input that is not a mention", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@explore relayed text", "extension")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer relayed text", "extension")).toEqual({ action: "continue" });
     expect(session.steer).not.toHaveBeenCalled();
 
   });
 
   it("leaves a headless prompt to the main model", async () => {
-    // Pi defaults session.prompt() to source "interactive", so `pi -p "@explore
+    // Pi defaults session.prompt() to source "interactive", so `pi -p "@explorer
     // …"` lands in this hook too. Claiming it there would answer with silence:
     // the agent detaches, notify is a no-op outside the TUI, and print mode
     // exits having printed nothing. Only `direct` has that problem — the model
@@ -811,7 +811,7 @@ describe("input that is not a mention", () => {
     heldRun(fakeSession());
 
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore go", source: "interactive" },
+      { type: "input", text: "@explorer go", source: "interactive" },
       ctx({ mode: "print" }),
     );
 
@@ -829,7 +829,7 @@ describe("input that is not a mention", () => {
     await flush();
 
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore also check this", source: "rpc" },
+      { type: "input", text: "@explorer also check this", source: "rpc" },
       ctx({ mode: "rpc" }),
     );
 
@@ -846,7 +846,7 @@ describe("input that is not a mention", () => {
     await spawnBackground(tools);
     await flush();
 
-    expect(await send(lifecycle, "@explore do this")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer do this")).toEqual({ action: "continue" });
     expect(session.steer).not.toHaveBeenCalled();
 
   });
@@ -857,7 +857,7 @@ describe("input that is not a mention", () => {
     const { lifecycle } = boot({ agentMentions: false });
     heldRun(fakeSession());
 
-    expect(await send(lifecycle, "@explore go")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer go")).toEqual({ action: "continue" });
     expect(runAgent).not.toHaveBeenCalled();
 
   });
@@ -870,7 +870,7 @@ describe("input that is not a mention", () => {
     await flush();
     vi.mocked(resumeAgent).mockClear();
 
-    expect(await send(lifecycle, "@explore anything else?")).toEqual({ action: "continue" });
+    expect(await send(lifecycle, "@explorer anything else?")).toEqual({ action: "continue" });
     expect(resumeAgent).not.toHaveBeenCalled();
 
   });
@@ -906,9 +906,9 @@ describe("@main — the escape hatch", () => {
     // mention. `transform`, not `handled`: the model must still get the turn.
     const { lifecycle } = boot();
 
-    const result = await send(lifecycle, "@main @explore is not a mention");
+    const result = await send(lifecycle, "@main @explorer is not a mention");
 
-    expect(result).toEqual({ action: "transform", text: "@explore is not a mention" });
+    expect(result).toEqual({ action: "transform", text: "@explorer is not a mention" });
   });
 
   it("carries attachments through with the text", async () => {
@@ -946,12 +946,12 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
     const { lifecycle } = bootDirect();
     finishedRun(fakeSession());
 
-    const result = await send(lifecycle, "@agent-explore find the flaky test");
+    const result = await send(lifecycle, "@agent-explorer find the flaky test");
     await flush();
 
     expect(result).toEqual({ action: "handled" });
     expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
-      expect.anything(), "Explore", "find the flaky test", expect.anything(),
+      expect.anything(), "Explorer", "find the flaky test", expect.anything(),
     );
   });
 
@@ -962,14 +962,14 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
     await spawnBackground(tools);
     await flush();
 
-    await send(lifecycle, "@agent-explore also check the RPC path");
+    await send(lifecycle, "@agent-explorer also check the RPC path");
 
     expect(session.steer).toHaveBeenCalledWith("also check the RPC path");
   });
 
   it("prefers an agent literally named agent-<x> over the unwrapped spelling", async () => {
-    // Both could answer `@agent-explore`. The literal name has to win, or an
-    // agent the model deliberately called `agent-explore` is unreachable.
+    // Both could answer `@agent-explorer`. The literal name has to win, or an
+    // agent the model deliberately called `agent-explorer` is unreachable.
     const { tools, lifecycle } = boot();
     const literal = fakeSession();
     const plain = fakeSession();
@@ -977,15 +977,15 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
       .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(plain)) as any)
       .mockImplementationOnce((_c: any, _t: any, _p: any, o: any) => new Promise(() => o.onSessionCreated?.(literal)) as any);
 
-    await spawnBackground(tools); // plain Explore → @explore
+    await spawnBackground(tools); // plain Explorer → @explorer
     await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "go", description: "named", subagent_type: "Plan", name: "agent-explore", run_in_background: true },
+      { prompt: "go", description: "named", subagent_type: "Reviewer", name: "agent-explorer", run_in_background: true },
       undefined, undefined, ctx(),
     );
     await flush();
 
-    await send(lifecycle, "@agent-explore over here");
+    await send(lifecycle, "@agent-explorer over here");
 
     expect(literal.steer).toHaveBeenCalledWith("over here");
     expect(plain.steer).not.toHaveBeenCalled();
@@ -1022,7 +1022,7 @@ describe("resuming an evicted agent by name", () => {
   }
 
   /** Inside the hermetic cwd, so teardown takes it with the rest. */
-  const sessionPath = () => join(process.cwd(), "explore-session.jsonl");
+  const sessionPath = () => join(process.cwd(), "explorer-session.jsonl");
 
   it("reopens the conversation instead of starting a fresh agent", async () => {
     const { lifecycle, tools } = boot();
@@ -1035,7 +1035,7 @@ describe("resuming an evicted agent by name", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore anything else?", source: "interactive" },
+      { type: "input", text: "@explorer anything else?", source: "interactive" },
       uiCtx,
     );
     await flush();
@@ -1043,16 +1043,16 @@ describe("resuming an evicted agent by name", () => {
     expect(result).toEqual({ action: "handled" });
     expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
       expect.anything(),
-      "Explore",
+      "Explorer",
       "anything else?",
       expect.objectContaining({ resumeSessionFile: sessionPath() }),
     );
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explorer", "info");
   });
 
   it("hands the resumed agent the handle back instead of numbering it", async () => {
-    // Otherwise the resume lands on `@explore-2` and the tombstone keeps
-    // `@explore`, so the name the user just typed still points at the corpse.
+    // Otherwise the resume lands on `@explorer-2` and the tombstone keeps
+    // `@explorer`, so the name the user just typed still points at the corpse.
     const { lifecycle, tools } = boot();
     finishedRun(fakeSession());
     await evict(await spawnBackground(tools));
@@ -1060,16 +1060,16 @@ describe("resuming an evicted agent by name", () => {
     vi.mocked(runAgent).mockClear();
     heldRun(fakeSession());
 
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     await flush();
 
     const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
-    expect(manager.getRecord(resumedId).handle).toBe("explore");
+    expect(manager.getRecord(resumedId).handle).toBe("explorer");
   });
 
   it("stops resolving to the tombstone once the resume has taken the name", async () => {
-    // The fork this prevents: every later `@explore` reopening the SAME stale
+    // The fork this prevents: every later `@explorer` reopening the SAME stale
     // transcript, discarding whatever the resumed agent did in between.
     const { lifecycle, tools } = boot();
     finishedRun(fakeSession());
@@ -1079,18 +1079,18 @@ describe("resuming an evicted agent by name", () => {
     const resumed = fakeSession();
     heldRun(resumed);
 
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     await flush();
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore and one more thing", source: "interactive" },
+      { type: "input", text: "@explorer and one more thing", source: "interactive" },
       uiCtx,
     );
 
     // Steered, not resumed again — and runAgent was called exactly once.
     expect(resumed.steer).toHaveBeenCalledWith("and one more thing");
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Sent to @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Sent to @explorer", "info");
   });
 
   it("gives a named agent its alias back too", async () => {
@@ -1098,7 +1098,7 @@ describe("resuming an evicted agent by name", () => {
     finishedRun(fakeSession());
     const spawned = await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "audit", description: "audit the auth flow", subagent_type: "Explore", name: "auth-audit", run_in_background: true },
+      { prompt: "audit", description: "audit the auth flow", subagent_type: "Explorer", name: "auth-audit", run_in_background: true },
       undefined, undefined, ctx(),
     );
     await flush();
@@ -1112,14 +1112,14 @@ describe("resuming an evicted agent by name", () => {
 
     const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
-    expect(manager.getRecord(resumedId)).toMatchObject({ handle: "explore", alias: "auth-audit" });
+    expect(manager.getRecord(resumedId)).toMatchObject({ handle: "explorer", alias: "auth-audit" });
   });
 
   it("refuses to reopen a conversation under a substitute agent", async () => {
-    // resolveSpawnType falls back to general-purpose for a type it cannot
+    // resolveSpawnType falls back to Worker for a type it cannot
     // resolve (#183) — and "cannot resolve" includes merely disabled, which
     // `/agents → Disable` does at any time. Inheriting that here would reopen
-    // an Explore transcript under general-purpose's prompt and tools while
+    // an Explorer transcript under Worker's prompt and tools while
     // announcing "Resuming @scout", then re-tombstone under the substitute so
     // the handle never finds its way back.
     hermetic = hermeticDir({
@@ -1199,21 +1199,21 @@ describe("resuming an evicted agent by name", () => {
 
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore anything else?", source: "interactive" },
+      { type: "input", text: "@explorer anything else?", source: "interactive" },
       uiCtx,
     );
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Could not resume @explore"),
+      expect.stringContaining("Could not resume @explorer"),
       "warning",
     );
 
     // Still reachable: try again and it reopens the same conversation.
     heldRun(fakeSession());
-    await send(lifecycle, "@explore try again");
+    await send(lifecycle, "@explorer try again");
     await flush();
 
     expect(vi.mocked(runAgent)).toHaveBeenLastCalledWith(
-      expect.anything(), "Explore", "try again",
+      expect.anything(), "Explorer", "try again",
       expect.objectContaining({ resumeSessionFile: sessionPath() }),
     );
   });
@@ -1227,7 +1227,7 @@ describe("resuming an evicted agent by name", () => {
     await flush();
     vi.mocked(runAgent).mockClear();
 
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     await flush();
 
     // runAgent receives the new record's id, which is the only handle a test
@@ -1247,10 +1247,10 @@ describe("resuming an evicted agent by name", () => {
     await flush();
 
     const steered = await tools.get("steer_subagent").execute(
-      "tc", { agent_id: "explore", message: "hi" }, undefined, undefined, ctx(),
+      "tc", { agent_id: "explorer", message: "hi" }, undefined, undefined, ctx(),
     );
     const read = await tools.get("get_subagent_result").execute(
-      "tc", { agent_id: "explore" }, undefined, undefined, ctx(),
+      "tc", { agent_id: "explorer" }, undefined, undefined, ctx(),
     );
 
     expect(textOf(steered)).toContain("Agent not found");
@@ -1270,14 +1270,14 @@ describe("resuming an evicted agent by name", () => {
 
     const uiCtx = ctx();
     const result = await lifecycle.get("input")(
-      { type: "input", text: "@explore anything else?", source: "interactive" },
+      { type: "input", text: "@explorer anything else?", source: "interactive" },
       uiCtx,
     );
 
     expect(result).toEqual({ action: "handled" });
     expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      "Could not resume @explore — its session is gone.", "warning",
+      "Could not resume @explorer — its session is gone.", "warning",
     );
   });
 
@@ -1289,22 +1289,22 @@ describe("resuming an evicted agent by name", () => {
     await evict(await spawnBackground(tools));
     await flush();
     unlinkSync(sessionPath());
-    await send(lifecycle, "@explore anything else?");
+    await send(lifecycle, "@explorer anything else?");
     vi.mocked(runAgent).mockClear();
     heldRun(fakeSession());
 
     const uiCtx = ctx();
     await lifecycle.get("input")(
-      { type: "input", text: "@explore start over", source: "interactive" },
+      { type: "input", text: "@explorer start over", source: "interactive" },
       uiCtx,
     );
     await flush();
 
     expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
-      expect.anything(), "Explore", "start over",
+      expect.anything(), "Explorer", "start over",
       expect.not.objectContaining({ resumeSessionFile: expect.anything() }),
     );
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Started @explore", "info");
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Started @explorer", "info");
   });
 });
 
@@ -1320,7 +1320,7 @@ describe("handles as tool arguments", () => {
     await flush();
 
     const r = await tools.get("steer_subagent").execute(
-      "tc", { agent_id: "explore", message: "look at the RPC path" }, undefined, undefined, ctx(),
+      "tc", { agent_id: "explorer", message: "look at the RPC path" }, undefined, undefined, ctx(),
     );
 
     expect(session.steer).toHaveBeenCalledWith("look at the RPC path");
@@ -1333,7 +1333,7 @@ describe("handles as tool arguments", () => {
     heldRun(session);
     await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "go", description: "audit", subagent_type: "Explore", name: "auth-audit", run_in_background: true },
+      { prompt: "go", description: "audit", subagent_type: "Explorer", name: "auth-audit", run_in_background: true },
       undefined, undefined, ctx(),
     );
     await flush();
@@ -1352,7 +1352,7 @@ describe("handles as tool arguments", () => {
     await flush();
 
     const r = await tools.get("get_subagent_result").execute(
-      "tc", { agent_id: "explore" }, undefined, undefined, ctx(),
+      "tc", { agent_id: "explorer" }, undefined, undefined, ctx(),
     );
 
     expect(textOf(r)).toContain("first answer");

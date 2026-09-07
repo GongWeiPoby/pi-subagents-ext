@@ -38,7 +38,7 @@ import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helper
 function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "agent-1",
-    type: "general-purpose",
+    type: "Worker",
     description: "a child",
     status: "completed",
     result: "the answer",
@@ -78,7 +78,7 @@ const request = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSpawnRe
   index: 0,
   prompt: "do the thing",
   label: "step",
-  agentType: "general-purpose",
+  agentType: "Worker",
   ...overrides,
 });
 
@@ -158,7 +158,7 @@ describe("createWorkflowHost — spawn mapping", () => {
     // alone. Billing a fan-out's re-sent input would swamp it.
     expect(result.outputTokens).toBe(20);
     const [, , type, prompt, options] = stub.spawnAndWait.mock.calls[0];
-    expect(type).toBe("general-purpose");
+    expect(type).toBe("Worker");
     expect(prompt).toBe("do the thing");
     // The label is the child's display description, so the fleet list and the
     // workflow tree name the same agent the same way.
@@ -193,7 +193,7 @@ describe("createWorkflowHost — spawn mapping", () => {
 
     const fellBack = await host.spawnAgent(request({ agentType: "no-such-agent" }));
     expect(fellBack.ok).toBe(true);
-    expect(stub.spawnAndWait.mock.calls[0][2]).toBe("general-purpose");
+    expect(stub.spawnAndWait.mock.calls[0][2]).toBe("Worker");
 
     // …and fails closed here too when the project configured strict dispatch.
     setFallbackSubagent(NO_FALLBACK);
@@ -381,7 +381,7 @@ describe("createWorkflowHost — scopeModels", () => {
     );
     notify = vi.fn();
     // "pinned" stands in for a user-authored agent file with `model:` in its
-    // frontmatter; the defaults come along, so "general-purpose" still resolves.
+    // frontmatter; the defaults come along, so "Worker" still resolves.
     registerAgents(new Map([["pinned", {
       name: "pinned",
       displayName: "Pinned",
@@ -1021,7 +1021,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
       'export const meta = { name: "parent", description: "review orchestration", phases: [{ title: "Discover" }, { title: "Verify" }] };',
       'phase("Discover");',
       'await parallel([',
-      '  () => agent("Deploy the auth diff", { label: "auth scan", agentType: "Explore", model: "haiku", effort: "high" }),',
+      '  () => agent("Deploy the auth diff", { label: "auth scan", agentType: "Explorer", model: "haiku", effort: "high" }),',
       '  () => agent("Inspect the tests", { label: "test scan", isolation: "worktree" }),',
       ']);',
       'await pipeline(["finding"], item => agent("Verify " + item, { label: "verify finding", phase: "Verify" }));',
@@ -1040,7 +1040,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(textOf(result)).toContain("not approved");
     const approval = String(workflowConfirm.mock.calls[0]?.[1]);
     expect(approval).toContain("Deploy the auth diff");
-    expect(approval).toContain("agentType: Explore");
+    expect(approval).toContain("agentType: Explorer");
     expect(approval).toContain("model: haiku");
     expect(approval).toContain("effort: high");
     expect(approval).toContain("phase: Discover");
@@ -2239,7 +2239,7 @@ describe("--subagents-workflow-file", () => {
           agentCount: 1,
           totalTokens: 0,
           progress: [
-            { type: "workflow_agent", index: 0, label: "step", state: "done", agentType: "Explore" },
+            { type: "workflow_agent", index: 0, label: "step", state: "done", agentType: "Explorer" },
           ],
         },
       },

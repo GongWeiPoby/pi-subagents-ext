@@ -43,7 +43,7 @@ describe("Auto-cascade (enabled)", () => {
     const res = await mock.executeTool("TaskCreate", {
       subject,
       description: `do ${subject}`,
-      agentType: "general-purpose",
+      agentType: "Worker",
     });
     return (res.content[0].text.match(/#(\d+)/) as RegExpMatchArray)[1];
   }
@@ -60,7 +60,7 @@ describe("Auto-cascade (enabled)", () => {
     await flush();
 
     expect(rpc.spawned).toHaveLength(2);
-    expect(rpc.spawned[1].type).toBe("general-purpose");
+    expect(rpc.spawned[1].type).toBe("Worker");
     expect(rpc.spawned[1].options.isBackground).toBe(true);
 
     const b = await mock.executeTool("TaskGet", { taskId: "2" });

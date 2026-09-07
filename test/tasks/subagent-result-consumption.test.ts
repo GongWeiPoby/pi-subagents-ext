@@ -28,7 +28,7 @@ describe("TaskOutput result consumption", () => {
     mock = mockPi();
     rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
-    await mock.executeTool("TaskCreate", { subject: "Agent task", description: "d", agentType: "general-purpose" });
+    await mock.executeTool("TaskCreate", { subject: "Agent task", description: "d", agentType: "Worker" });
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
   });
 
@@ -98,7 +98,7 @@ describe("TaskOutput result consumption", () => {
     rpc.unsub();
     const legacy = installSubagentsMock(mock.pi, { withoutConsume: true });
     try {
-      await mock.executeTool("TaskCreate", { subject: "Second", description: "d", agentType: "general-purpose" });
+      await mock.executeTool("TaskCreate", { subject: "Second", description: "d", agentType: "Worker" });
       await mock.executeTool("TaskExecute", { task_ids: ["2"] });
 
       const pending = mock.executeTool("TaskOutput", { task_id: "2", block: true, timeout: 5000 });

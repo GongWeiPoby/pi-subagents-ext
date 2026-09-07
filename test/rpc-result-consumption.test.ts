@@ -131,7 +131,7 @@ describe("subagents:rpc:consume", () => {
     bus.on(`subagents:rpc:spawn:reply:${requestId}`, (reply: any) => { id = reply.data.id; });
     bus.emit("subagents:rpc:spawn", {
       requestId,
-      type: "general-purpose",
+      type: "Worker",
       prompt: "go",
       options: { description: "task #1", isBackground: true },
     });

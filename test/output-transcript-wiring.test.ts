@@ -144,7 +144,7 @@ describe("output_transcript agent wiring", () => {
 
     await tools.get("Agent").execute(
       "tool-call",
-      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "general-purpose" },
+      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "Worker" },
       undefined,
       undefined,
       makeCtx(cwd),
@@ -164,7 +164,7 @@ describe("output_transcript agent wiring", () => {
 
     await tools.get("Agent").execute(
       "tool-call",
-      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "general-purpose" },
+      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "Worker" },
       undefined,
       undefined,
       makeCtx(cwd),

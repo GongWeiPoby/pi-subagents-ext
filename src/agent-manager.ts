@@ -193,7 +193,7 @@ interface SpawnOptions {
   /**
    * Take an evicted agent's names back verbatim instead of allocating fresh
    * ones, so a resumed conversation keeps the handle the user just typed —
-   * `handleBase(type)` cannot reproduce a numbered `explore-2`. Safe without an
+   * `handleBase(type)` cannot reproduce a numbered `explorer-2`. Safe without an
    * `assignHandle` pass because tombstoned names are excluded from allocation
    * (`takenHandles`), so nothing live can be holding them.
    *
@@ -746,8 +746,8 @@ export class AgentManager {
       );
     }
     // After the insert, so `takenHandles()` already counts this record's own
-    // handle — a spawn named after its own type gets `explore-2`, not a
-    // duplicate `explore` that would make resolution ambiguous.
+    // handle — a spawn named after its own type gets `explorer-2`, not a
+    // duplicate `explorer` that would make resolution ambiguous.
     if (record.handle !== undefined && record.alias === undefined && options.name !== undefined) {
       record.alias = assignHandle(handleBase(options.name), this.takenHandles());
     }
@@ -1581,8 +1581,8 @@ export class AgentManager {
       if (record.handle) taken.add(record.handle);
       if (record.alias) taken.add(record.alias);
     }
-    // Tombstones hold their names too: an evicted `@explore` is still
-    // resurrectable, so a later Explore must become `explore-2` rather than
+    // Tombstones hold their names too: an evicted `@explorer` is still
+    // resurrectable, so a later Explorer must become `explorer-2` rather than
     // shadowing a conversation the user can still reach.
     for (const entry of this.tombstones.values()) {
       taken.add(entry.handle);
@@ -1737,7 +1737,7 @@ export class AgentManager {
     // `session_before_switch`), and `skipUnconsumed` only spares records whose
     // results the LLM has yet to read — it does not make the sweep partial in
     // the sense that matters here. A new session means new handles, or
-    // `@explore` would silently reach an agent the user never started. Claude
+    // `@explorer` would silently reach an agent the user never started. Claude
     // Code resets its registry on `/clear` for the same reason.
     this.tombstones.clear();
   }

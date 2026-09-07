@@ -85,7 +85,7 @@ describe("Agent startup failures fail the tool call (#179)", () => {
           {
             prompt: "do it",
             description: "worktree probe",
-            subagent_type: "general-purpose",
+            subagent_type: "Worker",
             isolation: "worktree",
             run_in_background: background,
           },

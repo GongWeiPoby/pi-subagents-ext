@@ -135,7 +135,7 @@ describe("AgentWidget", () => {
   ) {
     return {
       id,
-      type: "general-purpose",
+      type: "Worker",
       description: `${id} description`,
       status: "running",
       toolUses: 0,
@@ -192,19 +192,19 @@ describe("AgentWidget", () => {
         doneCount: 1,
         totalCount: 3,
         agents: [
-          { index: 0, label: "queued child", state: "queued", agentType: "Explore", tokens: 0 },
+          { index: 0, label: "queued child", state: "queued", agentType: "Explorer", tokens: 0 },
           {
             index: 1,
             label: "running child",
             state: "running",
-            agentType: "Explore",
+            agentType: "Explorer",
             activity: "responding",
             outputPreview: "partial response",
             turnCount: 2,
             tokens: 500,
             startedAt: Date.now() - 5000,
           },
-          { index: 2, label: "failed child", state: "failed", agentType: "Explore", tokens: 700, startedAt: Date.now() - 8000, completedAt: Date.now() - 1000 },
+          { index: 2, label: "failed child", state: "failed", agentType: "Explorer", tokens: 700, startedAt: Date.now() - 8000, completedAt: Date.now() - 1000 },
         ],
       }],
       ...overrides,
@@ -441,7 +441,7 @@ describe("AgentWidget", () => {
           index,
           label: `A child ${index}`,
           state: "done" as const,
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
           startedAt: Date.now(),
           completedAt: Date.now(),
@@ -460,7 +460,7 @@ describe("AgentWidget", () => {
           index: 0,
           label: "B child",
           state: "queued",
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
         }],
       }],
@@ -497,7 +497,7 @@ describe("AgentWidget", () => {
           index,
           label: `large child ${index}`,
           state: "running" as const,
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
           startedAt: Date.now(),
         })),
@@ -561,7 +561,7 @@ describe("AgentWidget", () => {
         title: `Phase ${state}`,
         doneCount: state === "done" ? 1 : 0,
         totalCount: 1,
-        agents: [{ index: 0, label: `${state} child`, state, agentType: "Explore", tokens: 0 }],
+        agents: [{ index: 0, label: `${state} child`, state, agentType: "Explorer", tokens: 0 }],
       }],
     });
     const lines = renderLines(
@@ -587,8 +587,8 @@ describe("AgentWidget", () => {
         doneCount: 0,
         totalCount: 2,
         agents: [
-          { index: 0, label: "queued child", state: "queued", agentType: "Explore", tokens: 0 },
-          { index: 1, label: "interrupted child", state: "interrupted", agentType: "Explore", tokens: 0 },
+          { index: 0, label: "queued child", state: "queued", agentType: "Explorer", tokens: 0 },
+          { index: 1, label: "interrupted child", state: "interrupted", agentType: "Explorer", tokens: 0 },
         ],
       }],
     });
@@ -721,7 +721,7 @@ describe("AgentWidget", () => {
           index: phaseIndex * 2 + index,
           label: `A child ${phaseIndex}-${index}`,
           state: "running" as const,
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
           startedAt: Date.now(),
         })),
@@ -739,7 +739,7 @@ describe("AgentWidget", () => {
           index,
           label: `B child ${index}`,
           state: "queued" as const,
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
         })),
       }],
@@ -777,7 +777,7 @@ describe("AgentWidget", () => {
           index,
           label: `child ${index}`,
           state: "running" as const,
-          agentType: "Explore",
+          agentType: "Explorer",
           tokens: 0,
           startedAt: Date.now(),
         })),
@@ -941,7 +941,7 @@ describe("AgentWidget cost display", () => {
   function render(showCost: boolean, cost: number): string {
     const agent = {
       id: "a1",
-      type: "general-purpose",
+      type: "Worker",
       description: "spending agent",
       status: "running",
       toolUses: 1,
@@ -994,7 +994,7 @@ describe("AgentWidget cost display", () => {
     // line reading from it would drop the number precisely when the question
     // "what did that cost" gets asked.
     const finished = {
-      id: "a1", type: "general-purpose", description: "done agent", status: "completed",
+      id: "a1", type: "Worker", description: "done agent", status: "completed",
       toolUses: 2, startedAt: Date.now() - 1000, completedAt: Date.now(),
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: 0.0042 },
       compactionCount: 0,
@@ -1015,7 +1015,7 @@ describe("AgentWidget cost display", () => {
     // A scheduled agent has no activity entry — it spawns through the manager
     // directly — and used to render with no tokens and no cost at all.
     const running = {
-      id: "sched", type: "general-purpose", description: "scheduled agent", status: "running",
+      id: "sched", type: "Worker", description: "scheduled agent", status: "running",
       toolUses: 1, startedAt: Date.now(),
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: 0.0042 },
       compactionCount: 0,
@@ -1034,7 +1034,7 @@ describe("AgentWidget cost display", () => {
 
   it("defaults to hiding it", () => {
     const agent = {
-      id: "a1", type: "general-purpose", description: "d", status: "running",
+      id: "a1", type: "Worker", description: "d", status: "running",
       toolUses: 0, startedAt: Date.now(),
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: 0.5 }, compactionCount: 0,
     };
@@ -1056,7 +1056,7 @@ describe("AgentWidget overflow accounting", () => {
   function record(id: string, status: string) {
     return {
       id,
-      type: "general-purpose",
+      type: "Worker",
       description: `${id} description`,
       status,
       toolUses: 0,

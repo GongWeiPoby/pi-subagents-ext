@@ -942,7 +942,7 @@ export default function (pi: ExtensionAPI) {
     if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
     // Claiming the turn is TUI only, matching the `@` completion that teaches
     // the syntax. Pi defaults `session.prompt()` to source "interactive", so a
-    // headless `pi -p "@explore …"` reaches here too — and claiming it would
+    // headless `pi -p "@explorer …"` reaches here too — and claiming it would
     // answer with silence, which the background hold cannot fix: `handled`
     // returns from prompt() before any turn starts, so the loop that patch wraps
     // never runs (it holds subagents spawned by the Agent tool MID-turn, a
@@ -1034,7 +1034,7 @@ export default function (pi: ExtensionAPI) {
         return { action: "handled" };
       }
 
-      // The Agent tool deliberately falls back to general-purpose for a type it
+      // The Agent tool deliberately falls back to Worker for a type it
       // cannot resolve (#183), which covers a deleted file AND a merely
       // disabled one. A resume must not inherit that: reopening this
       // conversation under a different agent's prompt and tools is not
@@ -1277,8 +1277,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Disable default agents configuration ----
-  // When enabled, the three hardcoded default agents (general-purpose, Explore,
-  // Plan) are not registered. User-defined agents from project/global custom
+  // When enabled, the three hardcoded default agents (Worker, Explorer,
+  // Reviewer) are not registered. User-defined agents from project/global custom
   // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
   // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
   // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
@@ -1553,19 +1553,20 @@ export default function (pi: ExtensionAPI) {
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
   // the same load-bearing facts as the full version at ~75% fewer tokens, for
   // small/local models. Per-option details live in the param descriptions.
-  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+  const compactAgentToolDescription = `Launch an autonomous agent only when delegation adds value. Agent types:
 ${buildCompactTypeListText()}
 
 Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
 
 Notes:
-- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
-- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- Default to direct work. Delegate for useful parallelism, substantial context isolation, specialist capabilities, or independent review. A plan or multiple steps alone is not a reason to delegate. Respect requests not to delegate.
+- description: 3-5 words (shown in UI). Give self-contained scope, constraints, ownership, and acceptance criteria.
+- Parallel work: one message, multiple Agent calls. Keep one writer per checkout; do not duplicate delegated work.
+- Background by default; completion notifies you. Do not poll. Use run_in_background: false only for a blocking result when delegation still adds value. Never invent pending results.
+- Summarize results for the user; verify actual changes and distinguish executed checks from supplied reports.
 - resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
-  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
+  const fullAgentToolDescription = `Delegate a bounded task when a separate agent adds value. The main session remains responsible for direct development, user communication, decisions, and integration.
 
 Available agent types and the tools they have access to:
 ${buildTypeListText()}
@@ -1576,7 +1577,9 @@ When using the Agent tool, specify a subagent_type parameter to select which age
 
 ## When not to use
 
-If the target is already known, use a direct tool — \`read\` for a known path, \`grep\`/\`find\` for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.
+Default to completing work directly. Delegate only for useful parallelism, substantial context isolation, needed specialist capabilities, or an independent review perspective. A task being multi-step, non-trivial, or already planned is not sufficient reason to delegate. If you already understand a serial change, implement and validate it yourself instead of briefing a Worker and immediately waiting. Respect explicit user requests to delegate or not to delegate.
+
+For known paths and simple lookups, use direct read/grep/find tools. Choose the smallest useful delegation, including none; do not run a fixed Explorer -> Worker -> Reviewer pipeline.
 
 ## Usage notes
 
@@ -1590,7 +1593,8 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
+- Select by actual capabilities, not just the role name. Explorer and Reviewer defaults have no shell, web, extension, or editing tools; provide necessary diffs, command output, and external references.
+- Assign each Worker a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
@@ -1602,11 +1606,11 @@ Brief the agent like a smart colleague who just walked into the room — it hasn
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
 - If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
+- Include scope, project constraints, expected output, and any required comparison baseline. For execution, specify ownership and acceptance criteria; for investigation, state the question and what is already known.
 
 Terse command-style prompts produce shallow, generic work.
 
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`;
+**Retain decision ownership.** Delegate a self-contained problem with enough evidence to act independently. Do not repeat the entire investigation before delegating it, and do not outsource a decision that requires missing user context or authorization.`;
 
   // `toolDescriptionMode: "custom"` — user-authored description with live
   // dynamic parts. Project file wins over global; missing/empty falls back to
@@ -1663,10 +1667,10 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: agentToolDescription,
-    promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
+    promptSnippet: "Delegate bounded tasks only when a separate agent adds value",
     promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
+      "Default to direct execution in the main session. Delegate only for useful parallelism, substantial context isolation, needed specialist capabilities, or independent review. A plan or multiple steps alone is not a reason to delegate. Respect explicit user requests to delegate or not to delegate.",
+      "Use direct tools for known paths, simple lookups, and already-understood serial changes. Do not run mandatory Explorer/Worker/Reviewer stages. Give delegates self-contained scope, constraints, ownership, and acceptance criteria; keep one writer per checkout and do not duplicate delegated work.",
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
@@ -1689,12 +1693,12 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. All built-in agents inherit the parent model unless this is set. A custom agent file with an explicit model takes precedence. Accepts "provider/modelId" or a fuzzy name.',
         }),
       ),
       thinking: Type.Optional(
         Type.String({
-          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
+          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Fills an unspecified agent setting; explicit custom agent configuration takes precedence.`,
         }),
       ),
       max_turns: Type.Optional(
@@ -3284,7 +3288,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Check status and retrieve results from a background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to check. The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: "The agent ID to check. The agent's handle also works — its `name` if you gave it one, otherwise its type (`explorer`, `explorer-2`).",
       }),
       wait: Type.Optional(
         Type.Boolean({
@@ -3374,7 +3378,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Send a steering message to redirect a running background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explorer`, `explorer-2`).",
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
@@ -3885,7 +3889,7 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
+    const { record } = await manager.spawnAndWait(pi, ctx, "Worker", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
       // Exempt from maxConcurrentForeground. This runs from a modal wizard, not
@@ -4026,9 +4030,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // `fallbackSubagent` below.
       workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : undefined,
       maxSubagentDepth: getMaxSubagentDepth(),
-      // Deliberately NOT `?? "general-purpose"`: every settings change writes the
+      // Deliberately NOT `?? "Worker"`: every settings change writes the
       // whole snapshot, and materializing the implicit default would turn it into
-      // explicit configuration — which then fails loudly if general-purpose later
+      // explicit configuration — which then fails loudly if Worker later
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
       reportUsage: isReportUsageEnabled(),
@@ -4060,12 +4064,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
-      // Label what unset actually does — it targets general-purpose even when
+      // Label what unset actually does — it targets Worker even when
       // that is unregistered (the permissive hardcoded tier), so showing "none"
       // there would advertise strict dispatch for the most permissive state.
       // `values` still offers only resolvable targets, so the user cannot
       // persist a fallback that would hard-error on every dispatch.
-      const fallbackValue = getFallbackSubagent() ?? "general-purpose";
+      const fallbackValue = getFallbackSubagent() ?? "Worker";
       const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
 
       return [
@@ -4151,7 +4155,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "disableDefaultAgents",
           label: "Disable defaults",
-          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
+          description: "Hide built-in agents (Worker, Explorer, Reviewer) — custom agents are unaffected",
           currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },

@@ -75,19 +75,19 @@ describe("inline glyph mapping", () => {
   it("says a replayed agent came from the resume journal", () => {
     const lines = card({
       progress: [
-        agentEntry({ index: 0, label: "audit", state: "done", cached: true, agentType: "general-purpose" }),
+        agentEntry({ index: 0, label: "audit", state: "done", cached: true, agentType: "Worker" }),
       ],
     });
 
     const row = treeRows(lines)[1];
     // Ahead of the stat tail, so the row reads "why" before "how much".
     expect(row).toContain("from resume journal");
-    expect(row.indexOf("from resume journal")).toBeLessThan(row.indexOf("general-purpose"));
+    expect(row.indexOf("from resume journal")).toBeLessThan(row.indexOf("Worker"));
   });
 
   it("leaves an agent that actually ran unannotated", () => {
     const lines = card({
-      progress: [agentEntry({ index: 0, label: "audit", state: "done", agentType: "general-purpose" })],
+      progress: [agentEntry({ index: 0, label: "audit", state: "done", agentType: "Worker" })],
     });
 
     expect(treeRows(lines)[1]).not.toContain("resume journal");
@@ -230,7 +230,7 @@ describe("effective-vs-requested disclosure", () => {
     // It lives in the dialog's detail pane instead: `thinking: medium` on every
     // row of a fan-out is width the description needs more.
     expect(
-      agentStatSegments(agentEntry({ index: 0, agentType: "Explore", model: "haiku", thinking: "low" })),
+      agentStatSegments(agentEntry({ index: 0, agentType: "Explorer", model: "haiku", thinking: "low" })),
     ).toEqual(["haiku", "thinking: low"]);
   });
 });
@@ -241,7 +241,7 @@ describe("stat segments", () => {
       agentStatSegments(
         agentEntry({
           index: 0,
-          agentType: "Explore",
+          agentType: "Explorer",
           model: "haiku",
           activity: "tool: read",
           turnCount: 3,
@@ -300,7 +300,7 @@ describe("stat segments", () => {
             index: 0,
             label: "review:bugs",
             state: "done",
-            agentType: "Explore",
+            agentType: "Explorer",
             model: "haiku",
             tokens: 18_400,
             toolCalls: 12,
@@ -310,7 +310,7 @@ describe("stat segments", () => {
       }),
     );
     expect(rows[1].trimEnd()).toBe(
-      "  └─ ✔ review:bugs · Explore · haiku · 12 tool uses · 18.4k token · 42.0s",
+      "  └─ ✔ review:bugs · Explorer · haiku · 12 tool uses · 18.4k token · 42.0s",
     );
   });
 
@@ -445,7 +445,7 @@ describe("width", () => {
     agentEntry({
       index: 0,
       label: "an-extremely-long-agent-label-that-would-otherwise-wrap-the-whole-card",
-      agentType: "general-purpose",
+      agentType: "Worker",
       model: "claude-opus-4-5-20260101",
       tokens: 1_240_000,
       toolCalls: 412,

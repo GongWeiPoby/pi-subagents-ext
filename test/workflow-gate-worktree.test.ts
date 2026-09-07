@@ -123,7 +123,7 @@ const spawnRequest = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSp
   index: 0,
   prompt: "fix the failing test",
   label: "impl",
-  agentType: "general-purpose",
+  agentType: "Worker",
   ...overrides,
 });
 

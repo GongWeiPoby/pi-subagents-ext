@@ -88,7 +88,7 @@ describe("mention clone tool reachability against real pi-mono", () => {
 
     // Never rejects by contract; a faux turn that cannot complete is fine,
     // because the tool set is fixed at construction.
-    await runMentionClone({ ctx, type: "Explore", message: "go", agentTool });
+    await runMentionClone({ ctx, type: "Explorer", message: "go", agentTool });
 
     expect(sessions).toHaveLength(1);
     // The bug this file exists for: with an empty allowlist this is `[]`.

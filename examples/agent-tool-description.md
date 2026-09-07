@@ -1,4 +1,4 @@
-Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
+Delegate a bounded task when a separate agent adds value. The main session remains responsible for direct development, user communication, decisions, and integration.
 
 Available agent types and the tools they have access to:
 {{typeList}}
@@ -9,7 +9,9 @@ When using the Agent tool, specify a subagent_type parameter to select which age
 
 ## When not to use
 
-If the target is already known, use a direct tool — `read` for a known path, `grep`/`find` for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.
+Default to completing work directly. Delegate only for useful parallelism, substantial context isolation, needed specialist capabilities, or an independent review perspective. A task being multi-step, non-trivial, or already planned is not sufficient reason to delegate. If you already understand a serial change, implement and validate it yourself instead of briefing a Worker and immediately waiting. Respect explicit user requests to delegate or not to delegate.
+
+For known paths and simple lookups, use direct read/grep/find tools. Choose the smallest useful delegation, including none; do not run a fixed Explorer -> Worker -> Reviewer pipeline.
 
 ## Usage notes
 
@@ -23,7 +25,8 @@ If the target is already known, use a direct tool — `read` for a known path, `
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
+- Select by actual capabilities, not just the role name. Explorer and Reviewer defaults have no shell, web, extension, or editing tools; provide necessary diffs, command output, and external references.
+- Assign each Worker a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.{{isolationGuideline}}{{scheduleGuideline}}
@@ -35,8 +38,8 @@ Brief the agent like a smart colleague who just walked into the room — it hasn
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
 - If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
+- Include scope, project constraints, expected output, and any required comparison baseline. For execution, specify ownership and acceptance criteria; for investigation, state the question and what is already known.
 
 Terse command-style prompts produce shallow, generic work.
 
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
+**Retain decision ownership.** Delegate a self-contained problem with enough evidence to act independently. Do not repeat the entire investigation before delegating it, and do not outsource a decision that requires missing user context or authorization.

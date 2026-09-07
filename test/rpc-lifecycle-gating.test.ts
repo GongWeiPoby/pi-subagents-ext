@@ -143,7 +143,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     const requestId = "req-142";
     await busHandlers.get("subagents:rpc:spawn")!({
       requestId,
-      type: "general-purpose",
+      type: "Worker",
       prompt: "go",
       options: { description: "rpc gating test" },
     });
@@ -167,7 +167,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     try {
       await busHandlers.get("subagents:rpc:spawn")!({
         requestId: "req-widget",
-        type: "general-purpose",
+        type: "Worker",
         prompt: "go",
         options: { description: "visible RPC agent" },
       });
@@ -206,7 +206,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     await lifecycle.get("tool_execution_start")({}, extensionCtx);
     await busHandlers.get("subagents:rpc:spawn")!({
       requestId: "req-activity",
-      type: "general-purpose",
+      type: "Worker",
       prompt: "go",
       options: { description: "rpc activity test", isBackground: true },
     });
