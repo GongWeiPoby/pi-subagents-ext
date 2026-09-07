@@ -51,16 +51,26 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.isolation).toBe("worktree");
   });
 
-  it("uses tool-call params when no agent config is available", () => {
-    const resolved = resolveAgentInvocationConfig(undefined, {
-      model: "provider/param-model",
-      thinking: "minimal",
-      max_turns: 3,
-      inherit_context: true,
-      run_in_background: true,
-      isolated: true,
-      isolation: "worktree",
-    });
+  it("uses tool-call params when the agent config leaves them undefined", () => {
+    const resolved = resolveAgentInvocationConfig(
+      makeConfig({
+        model: undefined,
+        thinking: undefined,
+        maxTurns: undefined,
+        inheritContext: undefined,
+        runInBackground: undefined,
+        isolated: undefined,
+      }),
+      {
+        model: "provider/param-model",
+        thinking: "minimal",
+        max_turns: 3,
+        inherit_context: true,
+        run_in_background: true,
+        isolated: true,
+        isolation: "worktree",
+      },
+    );
 
     expect(resolved.modelInput).toBe("provider/param-model");
     expect(resolved.modelFromParams).toBe(true);
