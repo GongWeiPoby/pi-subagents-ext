@@ -44,6 +44,8 @@ export interface WorkflowTask {
   /** Where the script can be edited and re-run from. */
   scriptPath?: string;
   args?: unknown;
+  /** User-selected default captured before approval/start. */
+  defaultAgent?: string;
   meta?: WorkflowMeta;
   workflowName?: string;
   /** The `tool_use_id` of the call that started this, when one did. */
@@ -126,6 +128,7 @@ export function createWorkflowTask(init: {
   script: string;
   scriptPath?: string;
   args?: unknown;
+  defaultAgent?: string;
   meta?: WorkflowMeta;
   toolCallId?: string;
   taskExecutionRef?: TaskExecutionRef;
@@ -146,6 +149,7 @@ export function createWorkflowTask(init: {
     script: init.script,
     scriptPath: init.scriptPath,
     args: init.args,
+    defaultAgent: init.defaultAgent,
     meta: init.meta,
     workflowName: init.meta?.name,
     toolCallId: init.toolCallId,

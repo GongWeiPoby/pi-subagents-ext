@@ -11,7 +11,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import { writeTestAgentFiles } from "./agents.js";
 
 export interface BootedPi {
   pi: any;
@@ -107,12 +108,20 @@ export interface Hermetic {
   restore: () => void;
 }
 
+/** Opt-in fixture environment for wiring suites that do not need custom setup. */
+export function useTestAgents(): void {
+  let environment: Hermetic;
+  beforeEach(() => { environment = hermeticDir({ testAgents: true }); });
+  afterEach(() => { environment.restore(); });
+}
+
 /**
  * Redirect cwd, `PI_CODING_AGENT_DIR` and `HOME` into a fresh temp dir, so the
  * developer's real settings and agent files can't reach the extension under
  * test. Call BEFORE instantiating the extension — settings are read at boot.
  */
 export function hermeticDir(opts: {
+  testAgents?: boolean;
   settings?: Record<string, unknown>;
   agentFiles?: Record<string, string>;
 } = {}): Hermetic {
@@ -123,8 +132,11 @@ export function hermeticDir(opts: {
   const prevHome = process.env.HOME;
 
   mkdirSync(join(dir, ".pi"), { recursive: true });
-  if (opts.settings) {
-    writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify(opts.settings));
+  if (opts.testAgents) writeTestAgentFiles(join(dir, ".pi", "agents"));
+  if (opts.settings || opts.testAgents) {
+    writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({
+      ...(opts.testAgents ? { defaultAgent: "Worker" } : {}), ...opts.settings,
+    }));
   }
   if (opts.agentFiles) {
     mkdirSync(join(dir, ".pi", "agents"), { recursive: true });

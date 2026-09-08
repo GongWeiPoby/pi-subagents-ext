@@ -41,7 +41,7 @@
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { writeTestAgentFiles } from "./agents.js";
 import { fauxModelBackend } from "./faux-model-backend.js";
 import { getModel, registerFauxProvider } from "./pi-ai.js";
 
@@ -94,6 +95,8 @@ export type FauxResponder = (
 ) => FauxReply | Promise<FauxReply>;
 
 export interface RunPrintModeOptions {
+  /** Install named test fixtures in the isolated global directory. Never used in live mode. */
+  testAgents?: boolean;
   /** The user prompt that kicks off the parent turn. */
   prompt: string;
   /**
@@ -273,6 +276,10 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     hermeticDir = mkdtempSync(join(tmpdir(), "subagents-print-home-"));
     process.env.PI_CODING_AGENT_DIR = hermeticDir;
     process.env.HOME = hermeticDir;
+    if (options.testAgents && !live) {
+      writeTestAgentFiles(join(hermeticDir, "agents"));
+      writeFileSync(join(hermeticDir, "subagents.json"), JSON.stringify({ defaultAgent: "Worker" }));
+    }
   }
 
   // --- model backend ---

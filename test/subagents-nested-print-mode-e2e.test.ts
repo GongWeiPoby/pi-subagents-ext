@@ -132,7 +132,7 @@ async function runWithAgents(
 ): Promise<{ run: PrintModeRun; cwd: string }> {
   const cwd = mkdtempSync(join(tmpdir(), "subagents-nested-e2e-"));
   writeAgents(cwd, agents);
-  const run = await runPrintMode({
+  const run = await runPrintMode({ testAgents: true,
     ...options,
     cwd,
     respond,

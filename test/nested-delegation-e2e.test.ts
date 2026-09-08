@@ -156,7 +156,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       });
     };
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate the work.",
       cwd,
       respond,
@@ -222,7 +222,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     };
 
     try {
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt: "Delegate the work.",
         cwd,
         respond,

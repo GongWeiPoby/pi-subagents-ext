@@ -20,7 +20,6 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
-import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
@@ -586,6 +585,9 @@ export async function runAgent(
 ): Promise<RunResult> {
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
+  // Validate before environment detection or loading any executable extensions.
+  const initialToolNames = getToolNamesForType(type);
+  if (!agentConfig) throw new Error(`Agent definition unavailable: "${type}".`);
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -618,7 +620,7 @@ export async function runAgent(
     }
   }
 
-  let toolNames = getToolNamesForType(type);
+  let toolNames = initialToolNames;
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
@@ -642,16 +644,7 @@ export async function runAgent(
   }
 
   // Build system prompt from agent config
-  let systemPrompt: string;
-  if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
-  } else {
-    // Unknown type fallback: spread the canonical Worker config (defensive —
-    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
-    const fallback = DEFAULT_AGENTS.get("Worker");
-    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
-    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
-  }
+  const systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
 
   // When skills is string[], we've already preloaded them into the prompt.
   // Still pass noSkills: true since we don't need the skill loader to load them again.

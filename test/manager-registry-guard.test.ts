@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 /**
  * manager-registry-guard.test.ts — the Symbol.for("pi-subagents:manager")
  * global registry across multiple activations in one process.

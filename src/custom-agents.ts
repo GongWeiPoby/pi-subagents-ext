@@ -18,8 +18,7 @@ import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./t
  * the colon, so `name: Code Reviewer` must work here too. (The stricter
  * letters/digits/underscore/hyphen regex in Claude Code applies to the Agent
  * tool's spawn-time `name` parameter, which is a different field.) Mixed case
- * has to be allowed regardless: the built-in types `Explorer` and `Reviewer` use it,
- * and a file must be able to override one.
+ * is allowed for user-defined names too.
  */
 const RESERVED_IN_TYPE = ":";
 
@@ -33,7 +32,7 @@ const RESERVED_IN_TYPE = ":";
  * Project-level agents override global ones with the same name. On a name clash
  * between the two project locations, .pi/agents wins — .pi stays the project
  * authority; .agents/agents is an additional read location.
- * Any name is allowed — names matching defaults (e.g. "Explorer") override them.
+ * Names carry no built-in role or permission policy.
  *
  * An agent's type comes from its frontmatter `name:`, falling back to the
  * filename — Claude Code's rule, where "the filename doesn't have to match".

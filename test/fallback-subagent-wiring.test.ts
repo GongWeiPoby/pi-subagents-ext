@@ -1,16 +1,5 @@
-/**
- * fallback-subagent-wiring.test.ts — proves `fallbackSubagent` actually gates
- * dispatch through the real registered tools (#183), not just that the resolver
- * returns the right verdict.
- *
- * The load-bearing assertion in the rejection tests is that `runAgent` was NEVER
- * called: the complaint in #183 is that a background call starts executing the
- * wrong agent before the caller learns anything, so a rejection that still
- * spawns would be no fix at all. The fallback tests assert the opposite — that
- * it ran, and which agent it ran.
- */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+/** Strict dispatch through real tools and public registry; no implicit roster. */
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,241 +9,80 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
-import { getAllTypes, getAvailableTypes, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { getAllTypes, getAvailableTypes } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
+import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
-function makePi() {
-  const tools = new Map<string, any>();
-  const lifecycle = new Map<string, any>();
-  const pi = {
-    registerMessageRenderer: vi.fn(),
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
-    registerEntryRenderer: vi.fn(),
-    registerFlag: vi.fn(),
-    getFlag: vi.fn(),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
-    appendEntry: vi.fn(),
-    sendMessage: vi.fn(),
-  } as any;
-  return { pi, tools, lifecycle };
-}
+let hermetic: Hermetic;
+let booted: ReturnType<typeof makePi>;
 
-let cwd: string;
-let originalCwd: string;
-let originalAgentDir: string | undefined;
-let originalHome: string | undefined;
+beforeEach(() => {
+  hermetic = hermeticDir({
+    settings: { defaultAgent: "scout", outputTranscript: false },
+    agentFiles: {
+      scout: "---\ndescription: Scout\ntools: read\n---\nScout.",
+      retired: "---\ndescription: Retired\nenabled: false\n---\nRetired.",
+    },
+  });
+  booted = makePi();
+  subagentsExtension(booted.pi);
+  vi.mocked(runAgent).mockReset();
+});
 
-/** Real agent files on disk. The Agent tool reloads the registry from
- *  `process.cwd()` on every call, so an in-memory registry would be wiped before
- *  dispatch is resolved — and a "disabled" fixture that never loads would make
- *  the disabled-type test pass merely because the name was unknown. */
-function writeAgents(): void {
-  const dir = join(cwd, ".pi", "agents");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "scout.md"), "---\ndescription: Scout\ntools: read\n---\nScout.\n");
-  writeFileSync(join(dir, "retired.md"), "---\ndescription: Retired\ntools: read\nenabled: false\n---\nRetired.\n");
-}
+afterEach(async () => {
+  await booted.lifecycle.get("session_shutdown")?.();
+  hermetic.restore();
+});
 
-function ctx() {
-  return {
-    hasUI: false,
-    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
-    cwd,
-    model: undefined,
-    modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
-    sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
-    getSystemPrompt: vi.fn(() => "parent"),
-  } as any;
-}
-
-const textOf = (r: any): string => r.content[0].text;
-
-describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
-  beforeEach(() => {
-    originalCwd = process.cwd();
-    cwd = mkdtempSync(join(tmpdir(), "fallback-wiring-"));
-    writeAgents();
-    process.chdir(cwd);
-    // A developer's real ~/.pi/subagents.json would otherwise set this very
-    // setting under the tests, and their global agents would pollute the roster.
-    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-    originalHome = process.env.HOME;
-    process.env.PI_CODING_AGENT_DIR = join(cwd, "agent-dir");
-    process.env.HOME = cwd;
-    vi.mocked(runAgent).mockReset();
+describe("strict user-defined dispatch", () => {
+  it.each([false, true])("rejects missing and former built-in types before execution (background=%s)", async (background) => {
+    for (const type of ["typo", "Worker", "Explorer", "Reviewer", "Explore", "Plan", "general-purpose", ""]) {
+      await expect(booted.tools.get("Agent").execute("tc", {
+        subagent_type: type, description: "check", prompt: "inspect", run_in_background: background,
+      }, undefined, undefined, ctx())).rejects.toThrow(/agent type|No agent type/);
+    }
+    expect(runAgent).not.toHaveBeenCalled();
   });
 
-  afterEach(() => {
-    setFallbackSubagent(undefined);
-    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
-    process.chdir(originalCwd);
-    if (originalAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-    if (originalHome == null) delete process.env.HOME;
-    else process.env.HOME = originalHome;
-    registerAgents(new Map());
-    rmSync(cwd, { recursive: true, force: true });
-  });
-
-  function boot() {
-    const { pi, tools, lifecycle } = makePi();
-    subagentsExtension(pi);
-    return { pi, tools, lifecycle };
-  }
-
-  for (const background of [false, true]) {
-    it(`refuses an unknown type without spawning (run_in_background: ${background})`, async () => {
-      const { tools } = boot();
-      setFallbackSubagent(NO_FALLBACK);
-
-      const result = await tools.get("Agent").execute(
-        "tc-1",
-        {
-          prompt: "do it",
-          description: "typo dispatch",
-          subagent_type: "definitely-missing",
-          run_in_background: background,
-        },
-        undefined, undefined, ctx(),
-      );
-
-      expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
-      expect(textOf(result)).toContain("scout");
-      // The whole point: nothing ran.
-      expect(runAgent).not.toHaveBeenCalled();
-    });
-  }
-
-  it("still falls back — and says so — when the setting is unset", async () => {
-    const { tools } = boot();
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false,
-    });
-
-    const result = await tools.get("Agent").execute(
-      "tc-2",
-      { prompt: "do it", description: "typo dispatch", subagent_type: "definitely-missing" },
-      undefined, undefined, ctx(),
-    );
-
-    expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
-    // Not merely "something ran" — a fallback that routed anywhere else would pass that.
-    expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(), "Worker", "do it", expect.anything(),
-    );
-  });
-
-  it("carries the fallback note on the background branch too", async () => {
-    // Previously the note was computed after spawnAndWait returned, so only a
-    // foreground caller ever saw it (#183).
-    const { tools } = boot();
-    vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
-
-    const result = await tools.get("Agent").execute(
-      "tc-3",
-      {
-        prompt: "do it",
-        description: "typo dispatch",
-        subagent_type: "definitely-missing",
-        run_in_background: true,
-      },
-      undefined, undefined, ctx(),
-    );
-
-    expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
-    expect(textOf(result)).toContain("started in background");
-  });
-
-  it("refuses a disabled type, which used to dispatch with a mixed identity", async () => {
-    const { tools } = boot();
-    setFallbackSubagent(NO_FALLBACK);
-    // Pin the fixture: without this the test passes identically if retired.md
-    // stopped loading, since "unknown" and "disabled" share one message.
+  it("rejects a loaded but disabled definition", async () => {
     expect(getAllTypes()).toContain("retired");
     expect(getAvailableTypes()).not.toContain("retired");
-
-    const result = await tools.get("Agent").execute(
-      "tc-4",
-      { prompt: "do it", description: "disabled dispatch", subagent_type: "retired" },
-      undefined, undefined, ctx(),
-    );
-
-    expect(textOf(result)).toContain("Unknown or disabled agent type");
+    await expect(booted.tools.get("Agent").execute("tc", {
+      subagent_type: "retired", description: "check", prompt: "inspect",
+    }, undefined, undefined, ctx())).rejects.toThrow("Unknown or disabled");
     expect(runAgent).not.toHaveBeenCalled();
   });
 
-  it("never persists a blank type into a scheduled job", async () => {
-    // `fellBackFrom` is "" for a blank request, and `??` does not treat "" as
-    // nullish — the job would be stored with an empty type and re-fail forever.
-    const { tools, lifecycle } = boot();
-    await lifecycle.get("session_start")({}, ctx());
-
-    const result = await tools.get("Agent").execute(
-      "tc-5",
-      { prompt: "later", description: "blank type", subagent_type: "   ", schedule: "+1h" },
-      undefined, undefined, ctx(),
-    );
-    expect(textOf(result)).toContain("Scheduled");
-
-    const storeDir = join(cwd, ".pi", "subagent-schedules");
-    const jobs = readdirSync(storeDir).flatMap((f) =>
-      JSON.parse(readFileSync(join(storeDir, f), "utf-8")).jobs ?? [],
-    );
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0].subagent_type).toBe("Worker");
+  it("does not schedule an unknown type", async () => {
+    await booted.lifecycle.get("session_start")({}, ctx());
+    await expect(booted.tools.get("Agent").execute("tc", {
+      subagent_type: "missing", description: "later", prompt: "inspect", schedule: "+1h",
+    }, undefined, undefined, ctx())).rejects.toThrow("Unknown or disabled");
+    expect(booted.pi.events.emit.mock.calls.some(([name, data]: [string, { type?: string }]) =>
+      name === "subagents:scheduled" && data.type === "added")).toBe(false);
+    expect(runAgent).not.toHaveBeenCalled();
   });
 
-  it("never blocks resume, which ignores subagent_type entirely", async () => {
-    // resume replays a stored session; the type is required by the schema but
-    // unused. Gating it would make a live agent unresumable the moment its type
-    // is deleted or disabled — the opposite of what strict dispatch is for.
-    const { tools } = boot();
+  it("discovers a new user file on the next invocation", async () => {
+    mkdirSync(join(hermetic.dir, ".pi", "agents"), { recursive: true });
+    writeFileSync(join(hermetic.dir, ".pi", "agents", "writer.md"), "---\ndescription: Writer\n---\nWrite.");
     vi.mocked(runAgent).mockResolvedValue({
-      // `messages` is not optional on a real AgentSession, and a background
-      // resume reads it to anchor transcript streaming.
-      responseText: "first", session: { dispose: vi.fn(), messages: [] } as any, aborted: false, steered: false,
+      responseText: "done", session: { dispose: vi.fn() } as never, aborted: false, steered: false,
     });
-    const spawned = await tools.get("Agent").execute(
-      "tc-6",
-      { prompt: "start", description: "live agent", subagent_type: "scout", run_in_background: false },
-      undefined, undefined, ctx(),
-    );
-    const id = /Agent ID: (\S+)/.exec(textOf(spawned))?.[1]
-      ?? (spawned as any).details?.agentId;
-    expect(id).toBeTruthy();
-
-    setFallbackSubagent(NO_FALLBACK);
-    const resumed = await tools.get("Agent").execute(
-      "tc-7",
-      { resume: id, prompt: "keep going", description: "resume", subagent_type: "deleted-since" },
-      undefined, undefined, ctx(),
-    );
-
-    expect(textOf(resumed)).not.toContain("Unknown or disabled agent type");
+    await booted.tools.get("Agent").execute("tc", {
+      subagent_type: "writer", description: "work", prompt: "bounded task", run_in_background: false,
+    }, undefined, undefined, ctx());
+    expect(runAgent).toHaveBeenCalledWith(expect.anything(), "writer", "bounded task", expect.anything());
   });
 
-  it("rejects legacy structuredOutput through the public manager registry", () => {
-    boot();
-    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
-
-    expect(() => registry.spawn({}, ctx(), "Worker", "do it", {
-      description: "rpc",
-      structuredOutput: { type: "object" },
-    })).toThrow(/options\.structuredOutput is no longer supported/);
-    expect(runAgent).not.toHaveBeenCalled();
-  });
-
-  it("applies the same contract to cross-extension spawns", async () => {
-    // The registry entry is what RPC callers reach; it must not be a way around
-    // the setting. A throw here becomes an error envelope at the RPC boundary.
-    boot();
-    setFallbackSubagent(NO_FALLBACK);
-    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
-
-    expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))
-      .toThrow(/Unknown or disabled agent type/);
+  it("rejects unknown types through the public registry", () => {
+    const registry = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] as {
+      spawn: (...args: unknown[]) => string;
+    };
+    expect(() => registry.spawn({}, ctx(), "missing", "inspect", { description: "rpc" })).toThrow("Unknown or disabled");
+    expect(() => registry.spawn({}, ctx(), "scout", "inspect", {
+      description: "rpc", structuredOutput: {},
+    })).toThrow("options.structuredOutput is no longer supported");
     expect(runAgent).not.toHaveBeenCalled();
   });
 });

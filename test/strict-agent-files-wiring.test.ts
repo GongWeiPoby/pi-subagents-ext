@@ -121,7 +121,8 @@ describe("strictAgentFiles gates extension activation", () => {
       getSystemPrompt: vi.fn(() => "parent"),
     } as any;
 
-    const result = await agentTool.execute("call-1", { subagent_type: "nope", prompt: "x" }, undefined, vi.fn(), uiCtx);
-    expect(JSON.stringify(result)).not.toContain("Nested mappings");
+    await expect(agentTool.execute("call-1", { subagent_type: "nope", prompt: "x" }, undefined, vi.fn(), uiCtx))
+      .rejects.toThrow("Unknown or disabled agent type");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Skipping agent file"));
   });
 });

@@ -48,7 +48,7 @@ function fakeSession() {
 }
 
 function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings } });
+  hermetic = hermeticDir({ testAgents: true, settings: { outputTranscript: false, ...settings } });
   const b = makePi();
   subagentsExtension(b.pi);
   booted = b.lifecycle;

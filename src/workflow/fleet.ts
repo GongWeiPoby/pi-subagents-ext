@@ -69,7 +69,7 @@ export function workflowFleetPhases(
         index: agent.index,
         label: agent.label,
         state,
-        agentType: agent.agentType ?? "Worker",
+        agentType: agent.agentType ?? "unknown",
         ...(agent.model !== undefined ? { model: agent.model } : {}),
         ...(agent.recordId !== undefined ? { recordId: agent.recordId } : {}),
         ...(agent.activity !== undefined ? { activity: agent.activity } : {}),

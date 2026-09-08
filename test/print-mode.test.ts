@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {

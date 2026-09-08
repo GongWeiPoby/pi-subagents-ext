@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -99,6 +100,7 @@ describe("Agent tool — background resume wiring", () => {
     writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     mkdirSync(join(agentDir, "agents"), { recursive: true });
     process.chdir(cwd);
+    writeTestAgentFiles(join(cwd, ".pi", "agents"));
 
     session = {
       messages: [

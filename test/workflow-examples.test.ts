@@ -119,7 +119,7 @@ function stubHost(options: { gateFailsFor?: string[] } = {}): {
 }
 
 const runExample = (name: string, host: WorkflowHost) =>
-  runWorkflow({ script: readExample(EXAMPLES_DIR, name), host, args: SAMPLE_ARGS[name] });
+  runWorkflow({ defaultAgent: "Worker", script: readExample(EXAMPLES_DIR, name), host, args: SAMPLE_ARGS[name] });
 
 describe("shipped example workflows", () => {
   it("ships at least the examples the guide links", () => {
@@ -164,7 +164,7 @@ describe("shipped example workflows", () => {
     it("tolerates being run with no args at all", async () => {
       // Every example documents `args?.x ?? default`; this is what pins it.
       const { host } = stubHost();
-      const result = await runWorkflow({ script: readExample(EXAMPLES_DIR, name), host });
+      const result = await runWorkflow({ defaultAgent: "Worker", script: readExample(EXAMPLES_DIR, name), host });
 
       expect(result.error).toBeUndefined();
       expect(result.status).toBe("completed");
@@ -184,7 +184,7 @@ describe("shipped example workflows", () => {
 
     it("count-child deterministically counts non-empty text lines", async () => {
       const { host } = stubHost();
-      const result = await runWorkflow({
+      const result = await runWorkflow({ defaultAgent: "Worker",
         script: readExample(LIB_DIR, "count-child.js"),
         host,
         args: { root: "src/" },

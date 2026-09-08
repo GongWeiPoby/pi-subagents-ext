@@ -18,6 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -100,6 +101,7 @@ describe("subagents:rpc:consume", () => {
       JSON.stringify({ schedulingEnabled: false, outputTranscript: false }),
     );
     process.chdir(tmpDir);
+    writeTestAgentFiles(join(tmpDir, ".pi", "agents"));
   });
 
   afterEach(async () => {

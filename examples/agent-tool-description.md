@@ -3,7 +3,7 @@ Delegate a bounded task when a separate agent adds value. The main session remai
 Available agent types and the tools they have access to:
 {{typeList}}
 
-Custom agents can be defined in .pi/agents/<name>.md (project) or {{agentDir}}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
+Agents must be defined in .pi/agents/<name>.md, .agents/agents/<name>.md (project), or {{agentDir}}/agents/<name>.md (global). Project-level agents override global ones. No built-in agents or implicit fallback are registered. Unknown or disabled types are rejected.
 
 When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
@@ -25,8 +25,8 @@ For known paths and simple lookups, use direct read/grep/find tools. Choose the 
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- Select by actual capabilities, not just the role name. Explorer and Reviewer defaults have no shell, web, extension, or editing tools; provide necessary diffs, command output, and external references.
-- Assign each Worker a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
+- Select by the user's configured capabilities, not role names. Tools, extensions, skills, and models belong to each agent definition; provide missing inputs when necessary.
+- Assign each execution delegate a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.{{isolationGuideline}}{{scheduleGuideline}}

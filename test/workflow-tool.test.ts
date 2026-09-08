@@ -1,3 +1,4 @@
+import { TEST_AGENTS } from "./helpers/agents.js";
 /**
  * workflow-tool.test.ts — the seams that bind the workflow engine to the rest of
  * the extension.
@@ -21,7 +22,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
-import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { registerAgents, setDefaultAgent } from "../src/agent-types.js";
 import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../src/index.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import { getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault } from "../src/output-file.js";
@@ -112,7 +113,7 @@ describe("createWorkflowHost — spawn mapping", () => {
   beforeEach(() => {
     // The host resolves agent types through the process-wide registry, the same
     // one the Agent tool uses. Seed it with the shipped defaults.
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
   });
 
   it("spawns through the manager and maps attempt identity, configuration and usage", async () => {
@@ -186,17 +187,16 @@ describe("createWorkflowHost — spawn mapping", () => {
   });
 
   it("routes an unknown agent type through the same dispatch the Agent tool uses", async () => {
-    // Not a second resolution path: `resolveSpawnType` owns the fallback policy,
-    // so an unknown type falls back here exactly as it does for a tool call…
+    // A configured default never substitutes for an explicit unknown type.
     const stub = stubManager();
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 
-    const fellBack = await host.spawnAgent(request({ agentType: "no-such-agent" }));
-    expect(fellBack.ok).toBe(true);
-    expect(stub.spawnAndWait.mock.calls[0][2]).toBe("Worker");
+    setDefaultAgent("Worker");
+    const failed = await host.spawnAgent(request({ agentType: "no-such-agent" }));
+    expect(failed.ok).toBe(false);
+    expect(stub.spawnAndWait).not.toHaveBeenCalled();
 
     // …and fails closed here too when the project configured strict dispatch.
-    setFallbackSubagent(NO_FALLBACK);
     try {
       const strict = stubManager();
       const strictHost = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: strict.manager });
@@ -205,7 +205,7 @@ describe("createWorkflowHost — spawn mapping", () => {
       expect(rejected.error).toMatch(/no-such-agent/);
       expect(strict.spawnAndWait).not.toHaveBeenCalled();
     } finally {
-      setFallbackSubagent(undefined);
+      setDefaultAgent(undefined);
     }
   });
 
@@ -382,7 +382,7 @@ describe("createWorkflowHost — scopeModels", () => {
     notify = vi.fn();
     // "pinned" stands in for a user-authored agent file with `model:` in its
     // frontmatter; the defaults come along, so "Worker" still resolves.
-    registerAgents(new Map([["pinned", {
+    registerAgents(new Map([...TEST_AGENTS, ["pinned", {
       name: "pinned",
       displayName: "Pinned",
       description: "an agent whose file pins a model",
@@ -400,7 +400,7 @@ describe("createWorkflowHost — scopeModels", () => {
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
     rmSync(projectDir, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
   });
 
   it("refuses a model the script named that is out of scope, and fails only that agent", async () => {
@@ -491,7 +491,7 @@ describe("createWorkflowHost — worktree cwd propagation", () => {
   let worktree: string;
 
   beforeEach(() => {
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     worktree = mkdtempSync(join(tmpdir(), "wf-worktree-"));
   });
 
@@ -536,7 +536,7 @@ describe("createWorkflowHost — worktree cwd propagation", () => {
 
 describe("createWorkflowHost — abort, resume and gate", () => {
   beforeEach(() => {
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
   });
 
   it("aborts the manager record the runtime's agent id stands for", async () => {
@@ -753,7 +753,7 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
   beforeEach(() => {
     // Hermetic dir first — settings and agent files are read at boot.
-    hermetic = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: true } });
+    hermetic = hermeticDir({ testAgents: true, settings: { schedulingEnabled: false, workflowsEnabled: true } });
     booted = makePi();
     subagentsExtension(booted.pi);
     tools = booted.tools;
@@ -1801,7 +1801,7 @@ describe("--subagents-workflow-file", () => {
   let hermetic: Hermetic;
 
   beforeEach(() => {
-    hermetic = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: true } });
+    hermetic = hermeticDir({ testAgents: true, settings: { schedulingEnabled: false, workflowsEnabled: true } });
   });
 
   afterEach(async () => {
@@ -2280,7 +2280,7 @@ describe("workflowsEnabled — the master switch", () => {
 
   /** Boot the extension against a project whose settings say `settings`. */
   const boot = (settings: Record<string, unknown>, flags: Record<string, string | boolean> = {}) => {
-    hermetic = hermeticDir({ settings });
+    hermetic = hermeticDir({ testAgents: true, settings });
     const booted = makePi(flags);
     subagentsExtension(booted.pi);
     return booted;
@@ -2344,7 +2344,7 @@ describe("collisions with another extension", () => {
   });
 
   const boot = (settings: Record<string, unknown> = { workflowsEnabled: true }) => {
-    hermetic = hermeticDir({ settings });
+    hermetic = hermeticDir({ testAgents: true, settings });
     const booted = makePi();
     subagentsExtension(booted.pi);
     return booted;
@@ -2495,7 +2495,7 @@ describe("collisions with another extension", () => {
   it("refuses the startup flag once it has stood down", async () => {
     // The flag is the same machinery by another door. The collision check runs
     // first in session_start precisely so this door closes with the tool.
-    hermetic = hermeticDir({ settings: {} });
+    hermetic = hermeticDir({ testAgents: true, settings: {} });
     const path = join(hermetic.dir, "flow.js");
     writeFileSync(path, fileScript);
     const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });

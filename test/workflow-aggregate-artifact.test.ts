@@ -461,7 +461,7 @@ describe("workflow aggregate settle wiring", () => {
   let didShutdown: boolean;
 
   beforeEach(() => {
-    hermetic = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: true } });
+    hermetic = hermeticDir({ testAgents: true, settings: { schedulingEnabled: false, workflowsEnabled: true } });
     booted = makePi();
     subagentsExtension(booted.pi);
     sessionId = `aggregate-session-${process.pid}`;

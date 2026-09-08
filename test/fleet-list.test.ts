@@ -11,6 +11,7 @@ import {
   formatFleetTokens,
 } from "../src/ui/fleet-list.js";
 import type { FleetWorkflow, FleetWorkflowPhase } from "../src/workflow/fleet.js";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -293,7 +294,7 @@ describe("FleetList navigation", () => {
       // … so the description stays in the same column as when unselected.
       expect(plain(selected).indexOf("one")).toBe(plain(before).indexOf("one"));
     } finally {
-      registerAgents(new Map());
+      registerAgents(TEST_AGENTS);
     }
   });
 

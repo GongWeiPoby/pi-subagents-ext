@@ -1,3 +1,4 @@
+import { TEST_AGENTS } from "./helpers/agents.js";
 /**
  * workflow-gate-worktree.test.ts — a `gate` on an isolated child must verify
  * THAT child's tree.
@@ -137,7 +138,7 @@ describe("gate on an isolated child", () => {
   let manager: AgentManager;
 
   beforeEach(() => {
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     repo = initRepo();
     manager = new AgentManager();
     childWrites(repo);
@@ -179,7 +180,7 @@ describe("gate on an isolated child", () => {
     const { pi, gateRuns } = makePi(() => execFail("FAIL src/auth.test.ts\n1 failing"));
     const host = createWorkflowHost({ pi, ctx: ctx({ cwd: repo }), manager });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow({ defaultAgent: "Worker",
       script: `${HEAD}return await agent("fix it", { gate: "npm test", isolation: "worktree" });`,
       host,
     });
@@ -204,7 +205,7 @@ describe("gate on an isolated child", () => {
     const { pi } = makePi(() => ({ stdout: "  ", stderr: "", code: 1, killed: false }));
     const host = createWorkflowHost({ pi, ctx: ctx({ cwd: repo }), manager });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow({ defaultAgent: "Worker",
       script: `${HEAD}return await agent("x", { gate: "npm run lint", isolation: "worktree" });`,
       host,
     });
@@ -231,7 +232,7 @@ describe("gate on an isolated child", () => {
     });
     const host = createWorkflowHost({ pi, ctx: ctx({ cwd: repo }), manager });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow({ defaultAgent: "Worker",
       script: `${HEAD}return await agent("x", { gate: "npm test", isolation: "worktree" });`,
       host,
     });
@@ -284,7 +285,7 @@ describe("gate on a child with no worktree of its own", () => {
   let manager: AgentManager;
 
   beforeEach(() => {
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     repo = initRepo();
     manager = new AgentManager();
     childWrites(repo);
@@ -300,7 +301,7 @@ describe("gate on a child with no worktree of its own", () => {
     const { pi, gateRuns } = makePi();
     const host = createWorkflowHost({ pi, ctx: ctx({ cwd: repo }), manager });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow({ defaultAgent: "Worker",
       script: `${HEAD}return await agent("x", { gate: "npm test" });`,
       host,
     });
@@ -318,7 +319,7 @@ describe("an isolated child with no gate", () => {
   let manager: AgentManager;
 
   beforeEach(() => {
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     repo = initRepo();
     manager = new AgentManager();
     childWrites(repo);

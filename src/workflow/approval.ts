@@ -267,6 +267,7 @@ interface StaticRange {
 
 export interface DirectWorkflowApprovalInput {
   args: unknown;
+  defaultAgent?: string;
   meta: WorkflowMeta;
   script: string;
   source: string;
@@ -320,7 +321,8 @@ export function formatDirectWorkflowApproval(input: DirectWorkflowApprovalInput)
         : "script order/runtime control flow";
     lines.push(`- ${index + 1}. ${safeLine(renderOptionValue(options.fields.label, `agent call ${index + 1}`))}`);
     lines.push(`  task: ${safeLine(call.staticArgs[0] ?? "dynamic prompt computed at runtime")}`);
-    lines.push(`  agentType: ${safeLine(renderOptionValue(options.fields.agentType, "Worker"))}`);
+    lines.push(`  agentType: ${safeLine(renderOptionValue(options.fields.agentType,
+      options.fields.resume.kind !== "absent" ? "original agent (resume)" : input.defaultAgent ?? "not configured (call will fail)"))}`);
     lines.push(`  model: ${safeLine(renderOptionValue(options.fields.model, "inherit"))}`);
     lines.push(`  effort: ${safeLine(renderOptionValue(options.fields.effort, "inherit"))}`);
     lines.push(`  phase: ${safeLine(phase)}`);

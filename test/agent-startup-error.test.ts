@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/worktree.js", async () => {
   const actual = await vi.importActual<typeof import("../src/worktree.js")>("../src/worktree.js");
@@ -59,6 +60,7 @@ describe("Agent startup failures fail the tool call (#179)", () => {
     originalCwd = process.cwd();
     cwd = mkdtempSync(join(tmpdir(), "startup-error-"));
     process.chdir(cwd);
+    writeTestAgentFiles(join(cwd, ".pi", "agents"));
     originalAgentDir = process.env.PI_CODING_AGENT_DIR;
     originalHome = process.env.HOME;
     process.env.PI_CODING_AGENT_DIR = join(cwd, "agent-dir");

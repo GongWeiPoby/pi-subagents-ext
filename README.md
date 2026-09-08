@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes detached by default and notifies you on completion, just like a fresh spawn; pass `run_in_background: false` to block and get the result inline
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
-- **Case-insensitive agent types** — `"explorer"`, `"Explorer"`, `"EXPLORER"` all work. A type that doesn't resolve to exactly one *enabled* agent — unknown, disabled, or ambiguous between two agents differing only by case — falls back to Worker with a note, or is refused outright under [`fallbackSubagent: none`](#persistent-settings)
+- **User-defined agent types** — names resolve case-insensitively when unambiguous. Unknown, disabled, and ambiguous types are rejected before execution; no built-in agents or implicit fallback exist.
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
 - **Persistent agent memory** — three scopes (project, local, user) with automatic read-only fallback for agents without write tools
@@ -71,6 +71,17 @@ Third-party adapters report running it elsewhere. These are maintained independe
 - **DeepSeek Harness (`dsh`)** — via an adapter that maps pi's host API onto native DSH agents. Details and reports: [#258](https://github.com/tintinweb/pi-subagents/issues/258)
 
 ## Quick Start
+
+No agents are registered on installation. Define your own in `.pi/agents/`, `.agents/agents/`, or the global agent directory, or copy and customize optional templates:
+
+```bash
+mkdir -p .pi/agents
+cp examples/agents/Worker.md .pi/agents/Worker.md
+cp examples/agents/Explorer.md .pi/agents/Explorer.md
+cp examples/agents/Reviewer.md .pi/agents/Reviewer.md
+```
+
+Only copy the roles you need. Templates are never loaded automatically. Their names have no special meaning: tools, extensions, skills, model, and instructions are user choices.
 
 The parent agent can delegate a scoped investigation using the `Agent` tool when a separate context is useful (simple lookups and already-understood serial changes should stay in the main session):
 
@@ -116,7 +127,7 @@ Use `SubagentWorkflow` only when the user explicitly requests deterministic Java
 
 ### Adaptive Playbooks
 
-Copy the shipped adaptive code-review Playbook into a project:
+Copy a shipped adaptive Playbook into a project — the examples cover `code-review`, `deep-research`, `adversarial-review`, `multi-perspective`, and `codebase-audit`:
 
 ```bash
 mkdir -p .pi/workflows/code-review
@@ -312,31 +323,21 @@ Result artifacts are an internal persistence aid, not verification credentials a
 
 
 
-## Built-in Delegates
+## User-Defined Agents
 
 The main session should normally read, reason, edit, and validate directly. Delegate only when a separate context provides useful parallelism, substantial context isolation, specialist capabilities, or an independent review perspective. A plan, several steps, or an available Worker is not by itself a reason to delegate. Explicit user requests to delegate or not to delegate take precedence; there is no mandatory Explorer/Worker/Reviewer pipeline.
 
-| Type | Tools | Model | Prompt Mode | Responsibility |
-|------|-------|-------|-------------|----------------|
-| `Explorer` | read, grep, find, ls | inherit | `replace` | Scoped code investigation with paths, line numbers, coverage, and uncertainty |
-| `Worker` | all 7, plus configured extensions | inherit | `append` | Bounded implementation, reproduction, or verification with ownership and acceptance criteria |
-| `Reviewer` | read, grep, find, ls | inherit | `replace` | Independent, evidence-based review of a supplied change or proposal |
+The extension provides execution, queues, ownership, cancellation, resume, and result tracking, not a built-in role policy. Every agent comes from a user file. An empty installation reports setup instructions; unknown, disabled, or ambiguous types fail before execution and never substitute a more privileged agent.
 
-Worker inherits the parent's system prompt and adds a bounded-execution role: preserve other contributors' changes, stay within scope, perform permitted checks, and return actual results to the parent. It is an optional delegate, not a mandatory implementation stage. Explorer and Reviewer use standalone prompts that require reading applicable project instructions without adopting the parent's coordination duties. They report missing inputs and unverified claims rather than pretending to have run commands.
+Optional templates in `examples/agents/` include `Explorer`, `Worker`, and `Reviewer`. Explorer and Reviewer include Bash for Git investigation and enable extensions and skills; their no-modification instructions are behavioral conventions, not a security sandbox. Customize permissions for your environment before copying. These templates are not a required pipeline.
 
-Explorer and Reviewer load **no extensions or skills by default** and have no shell or editing tools. Supply diffs, Git history, external references, and command output when needed, or perform those steps in the main session. This is a tool boundary, not a filesystem sandbox or a restriction on readable paths; the host may still persist sessions and transcripts. Custom agent files can change these defaults, so check the effective configuration rather than relying on the role name.
+**Migration:** There are no built-in names or aliases, including `Explorer`, `Worker`, `Reviewer`, `Explore`, `general-purpose`, and `Plan`. Existing user files continue to define those names normally. Create files for types referenced by calls, schedules, nested allowlists, or workflows. Remove `disableDefaultAgents` and `fallbackSubagent` from settings; neither is used. Persisted conversations can only reopen when their original type still has a definition. Eject/reset-to-built-in actions no longer exist; `/agents` still creates, edits, enables, disables, and deletes user files.
 
-All three built-ins leave `model` and `thinking` unset: caller values can select a model/effort, otherwise they inherit. Explicit custom-agent pins remain authoritative. Context inheritance, foreground/background selection, and worktree isolation remain caller choices; no built-in delegates recursively by default.
-
-**Migration:** `Explore`, `general-purpose`, and `Plan` are no longer registered as built-ins or aliases. Update calls, custom override names, `allowed_subagents`, configured `fallbackSubagent`, schedules, and workflow `agentType` values to the appropriate new role. `Explorer` replaces code investigation, `Worker` replaces general execution, and `Reviewer` adds independent review; planning stays in the main session or a custom agent. Custom files with old names still register as ordinary custom agents. The unset fallback now targets Worker; unknown names (including old names without custom definitions) follow the existing fallback policy, so use `fallbackSubagent: "none"` for strict rejection. Persisted handles whose old type no longer exists cannot reopen it automatically.
-
-The role prompts adapt the scoped investigation and self-contained handoff ideas in [OpenCode's explorer prompt](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/agent/prompt/explore.txt) and [Kilo's task prompt](https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/tool/task.txt). They intentionally do not copy those tools' shell permissions or primary-agent modes.
-
-Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/Worker.md`), or **disabled** per-project with `enabled: false` frontmatter.
+Workflow calls must specify `agentType`, or use an explicitly configured `defaultAgent` naming an enabled user agent. There is no automatic Worker default. Unknown explicit types are rejected even when `defaultAgent` is configured.
 
 ## Custom Agents
 
-Define custom agent types by creating `.md` files. The frontmatter `name:` is the `subagent_type` and dispatch identity, falling back to the filename when absent; `display_name` only changes the UI label. Claiming a default agent's name overrides it.
+Define agent types by creating `.md` files. The frontmatter `name:` is the `subagent_type` and dispatch identity, falling back to the filename when absent; `display_name` only changes the UI label.
 
 Agents are discovered from three locations (higher priority wins):
 
@@ -405,7 +406,7 @@ All fields are optional — sensible defaults for everything.
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | — | Pin this agent to background (`true`) or foreground (`false`). Omit to follow `backgroundByDefault` |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
-| `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
+| `enabled` | `true` | Set to `false` to disable a user-defined agent |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
@@ -425,7 +426,7 @@ allowed_subagents: support-file-finder, support-callsite-tracer   # or `all`
 
 **The allowlist is a privilege boundary, not just a routing hint.** A child runs with *its own* `tools:`, `extensions:`, and `isolated:` — the parent's restrictions are not inherited — so delegation grants the parent the union of what the listed agents can do. The read-only agent above can write and run commands through any listed agent that can, and `all` reaches every enabled agent including `Worker`. Choose the list as carefully as you would choose `tools:` itself; that is the main reason this is default-off.
 
-`allowed_subagents` is runtime-enforced. A comma-separated list restricts nesting to those types; `all` (or `"*"` / `true`, matching how `extensions:` and `skills:` take booleans) allows any enabled agent; omitted, empty, `none`, or `false` means no nested tools are injected at all. Unknown, disabled, and out-of-list types are rejected rather than falling back — regardless of the project's [fallback agent](#persistent-settings) setting, so a configured fallback can never hand a nested caller an agent outside its allowlist — and a nested `model:` is validated against [Model Scope](#model-scope) exactly like a top-level spawn. Result, resume, and steering operations are ownership-scoped, so a parent can control only its own children. Nested records remain internal to that parent and do not appear in top-level tools, lifecycle events, or agent UI — so when a parent finishes, is stopped, or ends a resumed turn, its nested children are stopped with it. They do write their own `.output` transcript (subject to the same `output_transcript` gate), filed under the root session's directory alongside their ancestors', so a nested run can still be inspected after the fact. Their token usage is folded into every ancestor's totals up to the top-level agent (lifecycle events, completion notifications, `/agents`), so nested spend stays attributable at any depth even though the children themselves stay hidden. A nested result that ends `stopped`, `aborted`, or `steered` is labelled as partial, the same guarantee top-level results carry.
+`allowed_subagents` is runtime-enforced. A comma-separated list restricts nesting to those types; `all` (or `"*"` / `true`, matching how `extensions:` and `skills:` take booleans) allows any enabled agent; omitted, empty, `none`, or `false` means no nested tools are injected at all. Unknown, disabled, and out-of-list types are rejected rather than falling back and a nested `model:` is validated against [Model Scope](#model-scope) exactly like a top-level spawn. Result, resume, and steering operations are ownership-scoped, so a parent can control only its own children. Nested records remain internal to that parent and do not appear in top-level tools, lifecycle events, or agent UI — so when a parent finishes, is stopped, or ends a resumed turn, its nested children are stopped with it. They do write their own `.output` transcript (subject to the same `output_transcript` gate), filed under the root session's directory alongside their ancestors', so a nested run can still be inspected after the fact. Their token usage is folded into every ancestor's totals up to the top-level agent (lifecycle events, completion notifications, `/agents`), so nested spend stays attributable at any depth even though the children themselves stay hidden. A nested result that ends `stopped`, `aborted`, or `steered` is labelled as partial, the same guarantee top-level results carry.
 
 The hard cap is depth 2 by default: main session (0) → subagent (1) → nested child (2). Change it project-wide with `maxSubagentDepth` in `subagents.json` (or `/agents → Settings → Nested depth`); `0` or `1` turns nesting off everywhere. An agent already at the cap gets no nested tools at all — not even `get_subagent_result`, since it can never own a child. A child must independently set `allowed_subagents` to delegate again; isolated agents never receive nested tools.
 
@@ -717,14 +718,10 @@ Settings                                    ← max concurrency (background + fo
 
 - **Running agents** — select one to open its live conversation viewer. While it's running or queued, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
 - **Agent types** — unified list with source indicators: `•` (project), `◦` (global), `✕` (disabled). Each row shows the agent's model, and the highlighted agent's full description appears below the list. The model column flags `(unavailable, fallback: inherit)` when a configured model can't be resolved (it would silently inherit the parent model), and shows `(→ provider/id)` when it resolves to a different provider or version than configured. Select an agent to manage it:
-  - **Default agents** (no override): Eject (export as `.md`), Disable
-  - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
   - **Custom agents**: Edit, Disable, Delete
-  - **Disabled default agents** (ejected/overridden): Enable, Edit, Reset to default, Delete
   - **Disabled custom agents**: Enable, Edit, Delete
-- **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
-- **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
+- **Create new agent** — choose project/personal location, then manual configuration or generation by an existing user-selected agent with file-writing tools. On an empty installation, use manual configuration or copy an example first; generation never creates an implicit executor.
 - **Settings** — configure max concurrency (background and foreground), default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
@@ -796,20 +793,20 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, default workflow agent, default join mode, scheduling on/off, scope models on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (background agent concurrency `10`, workflow concurrency `2` per run, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing operational settings use background concurrency `10`, workflow concurrency `2` per run, foreground concurrency `0` (unlimited), unlimited turns, grace turns `5`, nested depth `2`, and join mode `smart`. No agent is configured implicitly. An empty project `defaultAgent` clears a global default.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
-**Fallback agent** (`fallbackSubagent`, default `Worker`): the agent used when a caller-supplied `subagent_type` doesn't resolve to exactly one enabled agent — unknown, disabled, or ambiguous because two agents differ only by case. Name any enabled agent to route those calls there instead, or set `none` for **strict**, fail-closed dispatch: the call is refused with an error listing the available types, and nothing spawns. Strict mode matters most for background and scheduled calls, which would otherwise start executing a substituted agent before the caller learns anything. Also settable from `/agents → Settings → Fallback agent`. The boolean `false` is accepted as a spelling of `none`, because it would otherwise be dropped as the wrong type and silently leave the permissive default in place. Every other value is read as an agent name, so a mistaken `off` fails loudly at dispatch rather than meaning one thing in the settings file and another in the resolver. A fallback agent that is itself unknown or disabled is a misconfiguration and is reported rather than quietly replaced. Note the policy stays permissive by design: with `disableDefaultAgents` and no `Worker` of your own, an unresolvable type still resolves to a built-in config carrying *all* tools — set `none` (or name one of your own agents) to close that.
+**Default workflow agent** (`defaultAgent`, unset): an explicitly selected user-defined agent for workflow calls that omit `agentType`. Set it in `subagents.json` or `/agents → Settings → Default workflow agent`. The name must resolve to an enabled definition. It is captured before approval/start and shown in the approval; changing it changes journal keys for calls that used it. It never substitutes for an unknown explicit type. Without this setting, workflow calls must name `agentType` (except resume, which keeps the original type).
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable [agent file](#custom-agents) aborts extension load at startup and names the file, instead of being skipped with a warning — so a checked-in `.pi/agents/` can't silently fall through to a same-named agent from another location. Startup only: the mid-session reload that runs on each `Agent` call keeps warning either way, since a bad edit shouldn't kill a session on an unrelated spawn. Also settable from `/agents → Settings → Strict agent files`.
 
-**Disable defaults** (`disableDefaultAgents`, default `false`): when on, the three built-in agents (Worker, Explorer, Reviewer) are not registered — only your project/global custom agents are advertised and spawnable. User-defined agents are unaffected, including ones that override a default by name. The Agent tool's type list updates on the next pi session (the tool schema is registered at startup).
+**Removed settings:** `disableDefaultAgents` and `fallbackSubagent` are ignored. All agents are user-defined and explicit unknown types always fail closed.
 
 **Agent mentions** (`agentMentions`, default `"model"`): whether [`@handle message`](#agent-mentions) at the prompt addresses that subagent instead of the main model — messaging, resuming or starting it — and whether `@` offers agents alongside pi's file completion. `"model"` and `"direct"` differ only in [who starts an agent that isn't running](#starting-a-new-agent): an off-screen clone of this conversation, via a `<system-reminder>` and a real `Agent` call, or this extension, immediately and with no model call. Messaging and resuming are direct in both. `"off"` gates all three actions plus the suggestion list, so `@` means only "attach a file" again and every `@…` prompt reaches the main model verbatim. Toggle via `/agents → Settings → Agent mentions`; applied live. The booleans this setting used to take are still read — `true` as `"model"`, `false` as `"off"`.
 
@@ -874,7 +871,7 @@ Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless
 
 The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start`; on an automatic stand-down it withdraws only this deterministic runtime. Markdown Playbook read/save tools remain active and can guide either coordinator.
 
-**Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` is the rich Claude Code-style prompt (~1,400 tokens with the default agents); `"compact"` is ~75% smaller — one-line agent type list, terse usage notes — for small/local models where tool-spec tokens are expensive. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
+**Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` includes complete user-agent descriptions; `"compact"` uses a one-line type list and terse usage notes for small/local models. Size depends on the configured roster. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
 
 `"custom"` registers your own description from `<cwd>/.pi/agent-tool-description.md` (project) or `<agentDir>/agent-tool-description.md` (global; project wins). The file is read once at tool registration, so edits also apply on the next pi session. Dynamic parts stay live via placeholders — a static agent list would go stale the moment you add a custom agent:
 
@@ -1130,10 +1127,9 @@ src/
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
 
   # Agent registry
-  default-agents.ts   # Embedded default agent configs (Worker, Explorer, Reviewer)
   custom-agents.ts    # Load user-defined agents from .pi/agents/, .agents/agents/, and global agents
   agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
-  agent-file-toggle.ts # Locate/edit an agent's .md: enabled: toggle, eject to frontmatter
+  agent-file-toggle.ts # Locate/edit an agent's .md: enabled toggle and frontmatter serialization
   agent-color.ts      # Claude Code/Agency Agents name color parsing and badge rendering
 
   # Execution

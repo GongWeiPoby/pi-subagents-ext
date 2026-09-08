@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 /**
  * wait-queued.test.ts — get_subagent_result(wait: true) lifecycle behavior.
  *

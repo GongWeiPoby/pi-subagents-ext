@@ -123,7 +123,7 @@ describe("SubagentWorkflow task_id execution binding", () => {
   let previousOutputTranscriptDefault: boolean;
 
   beforeEach(() => {
-    hermetic = hermeticDir({
+    hermetic = hermeticDir({ testAgents: true,
       settings: { maxConcurrent: 1, schedulingEnabled: false, workflowsEnabled: true },
     });
     previousTasks = process.env.PI_TASKS;

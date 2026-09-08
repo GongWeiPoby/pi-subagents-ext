@@ -18,6 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, bench, describe, vi } from "vitest";
+import { TEST_AGENTS } from "../helpers/agents.js";
 
 vi.mock("../../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../../src/agent-runner.js")>("../../src/agent-runner.js");
@@ -46,7 +47,7 @@ function agentFile(i: number): string {
 /**
  * A standalone project dir holding `n` agent files under `.pi/agents`.
  *
- * Deliberately not `hermeticDir()`: that helper also chdir's, and one per size
+ * Deliberately not `hermeticDir({ testAgents: true })`: that helper also chdir's, and one per size
  * would leave the process in whichever ran last. The one below owns the global
  * redirect for the whole file; these own only the files being counted.
  *
@@ -71,13 +72,13 @@ const hermetics: Hermetic[] = [];
 afterAll(() => {
   for (const h of hermetics.reverse()) h.restore();
   for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
-  registerAgents(new Map());
+  registerAgents(TEST_AGENTS);
   delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
 });
 
 // Empty global agent dir + empty cwd, so the developer's own ~/.pi agents are
 // not silently added to every count below.
-const globalRedirect = hermeticDir();
+const globalRedirect = hermeticDir({ testAgents: true });
 hermetics.push(globalRedirect);
 
 describe("loadCustomAgents (runs on every Agent call)", () => {

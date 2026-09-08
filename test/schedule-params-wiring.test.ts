@@ -41,7 +41,7 @@ function bootedCtx() {
 async function scheduleAndReadBack(
   params: Record<string, unknown>,
 ): Promise<{ job: ScheduledSubagent; reply: string; restore: () => void }> {
-  const hermetic = hermeticDir();
+  const hermetic = hermeticDir({ testAgents: true });
   const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
 
@@ -109,13 +109,10 @@ describe("Agent tool → persisted scheduled job", () => {
     }
   });
 
-  it("stores the caller's own subagent_type, not the fallback substitute", async () => {
-    // The scheduler re-resolves the type at fire time, and the stored name is
-    // what a user sees and edits in /agents. Baking in today's substitute would
-    // permanently rewrite their job to an agent they never asked for.
-    const { job, reply, restore } = await scheduleAndReadBack({ subagent_type: "does-not-exist" });
+  it("stores the selected user-defined type", async () => {
+    const { job, reply, restore } = await scheduleAndReadBack({ subagent_type: "Explorer" });
     try {
-      expect(job.subagent_type).toBe("does-not-exist");
+      expect(job.subagent_type).toBe("Explorer");
       expect(reply).toContain("Scheduled");
     } finally {
       restore();
@@ -135,7 +132,7 @@ describe("Agent tool → schedule restrictions", () => {
     params: Record<string, unknown>,
     settings?: Record<string, unknown>,
   ): Promise<{ reply: string; jobCount: number; restore: () => void }> {
-    const hermetic = hermeticDir(settings ? { settings } : {});
+    const hermetic = hermeticDir({ testAgents: true, settings });
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 

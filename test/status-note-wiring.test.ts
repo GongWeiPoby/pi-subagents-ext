@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 /**
  * status-note-wiring.test.ts — proves the status note actually reaches the
  * PARENT through the real tool handlers, not just that getStatusNote() returns

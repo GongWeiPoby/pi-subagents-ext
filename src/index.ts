@@ -17,10 +17,10 @@ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Tex
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
-import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
+import { buildNewAgentFile, disableInContent, enableInContent, locateAgentFile, personalAgentsDir, projectAgentsDir } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent, resolveResultBodyEnabled } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getDefaultAgent, registerAgents, resolveSpawnType, setDefaultAgent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -415,7 +415,7 @@ export default function (pi: ExtensionAPI) {
   // the initial load, which happens hundreds of lines before settings are applied.
   let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
 
-  /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
+  /** Reload user-defined agents on init and each Agent invocation. */
   const reloadCustomAgents = (strict = false) => {
     const userAgents = loadCustomAgents(process.cwd(), strict);
     registerAgents(userAgents);
@@ -1034,15 +1034,10 @@ export default function (pi: ExtensionAPI) {
         return { action: "handled" };
       }
 
-      // The Agent tool deliberately falls back to Worker for a type it
-      // cannot resolve (#183), which covers a deleted file AND a merely
-      // disabled one. A resume must not inherit that: reopening this
-      // conversation under a different agent's prompt and tools is not
-      // continuing it, and the new record would re-tombstone under the
-      // substitute, so the handle would never find its way back.
+      // Reopening requires the original user-defined agent to remain available.
       reloadCustomAgents();
       const dispatch = resolveSpawnType(entry.type);
-      if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
+      if (!dispatch.ok) {
         // The tombstone stays: re-enabling the agent makes the handle work
         // again, which a drop would foreclose.
         ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
@@ -1276,18 +1271,6 @@ export default function (pi: ExtensionAPI) {
     workflowsPinned = true;
   }
 
-  // ---- Disable default agents configuration ----
-  // When enabled, the three hardcoded default agents (Worker, Explorer,
-  // Reviewer) are not registered. User-defined agents from project/global custom
-  // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
-  // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
-  // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
-  // needs it; this wrapper just re-registers after flipping it.
-  function setDisableDefaultAgents(b: boolean): void {
-    setDefaultsDisabled(b);
-    reloadCustomAgents(); // re-register with new setting
-  }
-
   // ---- Agent tool description mode ----
   // "full" (default) keeps the rich Claude Code-style description; "compact"
   // swaps in a ~75% smaller one for small/local models (#91). Read once at
@@ -1448,6 +1431,7 @@ export default function (pi: ExtensionAPI) {
   /** Build the full type list text dynamically from available agents only. */
   const buildTypeListText = () => {
     const available = getAvailableTypes();
+    if (available.length === 0) return "No agents configured. Define an agent in .pi/agents/, .agents/agents/, or the global agent directory before delegating.";
 
     return available.map((name) => {
       const cfg = getAgentConfig(name);
@@ -1468,7 +1452,7 @@ export default function (pi: ExtensionAPI) {
     getAvailableTypes().map((name) => {
       const cfg = getAgentConfig(name);
       return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
-    }).join("\n");
+    }).join("\n") || "No agents configured. Define an agent in .pi/agents/ before delegating.";
 
   /** Derive a short model label from a model string. */
   function getModelLabelFromConfig(model: string): string {
@@ -1492,7 +1476,6 @@ export default function (pi: ExtensionAPI) {
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
-      setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setAgentMentions: setAgentMentionMode,
@@ -1502,7 +1485,7 @@ export default function (pi: ExtensionAPI) {
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setWorkflowsEnabled: setWorkflowsEnabled,
       setMaxSubagentDepth: setMaxSubagentDepth,
-      setFallbackSubagent: setFallbackSubagent,
+      setDefaultAgent,
       setReportUsage,
       setShowCost,
       setShowModel,
@@ -1571,7 +1554,7 @@ Notes:
 Available agent types and the tools they have access to:
 ${buildTypeListText()}
 
-Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
+Agents must be defined in .pi/agents/<name>.md, .agents/agents/<name>.md (project), or ${getAgentDir()}/agents/<name>.md (global). Project-level agents override global ones. No built-in agents or implicit fallback are registered. Unknown or disabled types are rejected.
 
 When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
@@ -1593,8 +1576,8 @@ For known paths and simple lookups, use direct read/grep/find tools. Choose the 
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- Select by actual capabilities, not just the role name. Explorer and Reviewer defaults have no shell, web, extension, or editing tools; provide necessary diffs, command output, and external references.
-- Assign each Worker a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
+- Select by the user's configured capabilities, not role names. Tools, extensions, skills, and models belong to each agent definition; provide missing inputs when necessary.
+- Assign each execution delegate a bounded responsibility and acceptance criteria. Keep one writer per checkout, including yourself; do not revert others' work or duplicate delegated investigation.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
@@ -1693,7 +1676,7 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. All built-in agents inherit the parent model unless this is set. A custom agent file with an explicit model takes precedence. Accepts "provider/modelId" or a fuzzy name.',
+            'Optional model override. Inherits the parent model unless selected here or in the agent file. Explicit agent configuration takes precedence. Accepts "provider/modelId" or a fuzzy name.',
         }),
       ),
       thinking: Type.Optional(
@@ -1858,30 +1841,14 @@ Terse command-style prompts produce shallow, generic work.
       reloadCustomAgents();
 
       const rawType = params.subagent_type as SubagentType;
-      // Single decision point for dispatch (#183): unknown, disabled and
-      // case-ambiguous types are refused here, BEFORE anything spawns, so a
-      // background or scheduled call can't start running the wrong agent while
-      // the caller is still unaware. `fallbackSubagent` decides whether an
-      // unresolvable type falls back or fails closed.
+      // Reject unknown, disabled, or ambiguous types before any side effects.
       const dispatch = resolveSpawnType(rawType);
       // `resume` replays a stored session and ignores `subagent_type` entirely,
       // but the parameter is required by the schema — so gating it here would
       // make a live agent unresumable the moment its type is deleted, disabled,
       // or gains a case-clashing sibling. Only a real spawn is gated.
-      if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
+      if (!dispatch.ok && !params.resume) throw new Error(dispatch.message);
       const subagentType = dispatch.ok ? dispatch.type : rawType;
-      // What the caller actually asked for, named once: `fellBackFrom` is "" for
-      // a blank request, so reading it inline invites the `??`-vs-`||` slip that
-      // once persisted an empty type into a scheduled job.
-      const requestedType = (dispatch.ok && dispatch.fellBackFrom) || subagentType;
-      // Computed at resolution rather than after the run, so the background and
-      // schedule branches carry it too — previously it existed only on the
-      // foreground path. Resume deliberately doesn't: it replays the stored
-      // session and ignores `subagent_type` entirely, so a note about type
-      // substitution would be describing something that didn't happen.
-      const fallbackNote = dispatch.ok && dispatch.fellBackFrom !== undefined
-        ? `Note: Unknown agent type "${dispatch.fellBackFrom}" — using ${resolveType(subagentType) ? subagentType : "the fallback agent config"}.\n\n`
-        : "";
 
       const displayName = getDisplayName(subagentType);
 
@@ -2032,9 +1999,8 @@ Terse command-style prompts produce shallow, generic work.
             name: params.description as string,
             description: params.description as string,
             schedule: params.schedule as string,
-            // The caller's own name, not the substitute — the scheduler re-resolves
-            // at fire time, and the original is what a user edits.
-            subagent_type: requestedType,
+            // Store the resolved user type; the scheduler validates it again at fire time.
+            subagent_type: subagentType,
             prompt: params.prompt as string,
             model: params.model as string | undefined,
             thinking: thinking,
@@ -2044,7 +2010,7 @@ Terse command-style prompts produce shallow, generic work.
           });
           const next = scheduler.getNextRun(job.id);
           return textResult(
-            `${fallbackNote}Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
+            `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
             `Next run: ${next ?? "(unknown)"}. ` +
             `Manage via /agents → Scheduled jobs.`,
           );
@@ -2202,7 +2168,7 @@ Terse command-style prompts produce shallow, generic work.
 
         const isQueued = record?.status === "queued";
         return textResult(
-          `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
+          `Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
@@ -2343,7 +2309,7 @@ Terse command-style prompts produce shallow, generic work.
 
       if (record.status === "error") {
         // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -2354,7 +2320,7 @@ Terse command-style prompts produce shallow, generic work.
         if (costText) statsParts.push(costText);
       }
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
+        `Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
         (record.result?.trim() || "No output."),
         details,
       );
@@ -2708,6 +2674,7 @@ Terse command-style prompts produce shallow, generic work.
       const result = await runWorkflow({
         script: task.script,
         args: task.args,
+        defaultAgent: task.defaultAgent,
         signal: task.abortController.signal,
         host: createWorkflowHost({
           pi,
@@ -2959,6 +2926,8 @@ Terse command-style prompts produce shallow, generic work.
             ? { kind: "inline" as const, label: "inline script" }
             : { kind: "path" as const, label: `resumed script path: ${resolved.scriptPath ?? resumeFrom?.scriptPath ?? "unknown"}` };
       const nestedWorkflowCall = hasNestedWorkflowCall(resolved.script);
+      reloadCustomAgents();
+      const defaultAgent = getDefaultAgent();
       if (nestedWorkflowCall && ctx.hasUI) {
         return textResult(
           "Interactive workflows with nested workflow() behavior cannot be approved from a top-level preview, including saved named parents. Flatten or split the orchestration so every child prompt, gate, and isolation option is visible in one approval.",
@@ -2991,6 +2960,7 @@ Terse command-style prompts produce shallow, generic work.
         }
         const approvalText = formatDirectWorkflowApproval({
           args: params.args,
+          defaultAgent,
           meta,
           script: resolved.script,
           source: selectedDirectSource.label,
@@ -3048,6 +3018,7 @@ Terse command-style prompts produce shallow, generic work.
           scriptPath: resolved.scriptPath ?? savedPath,
           args: params.args,
           meta,
+          defaultAgent,
           toolCallId,
           taskExecutionRef,
           sessionId,
@@ -3233,11 +3204,13 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const sessionId = ctx.sessionManager.getSessionId();
+    reloadCustomAgents();
     const task = createWorkflowTask({
       id: workflowRunId(),
       script,
       scriptPath: path,
       meta,
+      defaultAgent: getDefaultAgent(),
       sessionId,
       cwd: ctx.cwd,
       artifactSessionId: ctx.sessionManager.getSessionFile?.() ? sessionId : undefined,
@@ -3552,7 +3525,7 @@ Terse command-style prompts produce shallow, generic work.
       };
     });
 
-    const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
+    const hasCustom = allNames.some(n => getAgentConfig(n)?.enabled !== false);
     const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
     const legendParts: string[] = [];
     if (hasCustom) legendParts.push("• = project  ◦ = global");
@@ -3652,25 +3625,9 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const file = locateAgentFile(name, cfg.sourcePath);
-    const isDefault = cfg.isDefault === true;
     const disabled = cfg.enabled === false;
 
-    let menuOptions: string[];
-    if (disabled && file) {
-      // Disabled agent with a file — offer Enable
-      menuOptions = isDefault
-        ? ["Enable", "Edit", "Reset to default", "Delete", "Back"]
-        : ["Enable", "Edit", "Delete", "Back"];
-    } else if (isDefault && !file) {
-      // Default agent with no .md override
-      menuOptions = ["Eject (export as .md)", "Disable", "Back"];
-    } else if (isDefault && file) {
-      // Default agent with .md override (ejected)
-      menuOptions = ["Edit", "Disable", "Reset to default", "Delete", "Back"];
-    } else {
-      // User-defined agent
-      menuOptions = ["Edit", "Disable", "Delete", "Back"];
-    }
+    const menuOptions = ["Edit", disabled ? "Enable" : "Disable", "Delete", "Back"];
 
     const choice = await ctx.ui.select(name, menuOptions);
     if (!choice || choice === "Back") return;
@@ -3679,7 +3636,6 @@ Terse command-style prompts produce shallow, generic work.
       const content = readFileSync(file.path, "utf-8");
       const edited = await ctx.ui.editor(`Edit ${name}`, content);
       if (edited !== undefined && edited !== content) {
-        const { writeFileSync } = await import("node:fs");
         writeFileSync(file.path, edited, "utf-8");
         reloadCustomAgents();
         ctx.ui.notify(`Updated ${file.path}`, "info");
@@ -3693,15 +3649,6 @@ Terse command-style prompts produce shallow, generic work.
           ctx.ui.notify(`Deleted ${file.path}`, "info");
         }
       }
-    } else if (choice === "Reset to default" && file) {
-      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
-      if (confirmed) {
-        unlinkSync(file.path);
-        reloadCustomAgents();
-        ctx.ui.notify(`Restored default ${name}`, "info");
-      }
-    } else if (choice.startsWith("Eject")) {
-      await ejectAgent(ctx, name, cfg);
     } else if (choice === "Disable") {
       await disableAgent(ctx, name);
     } else if (choice === "Enable") {
@@ -3709,32 +3656,7 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
-  /** Eject a default agent: write its embedded config as a .md file. */
-  async function ejectAgent(ctx: ExtensionCommandContext, name: string, cfg: AgentConfig) {
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
-      if (!overwrite) return;
-    }
-
-    const content = serializeAgentFile(cfg);
-
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, content, "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
-  }
-
-  /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
+  /** Disable an agent by updating its definition. */
   async function disableAgent(ctx: ExtensionCommandContext, name: string) {
     const file = locateAgentFile(name, getAgentConfig(name)?.sourcePath);
     if (file) {
@@ -3751,28 +3673,13 @@ Terse command-style prompts produce shallow, generic work.
         ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
         return;
       }
-      const { writeFileSync } = await import("node:fs");
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
       ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
       return;
     }
 
-    // No file (built-in default) — create a stub
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
+    ctx.ui.notify(`Agent definition not found for ${name}; reload or recreate its file.`, "warning");
   }
 
   /** Enable a disabled agent by removing enabled: false from its frontmatter. */
@@ -3782,24 +3689,15 @@ Terse command-style prompts produce shallow, generic work.
 
     const content = readFileSync(file.path, "utf-8");
     const { content: updated, changed } = enableInContent(content);
-    if (!changed && !isEmptyStub(updated)) {
+    if (!changed) {
       // The file carries no `enabled: false` to remove, so it was never disabled
       // by us — reporting success here would hide a no-op.
       ctx.ui.notify(`${name} is not disabled in ${file.path}.`, "info");
       return;
     }
-    const { writeFileSync } = await import("node:fs");
-
-    // If the file was just a stub ("---\n---\n"), delete it to restore the built-in default
-    if (isEmptyStub(updated)) {
-      unlinkSync(file.path);
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
-    } else {
-      writeFileSync(file.path, updated, "utf-8");
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
-    }
+    writeFileSync(file.path, updated, "utf-8");
+    reloadCustomAgents();
+    ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
   }
 
   async function showCreateWizard(ctx: ExtensionCommandContext) {
@@ -3812,7 +3710,7 @@ Terse command-style prompts produce shallow, generic work.
     const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
 
     const method = await ctx.ui.select("Creation method", [
-      "Generate with Claude (recommended)",
+      "Generate with an existing agent",
       "Manual configuration",
     ]);
     if (!method) return;
@@ -3825,6 +3723,13 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string) {
+    const available = getAvailableTypes();
+    if (available.length === 0) {
+      ctx.ui.notify("No agents configured. Use Manual configuration or copy an example into .pi/agents/ first.", "warning");
+      return;
+    }
+    const executor = await ctx.ui.select("Agent to generate the definition (requires file-writing tools)", available);
+    if (!executor) return;
     const description = await ctx.ui.input("Describe what this agent should do");
     if (!description) return;
 
@@ -3889,7 +3794,7 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const { record } = await manager.spawnAndWait(pi, ctx, "Worker", generatePrompt, {
+    const { record } = await manager.spawnAndWait(pi, ctx, executor, generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
       // Exempt from maxConcurrentForeground. This runs from a modal wizard, not
@@ -3984,7 +3889,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       if (!overwrite) return;
     }
 
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Created ${targetPath}`, "info");
@@ -4013,7 +3917,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
       strictAgentFiles,
-      disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
@@ -4026,15 +3929,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // writing it here would let an unrelated settings change three menus away
       // freeze it into the file as an explicit `false`, which then survives
       // uninstalling the extension it was deferring to. undefined is dropped by
-      // JSON.stringify, so unset stays unset — same reasoning as
-      // `fallbackSubagent` below.
+      // JSON.stringify, so unset stays unset.
       workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : undefined,
       maxSubagentDepth: getMaxSubagentDepth(),
-      // Deliberately NOT `?? "Worker"`: every settings change writes the
-      // whole snapshot, and materializing the implicit default would turn it into
-      // explicit configuration — which then fails loudly if Worker later
-      // goes away. undefined is dropped by JSON.stringify.
-      fallbackSubagent: getFallbackSubagent(),
+      // Persist an explicit clear so a global default cannot reappear on reload.
+      defaultAgent: getDefaultAgent() ?? "",
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
@@ -4064,13 +3963,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
-      // Label what unset actually does — it targets Worker even when
-      // that is unregistered (the permissive hardcoded tier), so showing "none"
-      // there would advertise strict dispatch for the most permissive state.
-      // `values` still offers only resolvable targets, so the user cannot
-      // persist a fallback that would hard-error on every dispatch.
-      const fallbackValue = getFallbackSubagent() ?? "Worker";
-      const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
 
       return [
         {
@@ -4153,18 +4045,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "disableDefaultAgents",
-          label: "Disable defaults",
-          description: "Hide built-in agents (Worker, Explorer, Reviewer) — custom agents are unaffected",
-          currentValue: isDefaultsDisabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "fallbackSubagent",
-          label: "Fallback agent",
-          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
-          currentValue: fallbackValue,
-          values: fallbackValues,
+          id: "defaultAgent",
+          label: "Default workflow agent",
+          description: "User-defined agent for workflow calls that omit agentType. Empty means an explicit agentType is required; unknown names never fall back.",
+          currentValue: getDefaultAgent() ?? "",
+          values: ["", ...getAvailableTypes()],
         },
         {
           id: "outputTranscript",
@@ -4339,18 +4224,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         strictAgentFiles = enabled;
         notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
-      } else if (id === "disableDefaultAgents") {
-        const enabled = value === "on";
-        setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
-      } else if (id === "fallbackSubagent") {
-        setFallbackSubagent(value);
-        notifyApplied(
-          ctx,
-          value === NO_FALLBACK
-            ? "Unknown or disabled agent types will now be rejected"
-            : `Unknown agent types will fall back to ${value}`,
-        );
+      } else if (id === "defaultAgent") {
+        setDefaultAgent(value);
+        notifyApplied(ctx, value ? `Default workflow agent set to ${value}` : "Workflow calls require an explicit agentType");
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
         setOutputTranscriptDefault(enabled);

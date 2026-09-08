@@ -67,7 +67,7 @@ describe.skipIf(LIVE)("maxConcurrentForeground e2e (real pi agent loop)", () => 
     let maxInFlight = 0;
     const order: string[] = [];
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate two independent jobs and report both.",
       cwd: projectDir(settings),
       live: false, // scripted on purpose: a real model may not emit both calls

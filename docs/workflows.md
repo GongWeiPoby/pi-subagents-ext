@@ -6,6 +6,8 @@ For reusable natural-language guidance that the main coordinator adapts with ord
 
 ## What a workflow is
 
+There are no built-in agents. Define agents first, then pass `agentType` on each `agent()` call or configure `defaultAgent` in `subagents.json` to name an enabled user agent. The examples below that omit `agentType` require that explicit setting. Unknown or disabled names never fall back to another role. The default is captured before approval/start and displayed in the approval; changing it invalidates journal replay for calls that used it.
+
 `SubagentWorkflow` runs a JavaScript program that coordinates many subagents. The script can discover a list through one child, loop over it, branch on text results, pipeline items through stages, retry a child, run shell gates, or compose a saved script. The script itself has no filesystem, network, or module access; all real work happens in its child agents or in host-provided gates.
 
 Use the ordinary `Agent` tool for one delegated task or a small set of calls the main coordinator can choose directly. Use `SubagentWorkflow` only when the user explicitly asks for deterministic scripted control flow or a named JavaScript workflow. A Playbook may suggest a script when that is appropriate, but Markdown guidance never silently becomes generated JavaScript.
@@ -144,7 +146,7 @@ Use exactly one source among `script`, `scriptPath`, and `name`. A resume may om
 |---|---|---|
 | `label` | string | Display label and the name used by `resume` |
 | `phase` | string | Explicit progress group, useful inside `pipeline` or `parallel` stages |
-| `agentType` | string | Agent definition; defaults to `Worker` |
+| `agentType` | string | User-defined agent; required unless `defaultAgent` is explicitly configured. Resume keeps the original type |
 | `model` | string | Provider/model ID or fuzzy model name |
 | `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `isolation` | `"worktree"` | Run the child in an isolated git worktree; changes are preserved on a branch when it settles |

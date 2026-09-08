@@ -82,7 +82,7 @@ function stubHost(options?: {
 }
 
 function run(body: string, options: Omit<RunWorkflowOptions, "script">): Promise<WorkflowRunResult> {
-  return runWorkflow({ script: HEAD + body, ...options });
+  return runWorkflow({ defaultAgent: "Worker", script: HEAD + body, ...options });
 }
 
 const agentEntries = (progress: readonly WorkflowEntry[]): WorkflowAgentEntry[] =>

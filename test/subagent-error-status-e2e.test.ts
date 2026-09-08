@@ -40,7 +40,7 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
   });
 
   it("a run whose ONLY turn errors with no output is a failure, not an empty success", async () => {
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate.",
       respond: routeBySession({
         parentInitial: agentCall({ run_in_background: false, description: "doomed", prompt: "Do work." }),
@@ -59,7 +59,7 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
   });
 
   it("an earlier turn's text must not mask a failed final turn as a fresh success", async () => {
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate.",
       respond: routeBySession({
         parentInitial: agentCall({ run_in_background: false, description: "masked", prompt: "Do work." }),
@@ -91,7 +91,7 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
   });
 
   it("a pure empty-error run shows no 'partial output' section", async () => {
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate.",
       respond: routeBySession({
         parentInitial: agentCall({ run_in_background: false, description: "empty", prompt: "Do work." }),

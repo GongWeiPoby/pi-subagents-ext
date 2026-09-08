@@ -1,3 +1,4 @@
+import { TEST_AGENTS } from "./helpers/agents.js";
 /**
  * workflow-effective-config.test.ts — the host half of #168/#182 for workflows.
  *
@@ -83,7 +84,7 @@ describe("the workflow host reports a child's effective configuration", () => {
 
   beforeEach(() => {
     vi.mocked(runAgent).mockReset();
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     manager = new AgentManager();
   });
 

@@ -333,34 +333,36 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
-    it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
-      // Only the boolean needs an alias: it would otherwise be dropped, leaving
-      // the PERMISSIVE default while the author believed strict was on. Every
-      // string stays an agent name, so a mistaken "off" fails loudly at dispatch
-      // instead of meaning one thing here and another in the resolver.
-      for (const spelling of ["none", "NONE", " none ", false]) {
-        writeProject({ fallbackSubagent: spelling });
-        expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+    it("treats every nonempty defaultAgent string as a user-defined name", () => {
+      for (const spelling of ["none", "NONE", " none "]) {
+        writeProject({ defaultAgent: spelling });
+        expect(loadSettings(projectDir).defaultAgent?.toLowerCase()).toBe("none");
       }
-      writeProject({ fallbackSubagent: "off" });
-      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+      writeProject({ defaultAgent: "off" });
+      expect(loadSettings(projectDir)).toEqual({ defaultAgent: "off" });
     });
 
     it("drops values that aren't a string or `false`, without coercing them", () => {
       // String(["none"]) is "none" — coercing would silently enable strict mode.
       for (const junk of [["none"], null, 42, true, {}]) {
-        writeProject({ fallbackSubagent: junk });
+        writeProject({ defaultAgent: junk });
         expect(loadSettings(projectDir)).toEqual({});
       }
     });
 
     it("keeps a named fallback agent and drops non-strings", () => {
-      writeProject({ fallbackSubagent: "  my-router  " });
-      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
-      writeProject({ fallbackSubagent: 42 });
+      writeProject({ defaultAgent: "  my-router  " });
+      expect(loadSettings(projectDir)).toEqual({ defaultAgent: "my-router" });
+      writeProject({ defaultAgent: 42 });
       expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ fallbackSubagent: "   " });
-      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ defaultAgent: "   " });
+      expect(loadSettings(projectDir)).toEqual({ defaultAgent: "" });
+    });
+
+    it("lets an empty project default override a global default", () => {
+      writeGlobal({ defaultAgent: "global-writer" });
+      writeProject({ defaultAgent: "" });
+      expect(loadSettings(projectDir)).toEqual({ defaultAgent: "" });
     });
 
     it("drops invalid defaultJoinMode values", () => {
@@ -409,11 +411,11 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
     });
 
-    it("accepts disableDefaultAgents boolean (true and false)", () => {
+    it("ignores the removed disableDefaultAgents setting", () => {
       writeProject({ disableDefaultAgents: true });
-      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
+      expect(loadSettings(projectDir)).toEqual({});
       writeProject({ disableDefaultAgents: false });
-      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: false });
+      expect(loadSettings(projectDir)).toEqual({});
     });
 
     it("drops non-boolean disableDefaultAgents", () => {
@@ -541,7 +543,6 @@ describe("settings persistence", () => {
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
-        setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
@@ -551,7 +552,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
-        setFallbackSubagent: vi.fn(),
+        setDefaultAgent: vi.fn(),
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
@@ -599,15 +600,15 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
-      expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
+      expect(appliers.setDefaultAgent).toHaveBeenCalledWith(undefined);
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
     });
 
-    it("applies fallbackSubagent through to the registry", () => {
+    it("applies defaultAgent through to the registry", () => {
       // Without this, deleting the applySettings line for this field leaves the
       // whole suite green while `subagents.json` silently stops working.
-      applySettings({ fallbackSubagent: "none" }, appliers);
-      expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
+      applySettings({ defaultAgent: "none" }, appliers);
+      expect(appliers.setDefaultAgent).toHaveBeenCalledWith("none");
     });
 
     it("applies only the fields that are present", () => {
@@ -630,7 +631,6 @@ describe("settings persistence", () => {
           defaultJoinMode: "group",
           schedulingEnabled: false,
           scopeModels: true,
-          disableDefaultAgents: true,
           toolDescriptionMode: "compact",
           fleetView: false,
           widgetMode: "off",
@@ -644,7 +644,6 @@ describe("settings persistence", () => {
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
       expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
-      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
@@ -697,9 +696,10 @@ describe("settings persistence", () => {
       expect(appliers.setScopeModels).toHaveBeenCalledWith(false);
     });
 
-    it("applies disableDefaultAgents: false", () => {
-      applySettings({ disableDefaultAgents: false }, appliers);
-      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(false);
+    it("clears a previous defaultAgent when the next configuration omits it", () => {
+      applySettings({ defaultAgent: "writer" }, appliers);
+      applySettings({}, appliers);
+      expect(appliers.setDefaultAgent).toHaveBeenLastCalledWith(undefined);
     });
 
     it("applies toolDescriptionMode", () => {
@@ -792,7 +792,6 @@ describe("settings persistence", () => {
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
-        setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
@@ -802,7 +801,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
-        setFallbackSubagent: vi.fn(),
+        setDefaultAgent: vi.fn(),
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),

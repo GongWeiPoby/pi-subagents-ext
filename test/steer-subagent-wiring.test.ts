@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 /**
  * steer-subagent-wiring.test.ts — the steer_subagent path that can silently
  * swallow user input.

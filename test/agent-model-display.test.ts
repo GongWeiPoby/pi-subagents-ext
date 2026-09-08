@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_AGENTS, writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -101,6 +102,7 @@ beforeEach(() => {
   originalCwd = process.cwd();
   cwd = mkdtempSync(join(tmpdir(), "agent-model-display-"));
   process.chdir(cwd);
+    writeTestAgentFiles(join(cwd, ".pi", "agents"));
   // A developer's own ~/.pi agents and settings would otherwise leak in.
   originalAgentDir = process.env.PI_CODING_AGENT_DIR;
   originalHome = process.env.HOME;
@@ -115,7 +117,7 @@ afterEach(() => {
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
   if (originalHome == null) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  registerAgents(new Map());
+  registerAgents(TEST_AGENTS);
   rmSync(cwd, { recursive: true, force: true });
   vi.restoreAllMocks();
 });

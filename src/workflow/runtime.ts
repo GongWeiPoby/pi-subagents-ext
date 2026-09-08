@@ -305,6 +305,8 @@ export interface RunWorkflowOptions {
   script: string;
   args?: unknown;
   host: WorkflowHost;
+  /** Explicit user-selected type for agent() calls that omit agentType. */
+  defaultAgent?: string;
   signal?: AbortSignal;
   /** Fired with a complete, detached snapshot whenever one physical child attempt changes. */
   onAttempt?(attempt: WorkflowChildAttempt): void;
@@ -937,13 +939,18 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         respond(callId, false, undefined, `Workflow exceeded its cap of ${agentCap} agents.`, true);
         return;
       }
+      const agentType = resumed?.agentType ?? payload.agentType ?? options.defaultAgent;
+      if (!agentType?.trim()) {
+        respond(callId, false, undefined,
+          "agent() requires an explicit agentType or a user-configured defaultAgent. Define an agent first; there are no built-in agents.", true);
+        return;
+      }
       const index = agentCount++;
       // A resumed call is the same child again: it keeps the agent id, so an
       // abort still reaches it, and it keeps its spawn contract, so the row
       // reads the same as the row it continues.
       const agentId = resumed?.agentId ?? `wf-agent-${index}`;
       const label = payload.label ?? resumed?.label ?? derivedLabel(payload.prompt);
-      const agentType = resumed?.agentType ?? payload.agentType ?? "Worker";
       const model = resumed !== undefined ? resumed.model : payload.model;
       const isolation = resumed !== undefined ? resumed.isolation : payload.isolation;
       openLaunches.set(callId, label);
@@ -979,7 +986,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       // running, so it must not hold a concurrency slot that a live agent
       // could use. The row still appears in the tree — the run reads as the
       // same shape it had the first time, just faster.
-      const keyInput: JournalKeyInput = payload;
+      // A changed default must not replay results from a different agent type.
+      const keyInput: JournalKeyInput = { ...payload, agentType };
       const replayed = replayAt(index, journalKey(keyInput));
       if (replayed !== undefined) {
         replayedCount++;

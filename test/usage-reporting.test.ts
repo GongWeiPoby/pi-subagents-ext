@@ -11,6 +11,7 @@
  * without throwing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -49,7 +50,7 @@ describe("reporting subagent usage back to the parent session", () => {
   let hermetic: Hermetic;
 
   function boot(settings: Record<string, unknown>) {
-    hermetic = hermeticDir({ settings });
+    hermetic = hermeticDir({ testAgents: true, settings });
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     return { pi, tools, lifecycle };
@@ -62,7 +63,7 @@ describe("reporting subagent usage back to the parent session", () => {
 
   afterEach(() => {
     delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     hermetic?.restore();
   });
 

@@ -47,7 +47,7 @@ function recorder() {
 }
 
 const run = (body: string, options: Record<string, unknown>) =>
-  runWorkflow({ script: HEAD + body, ...(options as any) });
+  runWorkflow({ defaultAgent: "Worker", script: HEAD + body, ...(options as any) });
 
 describe("journalKey", () => {
   it("is stable for the same call and different for a changed prompt", () => {
@@ -140,8 +140,8 @@ describe("replay", () => {
     expect(journal.entries).toEqual([
       // Keyed on what the script asked for, not on what the runtime derived —
       // the label here was derived from the prompt, so it is not part of it.
-      { index: 0, key: journalKey({ prompt: "first" }), ok: true, text: "live:first" },
-      { index: 1, key: journalKey({ prompt: "second" }), ok: true, text: "live:second" },
+      { index: 0, key: journalKey({ prompt: "first", agentType: "Worker" }), ok: true, text: "live:first" },
+      { index: 1, key: journalKey({ prompt: "second", agentType: "Worker" }), ok: true, text: "live:second" },
     ]);
   });
 
@@ -161,7 +161,7 @@ describe("replay", () => {
     await run(body, { host: firstHost, journal: first });
     expect(first.entries).toEqual([{
       index: 0,
-      key: journalKey({ prompt: "first", gate: "npm test" }),
+      key: journalKey({ prompt: "first", gate: "npm test", agentType: "Worker" }),
       ok: true,
       text: "live:first",
     }]);
@@ -197,7 +197,7 @@ describe("replay", () => {
     });
     expect(first.entries[0]).toEqual({
       index: 0,
-      key: journalKey({ prompt: "first", gate: "npm test" }),
+      key: journalKey({ prompt: "first", gate: "npm test", agentType: "Worker" }),
       ok: false,
     });
 

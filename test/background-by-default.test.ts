@@ -1,3 +1,7 @@
+import { useTestAgents } from "./helpers/boot-extension.js";
+
+useTestAgents();
+
 /**
  * background-by-default.test.ts — the `backgroundByDefault` flip, asserted at
  * the tool boundary rather than at the resolver.

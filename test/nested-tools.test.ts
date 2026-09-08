@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { getAvailableTypes, registerAgents, setDefaultAgent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
@@ -362,7 +362,7 @@ describe("child-safe nested Agent tools", () => {
     // The contract nested delegation documents is "rejected rather than falling
     // back" — a top-level fallback must not hand a nested caller an agent its
     // allowlist never named.
-    setFallbackSubagent("scout");
+    setDefaultAgent("scout");
     try {
       const [agent] = tools(["scout"]);
       const result = await execute(agent, {
@@ -375,7 +375,7 @@ describe("child-safe nested Agent tools", () => {
       expect(result.content[0].text).toContain("Unknown or disabled nested agent type");
       expect(spawnAndWait).not.toHaveBeenCalled();
     } finally {
-      setFallbackSubagent(undefined);
+      setDefaultAgent(undefined);
     }
   });
 

@@ -4,6 +4,8 @@ Another pi extension can spawn a top-level subagent, listen for completion, cons
 
 The bus is in-process. Requests and replies are synchronous event-bus traffic, although handlers may complete asynchronously. This is why function values and an `AbortSignal` can work in a spawn payload, and why none of this is a process-boundary protocol.
 
+Every spawn must name an enabled user-defined agent. No built-in roster or fallback exists. Unknown, disabled, ambiguous, and missing types return an error before execution, including when `defaultAgent` is configured for workflows. On an empty installation, the error includes file-creation guidance.
+
 ## Protocol and envelopes
 
 Protocol v4 uses the same reply envelope for every request:
@@ -77,7 +79,7 @@ Every failure is returned as `{ success: false, error }`, using the error messag
 | `Model override "<label>" provided but ctx.modelRegistry is unavailable` | A model override was supplied without a registry |
 | `Model not found: "<input>."` plus available models | Model resolution failed |
 | `Model not in scope: "<input>."` plus allowed models | `scopeModels` rejected a caller-supplied model |
-| `Unknown or disabled agent type: "<raw>". Available: <list>.` | Strict fallback dispatch rejected the type |
+| `Unknown or disabled agent type: "<raw>". Available: <list>.` plus setup guidance | Strict dispatch rejected the type |
 | `No agent type given. Available: <list>.` | Strict dispatch received no type |
 | `SpawnOptions.cwd must be an absolute path: "<value>"` | Invalid working directory |
 | `SpawnOptions.cwd does not exist: "<cwd>"` | Missing working directory |

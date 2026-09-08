@@ -51,7 +51,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   // else would notice pi moving or renaming either getter — the display would
   // just quietly go blank, which is the bug this whole area exists to fix.
   it("records the model and thinking level the child session actually resolved", async () => {
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
         parentInitial: agentCall({
@@ -82,7 +82,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   });
 
   it("spawns a FOREGROUND subagent and routes its real output back to the parent", async () => {
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
         parentInitial: agentCall({
@@ -145,13 +145,13 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     // Control: no hold → the child hasn't run by the time the parent turn ends.
     // `modelCalls` is snapshotted at that moment (it's a plain number on the
     // result), so draining afterwards to tear down cleanly doesn't change it.
-    const noHold = await runPrintMode({ prompt: "go", hold: false, respond });
+    const noHold = await runPrintMode({ testAgents: true, prompt: "go", hold: false, respond });
     const abandonedCalls = noHold.modelCalls;
     await noHold.manager?.waitForAll(); // let the orphan finish before dispose (avoids stale-ctx)
     await noHold.dispose();
 
     // Subject: hold on → child runs to completion before the parent finishes.
-    run = await runPrintMode({ prompt: "go", hold: true, respond });
+    run = await runPrintMode({ testAgents: true, prompt: "go", hold: true, respond });
 
     // Background spawn returns its envelope synchronously either way.
     expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
@@ -175,7 +175,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       `---\ndescription: "Echoes a marker proving its frontmatter prompt reached the child."\n---\n${MARKER}\n`,
     );
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate to the echo-spy agent.",
       cwd, // runner chdir's here so the extension discovers echo-spy.md
       respond: routeBySession({
@@ -210,7 +210,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       `---\ndescription: "Echoes a marker from the .agents/agents workspace dir."\n---\n${MARKER}\n`,
     );
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate to the agents-spy agent.",
       cwd,
       respond: routeBySession({
@@ -245,12 +245,12 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       '---\nname: Painted Agent\ncolor: purple\ndescription: "A colored agent."\n---\nBe brief.\n',
     );
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate to the painted agent.",
       cwd,
       respond: routeBySession({
         parentInitial: agentCall({
-          subagent_type: "painted",
+          subagent_type: "Painted Agent",
           description: "paint",
           prompt: "Report in.",
           run_in_background: false,
@@ -267,14 +267,14 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   });
 
   it("errors clearly when faux mode is given no script", async () => {
-    await expect(runPrintMode({ prompt: "x" })).rejects.toThrow(/provide `respond` or `steps`/);
+    await expect(runPrintMode({ testAgents: true, prompt: "x" })).rejects.toThrow(/provide `respond` or `steps`/);
   });
 
   it("times out with the runner's own descriptive error and restores the environment", async () => {
     const prevCwd = process.cwd();
     // A responder that never resolves — the turn stalls until the wall-clock guard fires.
     await expect(
-      runPrintMode({ prompt: "stall", respond: () => new Promise(() => {}), timeoutMs: 300 }),
+      runPrintMode({ testAgents: true, prompt: "stall", respond: () => new Promise(() => {}), timeoutMs: 300 }),
     ).rejects.toThrow(/print-mode runner timed out after 300ms/);
     // The failure path ran dispose(): cwd and global isolation were restored even
     // though the caller never received a dispose handle.
@@ -314,7 +314,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   it(
     "FOREGROUND spawn — real model spawns a subagent and reports its output",
     async () => {
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt:
           "Use the Agent tool to spawn a Worker subagent (run_in_background: false) " +
           "whose only task is to reply with the exact word PONG, then tell me what it replied.",
@@ -332,7 +332,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   it(
     "BACKGROUND spawn + get_subagent_result — model backgrounds work then retrieves it",
     async () => {
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt:
           "Spawn a Worker subagent IN THE BACKGROUND (run_in_background: true) whose " +
           "only task is to reply with the exact word BGPONG. After it finishes, use the " +
@@ -354,7 +354,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   it(
     "Explorer subagent_type — model dispatches a non-default agent type",
     async () => {
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt:
           "Use the Agent tool with subagent_type 'Explorer' to look at the current working " +
           "directory and report a one-line summary of what's there.",
@@ -376,7 +376,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // Agent-driven (not puppeted): one prompt, the model itself exercises three
       // Agent capabilities in a single session and self-reports. We then assert it
       // genuinely invoked each feature (not just that it claimed to in prose).
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt: [
           "You are smoke-testing your own Agent toolset. Do these steps IN ORDER, then print a",
           "final report with one PASS/FAIL line per step:",

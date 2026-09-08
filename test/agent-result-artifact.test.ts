@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -51,7 +52,7 @@ describe("AgentManager result artifacts", () => {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(dirname(taskDir), { recursive: true, force: true });
     vi.clearAllMocks();
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     setOutputTranscriptDefault(true);
   });
 
@@ -206,7 +207,7 @@ describe("AgentManager result artifacts", () => {
     expect(record.artifactStatus).toBe("metadata-only");
     expect(readFileSync(record.resultArtifactPath!, "utf-8")).not.toContain("frontmatter-hidden");
 
-    registerAgents(new Map());
+    registerAgents(TEST_AGENTS);
     setOutputTranscriptDefault(false);
     const defaultId = manager.spawn(mockPi, ctx(), "no-config", "go", {
       description: "project policy",

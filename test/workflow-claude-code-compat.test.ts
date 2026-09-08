@@ -48,7 +48,7 @@ describe("a Claude Code script, text-only compatibility", () => {
       abortAgent() {},
     };
 
-    const result = await runWorkflow({ script: CC_SCRIPT, host });
+    const result = await runWorkflow({ defaultAgent: "Worker", script: CC_SCRIPT, host });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe("completed");
     // 2 dimensions x 2 findings verified, of which the a.ts ones are real.
@@ -65,7 +65,7 @@ describe("a Claude Code script, text-only compatibility", () => {
       },
       abortAgent() {},
     };
-    const result = await runWorkflow({
+    const result = await runWorkflow({ defaultAgent: "Worker",
       script: 'export const meta = { name: "legacy", description: "legacy" };\nreturn await agent("inspect", { schema: { type: "object" } });',
       host,
     });
@@ -95,7 +95,7 @@ describe("the other Claude Code globals", () => {
       "return JSON.stringify([found.length, FLEET, budget.spent()]);",
     ].join("\n");
 
-    const result = await runWorkflow({ script, host });
+    const result = await runWorkflow({ defaultAgent: "Worker", script, host });
     // No target, so the loop never runs and the fallback fleet size is used —
     // which is exactly what those guards were written to do.
     expect(JSON.parse(result.value as string)).toEqual([0, 5, 0]);
@@ -108,6 +108,6 @@ describe("the other Claude Code globals", () => {
       "return doubled;",
     ].join("\n");
 
-    expect((await runWorkflow({ script, host })).value).toBe(42);
+    expect((await runWorkflow({ defaultAgent: "Worker", script, host })).value).toBe(42);
   });
 });

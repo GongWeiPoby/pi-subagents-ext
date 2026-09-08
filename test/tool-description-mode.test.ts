@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 const EXAMPLE_TEMPLATE = fileURLToPath(new URL("../examples/agent-tool-description.md", import.meta.url));
 
@@ -50,7 +51,7 @@ describe("toolDescriptionMode", () => {
   let prevHome: string | undefined;
   let shutdown: (() => Promise<void>) | undefined;
 
-  function setup(settings?: Record<string, unknown>, beforeInstantiate?: () => void) {
+  function setup(settings?: Record<string, unknown>, beforeInstantiate?: () => void, testAgents = true) {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-tooldesc-"));
     // Isolate global settings (getAgentDir / ~/.pi) so the dev's real
     // subagents.json can't leak into the "default is full" assertion.
@@ -61,6 +62,7 @@ describe("toolDescriptionMode", () => {
     process.env.HOME = hermeticAgentDir;
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    if (testAgents) writeTestAgentFiles(join(tmpDir, ".pi", "agents"));
     if (settings) {
       writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify(settings));
     }
@@ -126,7 +128,7 @@ describe("toolDescriptionMode", () => {
     expect(tool.promptSnippet).toContain("only when a separate agent adds value");
   });
 
-  it("advertises exactly the new built-in roles and their tool boundaries", () => {
+  it("advertises the configured fixture agents and their tool boundaries", () => {
     const tool = setup().get("Agent");
     const desc: string = tool.description;
     expect(desc).toContain("- Explorer:");
@@ -137,7 +139,13 @@ describe("toolDescriptionMode", () => {
       expect(desc.split("\n").find(line => line.startsWith(`- ${name}:`)))
         .toContain("(Tools: read, grep, find, ls)");
     }
-    expect(tool.parameters.properties.subagent_type.description).toContain("Explorer, Worker, Reviewer");
+    expect(tool.parameters.properties.subagent_type.description).toContain("Explorer, Reviewer, Worker");
+  });
+
+  it.each(["full", "compact"])("%s advertises setup guidance rather than invented agents on an empty install", (mode) => {
+    const desc = setup({ toolDescriptionMode: mode }, undefined, false).get("Agent").description;
+    expect(desc).toContain("No agents configured");
+    expect(desc).not.toMatch(/^- (?:Explorer|Worker|Reviewer):/m);
   });
 
   it("invalid mode in the settings file is dropped — full description", () => {

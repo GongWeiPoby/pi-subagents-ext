@@ -96,7 +96,7 @@ describe("Workflow end to end", () => {
     const childSystemPrompts: string[] = [];
 
     const cwd = workflowProject();
-    const run = await runPrintMode({
+    const run = await runPrintMode({ testAgents: true,
       prompt: "run the workflow",
       cwd,
       maxModelCalls: 32,
@@ -175,7 +175,7 @@ describe("Workflow end to end", () => {
     );
 
     const childPrompts: string[] = [];
-    const run = await runPrintMode({
+    const run = await runPrintMode({ testAgents: true,
       prompt: "run the saved parent workflow",
       cwd,
       maxModelCalls: 32,
@@ -221,7 +221,7 @@ describe("Workflow end to end", () => {
   it("surfaces a script that fails to parse instead of launching it", async () => {
     const childPrompts: string[] = [];
 
-    const run = await runPrintMode({
+    const run = await runPrintMode({ testAgents: true,
       prompt: "run the broken workflow",
       cwd: workflowProject(),
       maxModelCalls: 12,
@@ -316,7 +316,7 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
         ].join("\n"),
       );
 
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt:
           'Use the SubagentWorkflow tool to run the saved workflow called "live-smoke". ' +
           "Pass it as the `name` parameter — do not write a script of your own. " +
@@ -363,7 +363,7 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
       ].join("\n");
 
       const cwd = liveProject();
-      run = await runPrintMode({
+      run = await runPrintMode({ testAgents: true,
         prompt: [
           "Call the SubagentWorkflow tool once, passing EXACTLY the following script as the",
           "`script` parameter. Do not modify it, do not summarize it, and do not use `name`.",

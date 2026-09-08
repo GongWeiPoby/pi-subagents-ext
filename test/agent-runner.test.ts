@@ -790,8 +790,8 @@ import {
   getConfig,
   getToolNamesForType,
 } from "../src/agent-types.js";
-import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
@@ -1002,7 +1002,7 @@ describe("agent-runner session persistence", () => {
 
 describe("agent-runner embedded delegate boundaries", () => {
   it.each(["Explorer", "Reviewer"])("%s passes a strict read/search allowlist without extensions or skills", async (name) => {
-    const config = DEFAULT_AGENTS.get(name)!;
+    const config = TEST_AGENTS.get(name)!;
     vi.mocked(getConfig).mockReturnValueOnce({
       ...config, displayName: config.name, builtinToolNames: config.builtinToolNames ?? BUILTINS_7,
     });
@@ -1020,7 +1020,7 @@ describe("agent-runner embedded delegate boundaries", () => {
   });
 
   it("Worker retains execution tools and configured extensions without nested delegation", async () => {
-    const config = DEFAULT_AGENTS.get("Worker")!;
+    const config = TEST_AGENTS.get("Worker")!;
     vi.mocked(getConfig).mockReturnValueOnce({
       ...config, displayName: config.name, builtinToolNames: config.builtinToolNames ?? BUILTINS_7,
     });

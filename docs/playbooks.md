@@ -193,16 +193,16 @@ A coordinator should:
 
 For deterministic loops, parallel fan-out, pipelines, retries, shell gates, or named JavaScript composition, the user must explicitly ask for `SubagentWorkflow`; see [Scripted workflows](workflows.md). A Playbook may recommend that option, but it does not invoke or compile it automatically.
 
-## Example
+## Examples
 
-The shipped example is [`examples/playbooks/code-review/WORKFLOW.md`](../examples/playbooks/code-review/WORKFLOW.md). Copy it into a project:
+The shipped examples cover the five curated coordination patterns — `code-review`, `deep-research`, `adversarial-review`, `multi-perspective`, and `codebase-audit` — under [`examples/playbooks/`](../examples/playbooks/). Copy one into a project:
 
 ```bash
 mkdir -p .pi/workflows/code-review
 cp -R examples/playbooks/code-review/. .pi/workflows/code-review/
 ```
 
-Then ask naturally for a code review. The main coordinator can read the Playbook, inspect the change, choose one or several Agent calls and relevant tools or skills, verify the evidence, and synthesize the answer.
+Then ask naturally — "review this diff", "research whether X", "audit src/ for missing auth". The main coordinator reads the Playbook, inspects the target, chooses Agent calls, ordinary tools, or skills proportionate to the evidence, verifies findings, and synthesizes the answer. The Playbook directory names (not the pattern shapes) are the catalogue identities: `deep-research` is web research with cross-checked claims, `adversarial-review` is findings challenged by skeptics, `multi-perspective` is independent lenses reconciled, `codebase-audit` is parallel checks cross-validated against the code.
 
 ## Boundaries
 

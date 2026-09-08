@@ -88,7 +88,7 @@ describe("/agents → Workflows", () => {
 
   // Workflows are opt-in, so every test that expects the feature to exist has
   // to turn it on — the same thing a user does once in /agents → Settings.
-  beforeEach(() => { hermetic = hermeticDir({ settings: { workflowsEnabled: true } }); });
+  beforeEach(() => { hermetic = hermeticDir({ testAgents: true, settings: { workflowsEnabled: true } }); });
   afterEach(() => { hermetic.restore(); });
 
   it("registers no top-level /workflows command", () => {
@@ -110,7 +110,7 @@ describe("/agents → Workflows", () => {
 
   it("hides the entry when workflows are off", async () => {
     hermetic.restore();
-    hermetic = hermeticDir({ settings: { workflowsEnabled: false } });
+    hermetic = hermeticDir({ testAgents: true, settings: { workflowsEnabled: false } });
     const { command } = bootCommand();
     const ui = commandCtx();
 

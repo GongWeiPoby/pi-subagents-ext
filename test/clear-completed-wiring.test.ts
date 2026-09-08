@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -111,6 +112,7 @@ describe("issue #108: unread completed background agents survive session events"
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     process.chdir(tmpDir);
+    writeTestAgentFiles(join(tmpDir, ".pi", "agents"));
   });
 
   afterEach(() => {

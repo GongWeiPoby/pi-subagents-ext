@@ -43,7 +43,7 @@ afterEach(async () => {
 
 /** Boot the real extension with foreground concurrency pinned to one slot. */
 function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({
+  hermetic = hermeticDir({ testAgents: true,
     settings: { outputTranscript: false, maxConcurrentForeground: 1, ...settings },
   });
   const b = makePi();

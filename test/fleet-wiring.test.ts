@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTestAgentFiles } from "./helpers/agents.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -90,6 +91,7 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     // debounce), so fleet.onAgentFinished fires synchronously on the result.
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "async" }));
     process.chdir(tmpDir);
+    writeTestAgentFiles(join(tmpDir, ".pi", "agents"));
   });
 
   afterEach(() => {

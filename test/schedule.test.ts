@@ -1,3 +1,4 @@
+import { TEST_AGENTS } from "./helpers/agents.js";
 /**
  * schedule.test.ts — SubagentScheduler engine.
  *
@@ -14,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { registerAgents, setDefaultAgent } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 
@@ -238,6 +239,7 @@ describe("SubagentScheduler — fire path", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    registerAgents(TEST_AGENTS);
     tmp = mkdtempSync(join(tmpdir(), "scheduler-fire-"));
     store = new ScheduleStore(join(tmp, "s.json"));
     scheduler = new SubagentScheduler();
@@ -252,8 +254,8 @@ describe("SubagentScheduler — fire path", () => {
     vi.useRealTimers();
     // Module-global: restore here, not at the end of a test body, so a failing
     // assertion can't leak strict dispatch into every test that follows.
-    setFallbackSubagent(undefined);
-    registerAgents(new Map());
+    setDefaultAgent(undefined);
+    registerAgents(TEST_AGENTS);
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -273,8 +275,7 @@ describe("SubagentScheduler — fire path", () => {
   it("refuses at fire time when the job's agent type no longer resolves", () => {
     // The registry is what production populates at activation; a job outliving
     // its agent must not silently run something else (#183).
-    registerAgents(new Map());
-    setFallbackSubagent(NO_FALLBACK);
+    registerAgents(TEST_AGENTS);
     const job = scheduler.addJob({
       name: "gone", description: "vanished agent", schedule: "+1s",
       subagent_type: "deleted-since", prompt: "run",

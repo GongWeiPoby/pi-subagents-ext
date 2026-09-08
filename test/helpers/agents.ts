@@ -1,6 +1,9 @@
-/** Embedded task delegates. User agent files with the same name override them. */
+/** Explicit test-only agent definitions. Production has no built-in roster. */
 
-import type { AgentConfig } from "./types.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { serializeAgentFile } from "../../src/agent-file-toggle.js";
+import type { AgentConfig } from "../../src/types.js";
 
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
 
@@ -22,7 +25,7 @@ Use absolute file paths and line numbers for evidence. Distinguish facts from hy
 Follow the requested output format; otherwise use the concise handoff described below.
 No preamble, offers to continue, or invented findings.`;
 
-export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
+export const TEST_AGENTS: Map<string, AgentConfig> = new Map([
   [
     "Explorer",
     {
@@ -46,7 +49,6 @@ ${READ_ONLY_CONTEXT}
 - Evidence: relevant paths, line numbers, symbols, and relationships.
 - Coverage and gaps: what was checked, what was not, and unresolved hypotheses.`,
       promptMode: "replace",
-      isDefault: true,
     },
   ],
   [
@@ -81,7 +83,6 @@ Follow the parent's requested format; otherwise report the result, changed files
 verification performed, and remaining risks or blockers. Be concise and evidence-based.
 Your final message returns to the parent; do not ask the user follow-up questions.`,
       promptMode: "append",
-      isDefault: true,
     },
   ],
   [
@@ -117,7 +118,14 @@ Then state open questions, review coverage, and verification gaps.
 If no issues are found, say so explicitly within the checked scope. No findings is not
 proof of correctness, and code inspection is not a passing test run.`,
       promptMode: "replace",
-      isDefault: true,
     },
   ],
 ]);
+
+/** Explicit fixtures written through the ordinary file-discovery surface. */
+export function writeTestAgentFiles(directory: string): void {
+  mkdirSync(directory, { recursive: true });
+  for (const [name, config] of TEST_AGENTS) {
+    writeFileSync(join(directory, `${name}.md`), serializeAgentFile(config));
+  }
+}

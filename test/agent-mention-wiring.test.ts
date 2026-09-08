@@ -88,7 +88,7 @@ function finishedRun(session: any) {
 
 /** Boot the real extension. `outputTranscript: false` keeps the run off disk. */
 function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings } });
+  hermetic = hermeticDir({ testAgents: true, settings: { outputTranscript: false, ...settings } });
   const b = makePi();
   subagentsExtension(b.pi);
   booted = b.lifecycle;
@@ -206,7 +206,7 @@ describe("messaging a finished agent", () => {
     // settings), and record.outputFile is the sole gate every downstream
     // consumer keys off — so a resume must not be the path that re-enables a
     // transcript the agent's author switched off.
-    hermetic = hermeticDir({
+    hermetic = hermeticDir({ testAgents: true,
       settings: { outputTranscript: true },
       agentFiles: { quiet: "---\ndescription: writes no transcript\noutput_transcript: false\n---\nbody" },
     });
@@ -1122,7 +1122,7 @@ describe("resuming an evicted agent by name", () => {
     // an Explorer transcript under Worker's prompt and tools while
     // announcing "Resuming @scout", then re-tombstone under the substitute so
     // the handle never finds its way back.
-    hermetic = hermeticDir({
+    hermetic = hermeticDir({ testAgents: true,
       settings: { outputTranscript: false },
       agentFiles: { scout: "---\ndescription: scouts\n---\nbody" },
     });
@@ -1153,7 +1153,7 @@ describe("resuming an evicted agent by name", () => {
   it("resumes again once the agent is re-enabled", async () => {
     // So the refusal keeps the tombstone: dropping it would make a temporary
     // `/agents → Disable` permanently lose the conversation.
-    hermetic = hermeticDir({
+    hermetic = hermeticDir({ testAgents: true,
       settings: { outputTranscript: false },
       agentFiles: { scout: "---\ndescription: scouts\nenabled: false\n---\nbody" },
     });

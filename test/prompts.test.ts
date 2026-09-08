@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { getAgentConfig, registerAgents } from "../src/agent-types.js";
 import { buildAgentPrompt } from "../src/prompts.js";
 import type { AgentConfig, EnvInfo } from "../src/types.js";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 const env: EnvInfo = {
   isGitRepo: true,
@@ -15,9 +16,9 @@ const envNoGit: EnvInfo = {
   platform: "linux",
 };
 
-// Initialize default agents
+// Explicit definitions for prompt-builder tests, not production defaults.
 beforeEach(() => {
-  registerAgents(new Map());
+  registerAgents(TEST_AGENTS);
 });
 
 function getDefaultConfig(name: string): AgentConfig {

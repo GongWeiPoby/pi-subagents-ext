@@ -78,7 +78,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
   let hermetic: Hermetic;
 
   beforeEach(() => {
-    hermetic = hermeticDir({ settings: { workflowsEnabled: true } });
+    hermetic = hermeticDir({ testAgents: true, settings: { workflowsEnabled: true } });
     vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
       const session = fakeSession();
       opts.onSessionCreated?.(session as any);

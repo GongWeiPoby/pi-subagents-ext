@@ -59,7 +59,7 @@ function stubHost(
 
 /** Run `body` as a workflow, with `meta` prepended. */
 function run(body: string, options: Omit<RunWorkflowOptions, "script">): Promise<WorkflowRunResult> {
-  return runWorkflow({ script: HEAD + body, ...options });
+  return runWorkflow({ defaultAgent: "Worker", script: HEAD + body, ...options });
 }
 
 const agentEntries = (progress: readonly WorkflowEntry[]): WorkflowAgentEntry[] =>
@@ -781,7 +781,7 @@ describe("caps and validation", () => {
 
   it("rejects a script with control characters", async () => {
     const { host } = stubHost();
-    await expect(runWorkflow({ script: `${HEAD}return "a\u0007b";`, host })).rejects.toThrow(
+    await expect(runWorkflow({ defaultAgent: "Worker", script: `${HEAD}return "a\u0007b";`, host })).rejects.toThrow(
       /control characters/,
     );
   });
@@ -789,12 +789,12 @@ describe("caps and validation", () => {
   it("rejects a script over the size limit", async () => {
     const { host } = stubHost();
     const script = HEAD + `return "${"x".repeat(600_000)}";`;
-    await expect(runWorkflow({ script, host })).rejects.toThrow(/over the limit of 524288/);
+    await expect(runWorkflow({ defaultAgent: "Worker", script, host })).rejects.toThrow(/over the limit of 524288/);
   });
 
   it("rejects a script with no meta block", async () => {
     const { host } = stubHost();
-    await expect(runWorkflow({ script: "return 1;", host })).rejects.toThrow(/must begin with/);
+    await expect(runWorkflow({ defaultAgent: "Worker", script: "return 1;", host })).rejects.toThrow(/must begin with/);
   });
 
   it("reports a script that throws as a failed run", async () => {

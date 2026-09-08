@@ -12,6 +12,7 @@
  * Counted, not timed, for the reasons in `render-invariants.perf.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_AGENTS } from "../helpers/agents.js";
 
 let loads = 0;
 
@@ -51,13 +52,13 @@ beforeEach(() => {
 
 afterEach(() => {
   delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
-  registerAgents(new Map());
+  registerAgents(TEST_AGENTS);
   hermetic?.restore();
 });
 
 /** Boot the real extension in a hermetic cwd and hand back its Agent tool. */
 function bootAgentTool() {
-  hermetic = hermeticDir({
+  hermetic = hermeticDir({ testAgents: true,
     agentFiles: {
       alpha: '---\ndescription: "First fixture agent."\n---\n\nAlpha.\n',
       beta: '---\ndescription: "Second fixture agent."\n---\n\nBeta.\n',

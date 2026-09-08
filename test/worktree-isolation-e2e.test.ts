@@ -123,7 +123,7 @@ describe("worktree isolation e2e (real git, real pi-mono, faux model)", () => {
     const repo = initGitRepo();
     repos.push(repo);
 
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate the work.",
       cwd: repo,
       respond: respondSpawning("worktree"),
@@ -161,7 +161,7 @@ describe("worktree isolation e2e (real git, real pi-mono, faux model)", () => {
     // normal tool call therefore makes no isolation request; privileged RPC or
     // registry callers that still pass one are covered by the manager's
     // fail-closed unit tests.
-    run = await runPrintMode({
+    run = await runPrintMode({ testAgents: true,
       prompt: "Delegate the work.",
       cwd: repo,
       respond: respondSpawning(undefined),

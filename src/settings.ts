@@ -5,7 +5,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { NO_FALLBACK } from "./agent-types.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -100,13 +99,6 @@ export interface SubagentsSettings {
    * Defaults to false.
    */
   strictAgentFiles?: boolean;
-  /**
-   * When true, the three built-in default agents (Worker, Explorer, Reviewer)
-   * are not registered at startup. User-defined agents from project/global custom
-   * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
-   * Defaults to false.
-   */
-  disableDefaultAgents?: boolean;
   /**
    * Which Agent tool description the LLM sees. "full" (default) is the rich
    * Claude Code-style prompt; "compact" is a ~75% smaller version (one-line
@@ -226,21 +218,8 @@ export interface SubagentsSettings {
    * change applies to agents started after it.
    */
   maxSubagentDepth?: number;
-  /**
-   * Agent type substituted when a caller-supplied `subagent_type` doesn't
-   * resolve to exactly one enabled agent (unknown, disabled, or ambiguous by
-   * case). Omitted keeps the historical `Worker` fallback; a type name
-   * routes those calls to that agent instead; `"none"` disables the fallback so
-   * dispatch fails closed with an error naming the available types.
-   *
-   * The boolean `false` is accepted as a spelling of `"none"`, because a boolean
-   * would otherwise be dropped as the wrong type and silently leave the
-   * PERMISSIVE default in place while the author believes strict dispatch is on
-   * — the wrong direction to fail for this setting. Every other value is an
-   * agent name, so a mistaken `"off"` fails loudly at dispatch rather than
-   * meaning one thing here and another in the resolver.
-   */
-  fallbackSubagent?: string;
+  /** User-defined workflow default. Empty string clears a global default; absent inherits it. */
+  defaultAgent?: string;
   /**
    * Whether this extension's tool results carry a `usage` field, so subagent
    * spend reaches the parent session's own accounting. Defaults to `false`.
@@ -318,7 +297,6 @@ export interface SettingsAppliers {
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
   setStrictAgentFiles: (b: boolean) => void;
-  setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
   setAgentMentions: (mode: AgentMentionMode) => void;
@@ -328,7 +306,7 @@ export interface SettingsAppliers {
   setWorktreeIsolation: (b: boolean) => void;
   setWorkflowsEnabled: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
-  setFallbackSubagent: (v: string | undefined) => void;
+  setDefaultAgent: (v: string | undefined) => void;
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
@@ -409,9 +387,6 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.strictAgentFiles === "boolean") {
     out.strictAgentFiles = r.strictAgentFiles;
   }
-  if (typeof r.disableDefaultAgents === "boolean") {
-    out.disableDefaultAgents = r.disableDefaultAgents;
-  }
   if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
     out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
   }
@@ -452,15 +427,8 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
   }
-  if (r.fallbackSubagent === false) {
-    // The only non-string spelling worth accepting: a boolean would otherwise be
-    // dropped, silently leaving the PERMISSIVE default in place. Every string is
-    // an agent name except the `none` sentinel, which the resolver recognizes —
-    // so a mistaken "off" fails loudly at dispatch instead of meaning something
-    // different here than it does there.
-    out.fallbackSubagent = NO_FALLBACK;
-  } else if (typeof r.fallbackSubagent === "string" && r.fallbackSubagent.trim()) {
-    out.fallbackSubagent = r.fallbackSubagent.trim();
+  if (typeof r.defaultAgent === "string") {
+    out.defaultAgent = r.defaultAgent.trim();
   }
   return out;
 }
@@ -519,13 +487,12 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
-  if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
+  appliers.setDefaultAgent(s.defaultAgent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
-  if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);

@@ -5,6 +5,7 @@ import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { type AgentActivity, AgentWidget } from "../src/ui/agent-widget.js";
 import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
+import { TEST_AGENTS } from "./helpers/agents.js";
 
 const TYPE = "colored-reviewer";
 const DISPLAY_NAME = "Code Reviewer";
@@ -101,7 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  registerAgents(new Map());
+  registerAgents(TEST_AGENTS);
 });
 
 describe("custom agent color runtime surfaces", () => {
