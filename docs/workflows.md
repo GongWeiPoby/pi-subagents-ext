@@ -195,7 +195,7 @@ The script's final value is checked at the host boundary and can be a JSON-shape
 | Nested `workflow()` calls | 256 |
 | Script length | 512 KiB |
 
-`workflowsEnabled` is on by default and can be disabled in `subagents.json` or `/agents → Settings → Workflows`. Leaving it unset uses auto mode and stands down for the session if another extension provides `Workflow` or `SubagentWorkflow`. See [Persistent settings](../README.md#persistent-settings).
+`workflowsEnabled` is on by default and can be disabled in `subagents.json` or `/agents → Settings → Workflows`. Leaving it unset uses auto mode and stands down for the session if another extension provides `Workflow`, `workflow`, or `SubagentWorkflow`. See [Persistent settings](../README.md#persistent-settings).
 
 ## Migration
 
