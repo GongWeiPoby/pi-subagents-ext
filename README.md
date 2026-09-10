@@ -12,6 +12,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## Features
 
+- **Agent profiles** — `/profile <agent name>` reuses an existing Agent definition in the main session: appended instructions, metadata-only skill guidance, and model/thinking defaults on explicit switches. Branch-local state survives resume/reload without overriding manual `/model` choices; off restores the baseline. Tools, extensions and child isolation settings are not applied to the main session. **[Profile guide](docs/profiles.md)**
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, optional subagent cascade, and attempt-aware single-executor binding that prevents duplicate or stale task completion. **[Task guide](docs/tasks.md)**
 - **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator guidance with frontmatter metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` lists and reads the guidance; the main coordinator adapts it to current evidence and dynamically chooses ordinary tools, skills, and one or more `Agent` calls. Reading Markdown does not launch work or require every instruction to run. `WorkflowPlaybookSave` promotes generalized Markdown to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
@@ -391,7 +392,7 @@ All fields are optional — sensible defaults for everything.
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
-| `skills` | `true` | `true` inherits the parent's skills; `false` inherits none. A comma-separated list preloads **only** those skills into the system prompt and does not inherit the rest (see [Skill Preloading](#skill-preloading) for discovery locations) |
+| `skills` | `true` | `true`: normal discovery; `false`: no discovery. CSV / `string[]`: preload **only** named full bodies and disable other discovery. `{allow: ["pattern*"]}` or `{deny: ["pattern?"]}` filters discovered names for on-demand loading. Main `/profile` uses all forms for metadata-only recommendations instead; see [Skill Preloading](#skill-preloading) and [Profiles](docs/profiles.md) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree, or `off` to refuse one even when the caller passes `isolation: "worktree"` (frontmatter is authoritative). `none`, `no`, and `false` are accepted spellings of `off` |
@@ -669,6 +670,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
 | `/tasks` | View, create, update, clear, and configure structured tasks |
+| `/profile` | Select an enabled Agent as main-session guidance; also `<agent name>` / `use <agent name>`, `show` / `status`, `list`, `off` / `default`. Names may contain spaces; `use` escapes command-word names |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
@@ -722,6 +724,7 @@ Settings                                    ← max concurrency (background + fo
   - **Disabled custom agents**: Enable, Edit, Delete
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual configuration or generation by an existing user-selected agent with file-writing tools. On an empty installation, use manual configuration or copy an example first; generation never creates an implicit executor.
+- **Main-session profiles** — select the same Agent file with `/profile <agent name>`. No separate creation tool is needed. The body always appends, model/thinking defaults apply only on explicit switches, and skills become metadata-only guidance. Child-only fields such as tools, extensions, isolation and turn limits are not applied; [full semantics](docs/profiles.md).
 - **Settings** — configure max concurrency (background and foreground), default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
@@ -1067,6 +1070,10 @@ Three levers, from narrowest to broadest:
 
 ## Skill Preloading
 
+For on-demand selection instead of full-body preloading, use `skills: {allow: ["research-*"]}` or `skills: {deny: ["manual-?"]}`. Exactly one key is required, with a string array and no unknown keys. Blank/control-containing patterns, patterns over 256 characters and lists over 256 patterns are rejected with the Agent file's source path (startup throws under `strictAgentFiles`; otherwise warns/skips). Full-name matching is case-sensitive; only `*` and `?` are special. Empty allow selects none; empty deny selects all. The child loader filters already-discovered skills, retaining normal on-demand body loading. `isolated` and `skills: false` still disable discovery. This filters a catalogue, not file access, and does not scrub skills already present in a copied parent prompt (`prompt_mode: append`) or conversation (`inherit_context`).
+
+Main-session `/profile` uses the same Agent field only for skill recommendations: actual loaded name/description/filePath metadata, never body preloading. Arrays match exact names there; false recommends none without disabling native skills, commands, completion or `read`. See [Profiles](docs/profiles.md).
+
 Skills can be preloaded by name and injected into the agent's system prompt:
 
 ```yaml
@@ -1114,6 +1121,7 @@ This is useful for creating agents that inherit extension tools but should not h
 docs/                 # Long-form guides (shipped to npm; README links out to them)
   tasks.md            # Task widget config, sort specs, glyphs, recipes and troubleshooting
   playbooks.md        # Adaptive WORKFLOW.md discovery, prompts, planning and approval
+  profiles.md         # Reuse Agent definitions for main-session guidance and model baseline
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
@@ -1159,6 +1167,7 @@ src/
   # Context & environment
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
   skill-loader.ts     # Preload skills (Pi-standard + Agent Skills spec layouts)
+  skill-rules.ts      # Strict Agent skill-rule objects and full-name glob matching
   output-file.ts      # Streaming output file transcripts and session-private task paths
   result-artifact.ts  # Validated Agent-attempt and workflow-aggregate manifests/bodies
   worktree.ts         # Git worktree isolation (create, cleanup, prune)
@@ -1180,6 +1189,10 @@ src/
     process-tracker.ts # Reserved process tracking for a future background-process producer
     ui/task-widget.ts # Persistent task widget
     ui/settings-menu.ts # /tasks settings panel
+
+  profiles/
+    index.ts          # Top-level /profile, branch-local state, route switching and rollback
+    prompt.ts         # Metadata-only guidance from pi's actual loaded skills
 
   workflow/
     approval.ts       # Human-readable approval summaries for direct scripts

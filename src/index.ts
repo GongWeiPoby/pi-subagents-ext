@@ -32,6 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { registerProfiles } from "./profiles/index.js";
 import { formatArtifactWriteError, sanitizeArtifactText, WORKFLOW_AGGREGATE_ERROR_DISABLED, writeWorkflowAggregateArtifact } from "./result-artifact.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -317,6 +318,7 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
+  registerProfiles(pi);
   const taskExecutions = registerTasks(pi, {
     workflowOutput: {
       get: workflowTaskOutputSnapshot,
@@ -3518,7 +3520,7 @@ Terse command-style prompts produce shallow, generic work.
         id: name,
         label: `${sourceIndicator(cfg)}${name}`,
         currentValue: model,
-        description: disabled ? "(disabled)" : (cfg?.description ?? name),
+        description: disabled ? "(disabled)" : `${cfg?.description ?? name}\nSkills: ${JSON.stringify(cfg?.skills ?? true)}`,
         // Single-value list so Enter "activates" the row (fires onChange with the
         // agent's id) without offering anything to actually cycle.
         values: [model],
@@ -3762,7 +3764,7 @@ thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inher
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
 prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
 extensions: <true (inherit all MCP/extension tools), false (none), or comma-separated names. Default: true>
-skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
+skills: <true (discover all), false (none), CSV/string[] (preload full bodies), or {allow: ["pattern*"]} / {deny: ["pattern?"]} (filter discovered names, load on demand). Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 run_in_background: <pin this agent to background (true) or foreground (false). Omit to follow the backgroundByDefault setting, which is background>
@@ -3783,6 +3785,8 @@ memory: <"user" (global), "project" (per-project), or "local" (gitignored per-pr
 \`\`\`
 
 Guidelines for choosing settings:
+- The same Agent file can be selected in the main session with /profile <agent name>. That command always appends the body, applies model/thinking defaults only on explicit switches, and recommends skills by loaded metadata; tool/extension/isolation/turn limits apply only to subagents. Do not create a separate profile format.
+- Skill rule objects accept exactly one allow/deny string array; * and ? match the whole name, case-sensitively. Empty allow selects none. Main-session CSV/string[] guidance matches exact skill names without preloading bodies.
 - For read-only tasks (review, analysis): tools: read, bash, grep, find, ls
 - For code modification tasks: include edit, write
 - Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top

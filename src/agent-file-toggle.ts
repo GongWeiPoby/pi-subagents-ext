@@ -252,6 +252,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
   if (cfg.skills === false) fmFields.push("skills: false");
   else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
+  else if (typeof cfg.skills === "object") fmFields.push(`skills: ${JSON.stringify(cfg.skills)}`);
   if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
   if (cfg.inheritContext) fmFields.push("inherit_context: true");
   // Both cases, not just `true`: with `backgroundByDefault` on, omitting the

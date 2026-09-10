@@ -25,6 +25,7 @@ import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
+import { isSkillNameAllowed } from "./skill-rules.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 
@@ -715,6 +716,9 @@ export async function runAgent(
     additionalExtensionPaths,
     extensionsOverride,
     noSkills,
+    skillsOverride: typeof skills === "object" && !Array.isArray(skills)
+      ? base => ({ ...base, skills: base.skills.filter(skill => isSkillNameAllowed(skill.name, skills)) })
+      : undefined,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,

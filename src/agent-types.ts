@@ -220,7 +220,7 @@ export function getConfig(type: string): {
   builtinToolNames: string[];
   extensions: true | string[] | false;
   excludeExtensions?: string[];
-  skills: true | string[] | false;
+  skills: AgentConfig["skills"];
   promptMode: "replace" | "append";
 } {
   const key = resolveKey(type);

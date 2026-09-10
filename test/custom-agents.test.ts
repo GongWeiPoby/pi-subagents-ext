@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { serializeAgentFile } from "../src/agent-file-toggle.js";
+import { disableInContent, enableInContent, serializeAgentFile } from "../src/agent-file-toggle.js";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentConfig } from "../src/types.js";
@@ -274,6 +274,33 @@ Partial access.`);
     const agent = result.get("partial")!;
     expect(agent.extensions).toEqual(["web-search", "mcp-server"]);
     expect(agent.skills).toEqual(["planning", "review"]);
+  });
+
+  it.each([{ allow: ["web-*", "literal.name?"] }, { deny: ["manual"] }, { allow: [] }, { deny: [] }])("round-trips skill rule %j through loading, serialization and toggles", rule => {
+    writeAgent("rule", `---\nskills: ${JSON.stringify(rule)}\n---\nBody`);
+    const agent = loadCustomAgents(tmpDir).get("rule")!;
+    expect(agent.skills).toEqual(rule);
+    const serialized = serializeAgentFile(agent);
+    const disabled = disableInContent(serialized).content;
+    writeAgent("rule", disabled);
+    expect(loadCustomAgents(tmpDir).get("rule")).toMatchObject({ skills: rule, enabled: false });
+    writeAgent("rule", enableInContent(disabled).content);
+    expect(loadCustomAgents(tmpDir).get("rule")).toMatchObject({ skills: rule, enabled: true });
+  });
+
+  it.each([{}, { allow: [], deny: [] }, { allow: [], extra: true }, { allow: "*" }, { deny: [1] }, { allow: [""] }, { deny: [" "] }, { allow: ["x".repeat(257)] }, [{ allow: [] }]])("rejects invalid skill rule %j with source in strict and ordinary modes", rule => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("bad-rule", `---\nskills: ${JSON.stringify(rule)}\n---\nBody`);
+      writeAgent("good", "Body");
+      const source = join(tmpDir, ".pi", "agents", "bad-rule.md");
+      expect(() => loadCustomAgents(tmpDir, true)).toThrow(source);
+      const loaded = loadCustomAgents(tmpDir);
+      expect(loaded.has("bad-rule")).toBe(false);
+      expect(loaded.has("good")).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${source}: skills`));
+      expect(warn.mock.calls.flat().join(" ")).not.toContain("[object Object]");
+    } finally { warn.mockRestore(); }
   });
 
   it("parses exclude_extensions CSV", () => {

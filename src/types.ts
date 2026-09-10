@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { SkillNameRule } from "./skill-rules.js";
 import type { TaskExecutionRef } from "./tasks/types.js";
 import type { LifetimeUsage } from "./usage.js";
 
@@ -47,8 +48,8 @@ export interface AgentConfig {
   /** Extension-name denylist applied after the `extensions:` include set. Exclude wins.
    * Plain canonical names only (case-insensitive); no paths, no wildcard. */
   excludeExtensions?: string[];
-  /** true = inherit all, string[] = only listed, false = none */
-  skills: true | string[] | false;
+  /** true = discover all, string[] = preload bodies, false = none; object = filter discovered names. */
+  skills: true | string[] | false | SkillNameRule;
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;

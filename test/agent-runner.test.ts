@@ -1,7 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DefaultResourceLoaderOptions } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildAgentPrompt } from "../src/prompts.js";
+import { preloadSkills } from "../src/skill-loader.js";
+import type { AgentConfig } from "../src/types.js";
 
 const {
   createAgentSession,
@@ -1034,6 +1038,43 @@ describe("agent-runner embedded delegate boundaries", () => {
     expect(new Set(lastToolsPassed())).toEqual(new Set([...BUILTINS_7, "helper"]));
     expect(lastLoaderOpts()).toMatchObject({ noExtensions: false, noSkills: false });
     expect(createAgentSession.mock.calls[0][0].customTools).toEqual([]);
+  });
+});
+
+describe("agent-runner skill selection", () => {
+  it.each<[AgentConfig["skills"], boolean, string[]]>([
+    [{ allow: ["web-*"] }, false, ["web-search"]], [{ deny: ["web-*"] }, false, ["writer"]],
+    [{ allow: [] }, false, []], [{ deny: [] }, false, ["writer", "web-search"]],
+    [{ allow: ["*"] }, true, []], [true, false, ["writer", "web-search"]], [false, false, []],
+  ])("filters discovered skills for %j (isolated %s) without preloading", async (skills, isolated, expected) => {
+    vi.mocked(getConfig).mockReturnValueOnce({ ...makeConfig(), skills });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({ ...makeAgentConfig(), skills });
+    vi.mocked(preloadSkills).mockClear();
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "Explorer", "go", { pi, isolated });
+    const options = defaultResourceLoaderCtor.mock.lastCall![0] as DefaultResourceLoaderOptions;
+    expect(options.noSkills).toBe(isolated || skills === false);
+    const base: Parameters<NonNullable<DefaultResourceLoaderOptions["skillsOverride"]>>[0] = {
+      skills: ["writer", "web-search"].map(name => ({ name, description: name, filePath: `/unread/${name}/SKILL.md`, baseDir: `/unread/${name}`, disableModelInvocation: false,
+        sourceInfo: { path: `/unread/${name}`, source: "test", scope: "user", origin: "top-level" } })), diagnostics: [],
+    };
+    const filtered = options.noSkills ? { ...base, skills: [] } : options.skillsOverride?.(base) ?? base;
+    expect(filtered.skills.map(skill => skill.name)).toEqual(expected);
+    expect(filtered.diagnostics).toBe(base.diagnostics);
+    expect(base.skills).toHaveLength(2);
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]?.skillBlocks).toBeUndefined();
+    expect(preloadSkills).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy arrays as full-body preloads with discovery disabled", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ skills: ["writer"] }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ skills: ["writer"] }));
+    vi.mocked(preloadSkills).mockReturnValueOnce([{ name: "writer", content: "Full skill body" }]);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "Explorer", "go", { pi });
+    expect(preloadSkills).toHaveBeenLastCalledWith(["writer"], "/tmp");
+    expect(lastLoaderOpts()).toMatchObject({ noSkills: true, skillsOverride: undefined });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]?.skillBlocks).toEqual([{ name: "writer", content: "Full skill body" }]);
   });
 });
 

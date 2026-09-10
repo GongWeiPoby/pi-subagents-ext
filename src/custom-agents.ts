@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
+import { parseSkillNameRule } from "./skill-rules.js";
 import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./types.js";
 
 /**
@@ -116,7 +117,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       disallowedTools: csvListOptional(fm.disallowed_tools),
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       excludeExtensions: csvListOptional(fm.exclude_extensions),
-      skills: inheritField(fm.skills ?? fm.inherit_skills),
+      skills: parsed.skills,
       model: str(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
       maxTurns: nonNegativeInt(fm.max_turns),
@@ -169,9 +170,14 @@ export function parseAgentFrontmatter<T extends Record<string, unknown>>(content
   return parseFrontmatter<T>(content.startsWith("\uFEFF") ? content.slice(1) : content);
 }
 
-function readAgentFile(path: string, strict: boolean): { frontmatter: Record<string, unknown>; body: string } | undefined {
+function readAgentFile(path: string, strict: boolean): { frontmatter: Record<string, unknown>; body: string; skills: AgentConfig["skills"] } | undefined {
   try {
-    return parseAgentFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
+    const parsed = parseAgentFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
+    const raw = parsed.frontmatter.skills ?? parsed.frontmatter.inherit_skills;
+    if (Array.isArray(raw) && !raw.every(name => typeof name === "string")) throw new Error("skills: expected an array of strings");
+    const skills = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+      ? parseSkillNameRule(raw) : inheritField(raw);
+    return { ...parsed, skills };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     if (strict) throw new Error(`${path}: ${reason}`);
