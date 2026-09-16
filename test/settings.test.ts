@@ -107,6 +107,30 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("stores acpEnabled only in the machine file and ignores project overrides", () => {
+    saveSettings({ acpEnabled: true, maxConcurrent: 4 }, projectDir);
+    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ acpEnabled: true });
+    expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 4 });
+    expect(loadSettings(projectDir)).toEqual({ acpEnabled: true, maxConcurrent: 4 });
+
+    writeProject({ acpEnabled: false, maxConcurrent: 8 });
+    expect(loadSettings(projectDir)).toEqual({ acpEnabled: true, maxConcurrent: 8 });
+
+    writeGlobal({ acpEnabled: false });
+    expect(loadSettings(projectDir)).toEqual({ acpEnabled: false, maxConcurrent: 8 });
+  });
+
+  it("lifts a legacy project acpEnabled into the machine file when global has none", () => {
+    writeProject({ acpEnabled: true, maxConcurrent: 3 });
+    expect(loadSettings(projectDir)).toEqual({ acpEnabled: true, maxConcurrent: 3 });
+    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ acpEnabled: true });
+  });
+
+  it("drops non-boolean acpEnabled values", () => {
+    writeProject({ acpEnabled: "yes" });
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips fleetView (true and false); keeps boolean, drops non-boolean", () => {
     saveSettings({ fleetView: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ fleetView: false });
@@ -541,12 +565,13 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setAcpEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
@@ -753,6 +778,15 @@ describe("settings persistence", () => {
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
     });
 
+    it("applies acpEnabled and skips it when absent", () => {
+      applySettings({ acpEnabled: true }, appliers);
+      expect(appliers.setAcpEnabled).toHaveBeenCalledWith(true);
+      applySettings({ acpEnabled: false }, appliers);
+      expect(appliers.setAcpEnabled).toHaveBeenCalledWith(false);
+      applySettings({}, appliers);
+      expect(appliers.setAcpEnabled).toHaveBeenCalledTimes(2);
+    });
+
     // Absence preserves the in-memory default — the applier must NOT be
     // called, otherwise loading a settings file without the field would
     // overwrite the runtime default with `undefined`.
@@ -790,12 +824,13 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setAcpEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),

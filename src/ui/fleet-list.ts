@@ -17,6 +17,7 @@ import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type FleetWorkflow, type FleetWorkflowAgent, type FleetWorkflowPhase, fleetWorkflowElapsed } from "../workflow/fleet.js";
+import { AcpAttemptViewer } from "./acp-viewer.js";
 import {
   type AgentActivity,
   buildInvocationTags,
@@ -256,7 +257,7 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && a.session && (
+      .filter(a => isTopLevelAgent(a) && (a.session || a.runtime === "acp") && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
@@ -478,9 +479,35 @@ export class FleetList {
     this.openAgent(entry.record, true);
   }
 
-  /** Open the shared ConversationViewer, with controls only for top-level agents. */
+  /** Open the shared conversation overlay, with controls only for top-level agents. */
   private openAgent(record: AgentRecord, controlled: boolean): void {
     if (!this.ui) return;
+    if (record.runtime === "acp") {
+      const activity = this.agentActivity.get(record.id);
+      this.viewingAgentId = record.id;
+      void this.ui.custom<undefined>(
+        (tui, theme, keybindings, done) => {
+          this.viewerClose = () => done(undefined);
+          return new AcpAttemptViewer(
+            tui,
+            record,
+            activity,
+            theme,
+            done,
+            controlled ? () => {
+              if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+            } : undefined,
+            keybindings,
+            controlled ? (message: string) => this.manager.steer(record.id, message) : undefined,
+          );
+        },
+        {
+          overlay: true,
+          overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+        },
+      ).then(() => this.clearViewer(), () => this.clearViewer());
+      return;
+    }
     if (!record.session) {
       this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
       return;
@@ -695,7 +722,7 @@ export class FleetList {
     // keeps the agent color on the selected row too and only bolds it — which also
     // keeps the row's width fixed as the selection moves.
     const selected = rosterIndex === sel;
-    const name = renderAgentName(record.type, theme, selected
+    const name = renderAgentName(record.conversationHandle ?? record.type, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;

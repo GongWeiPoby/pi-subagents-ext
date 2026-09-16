@@ -56,7 +56,8 @@ import type { AgentRecord, AgentTombstone } from "../types.js";
 export type MentionTarget =
   | { kind: "record"; handle: string; record: AgentRecord; typeLabel: string }
   | { kind: "tombstone"; handle: string; entry: AgentTombstone; typeLabel: string }
-  | { kind: "type"; handle: string; type: string; description: string };
+  | { kind: "type"; handle: string; type: string; description: string }
+  | { kind: "acp"; handle: string; registryId: string; description: string; running: boolean };
 
 /** The registry facts the roster needs, so it stays independent of agent-types. */
 export type TypeInfo = { name: string; description: string };
@@ -194,6 +195,9 @@ function mentionItems(roster: MentionTarget[], line: string, cursorCol: number):
 
 /** Name the action that will actually happen, so the list never mispromises. */
 function describeTarget(target: MentionTarget): string {
+  if (target.kind === "acp") {
+    return `${target.running ? "continue" : "delegate"} external ACP agent · ${summarize(target.description)}`;
+  }
   if (target.kind === "type") return `start agent · ${summarize(target.description)}`;
   if (target.kind === "tombstone") {
     // No status: the record is gone, and "completed" would imply one is still

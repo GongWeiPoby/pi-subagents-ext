@@ -175,6 +175,33 @@ interface SpawnArgs {
   options: SpawnOptions;
 }
 
+export interface ExternalRunResult {
+  text: string;
+  status?: "completed" | "stopped" | "error";
+  error?: string;
+}
+
+export interface ExternalExecution {
+  /** Resolves once the external process/protocol/session is ready. */
+  startup: Promise<void>;
+  /** Resolves when this immutable attempt settles. */
+  result: Promise<ExternalRunResult>;
+}
+
+export interface ExternalSpawnOptions {
+  type: SubagentType;
+  description: string;
+  conversationId: string;
+  conversationHandle: string;
+  registryId: string;
+  rootSessionId?: string;
+  resultBodyEnabled?: boolean;
+  onQueued?: (id: string, ahead: number) => void;
+  onStarted?: (record: AgentRecord) => void;
+  /** Additional backend-owned gate (e.g. one prompt at a time per ACP session). */
+  canStart?: () => boolean;
+}
+
 interface SpawnOptions {
   description: string;
   /**
@@ -401,6 +428,8 @@ export class AgentManager {
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
+  /** ACP conversation handles reserved outside ordinary AgentRecord handles. */
+  private externalHandles = new Set<string>();
 
   /**
    * Startup phases, keyed by agent id. `spawn()` still returns synchronously,
@@ -435,7 +464,7 @@ export class AgentManager {
    * promise to await, and pi has no tool-execution timeout to bail the caller
    * out.
    */
-  private queue: { id: string; pool: Pool; start: () => Promise<void>; release: () => void }[] = [];
+  private queue: { id: string; pool: Pool; start: () => Promise<void>; release: () => void; ready?: () => boolean }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
@@ -590,6 +619,25 @@ export class AgentManager {
       record.artifactStatus = "failed";
       record.artifactError = `result artifact write failed (${code})`;
     }
+  }
+
+  reserveExternalHandle(handle: string): boolean {
+    const normalized = handle.toLowerCase();
+    if (this.takenHandles().has(normalized)) return false;
+    this.externalHandles.add(normalized);
+    return true;
+  }
+
+  releaseExternalHandle(handle: string): void {
+    this.externalHandles.delete(handle.toLowerCase());
+  }
+
+  hasExternalHandle(handle: string): boolean {
+    return this.externalHandles.has(handle.toLowerCase());
+  }
+
+  clearExternalHandles(): void {
+    this.externalHandles.clear();
   }
 
   /** Update the max concurrent background agents limit. */
@@ -777,6 +825,124 @@ export class AgentManager {
 
     this.launch(id, record, args, undefined);
     return id;
+  }
+
+  /**
+   * Create one immutable background attempt whose execution is owned by an
+   * external backend (currently ACP). The ordinary Agent path remains unchanged;
+   * this only reuses the manager's queue, records, artifacts, lifecycle callbacks,
+   * and result consumption semantics.
+   */
+  spawnExternal(
+    ctx: ExtensionContext,
+    options: ExternalSpawnOptions,
+    factory: (record: AgentRecord, signal: AbortSignal) => ExternalExecution,
+  ): string {
+    const id = randomUUID().slice(0, 17);
+    const record: AgentRecord = {
+      id,
+      artifactId: `agent-attempt-${randomUUID()}`,
+      artifactStatus: "skipped",
+      runtime: "acp",
+      conversationId: options.conversationId,
+      conversationHandle: options.conversationHandle,
+      registryId: options.registryId,
+      type: options.type,
+      description: options.description,
+      status: "queued",
+      toolUses: 0,
+      turnCount: 0,
+      startedAt: Date.now(),
+      abortController: new AbortController(),
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+      compactionCount: 0,
+      isBackground: true,
+      depth: 1,
+      rootSessionId: options.rootSessionId,
+      resultBodyEnabled: options.resultBodyEnabled,
+    };
+    this.agents.set(id, record);
+    this.beginArtifactAttempt(record, ctx, options, "spawn");
+
+    const start = () => {
+      try {
+        this.startExternal(id, record, factory, options);
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+    if (!this.poolHasRoom("background") || options.canStart?.() === false) {
+      let release!: () => void;
+      record.startGate = new Promise<void>(resolve => { release = resolve; });
+      this.queue.push({
+        id,
+        pool: "background",
+        start,
+        release,
+        ready: options.canStart,
+      });
+      options.onQueued?.(id, this.queue.filter(entry => entry.pool === "background").length - 1);
+      return id;
+    }
+
+    void start().catch(() => {});
+    return id;
+  }
+
+  private startExternal(
+    id: string,
+    record: AgentRecord,
+    factory: (record: AgentRecord, signal: AbortSignal) => ExternalExecution,
+    options: ExternalSpawnOptions,
+  ): void {
+    if (record.status !== "queued") return;
+    record.status = "running";
+    record.startedAt = Date.now();
+    record.startGate = undefined;
+    this.markArtifactStarted(record);
+    this.runningBackground++;
+    this.onStart?.(record);
+    options.onStarted?.(record);
+
+    let execution: ExternalExecution;
+    try {
+      execution = factory(record, record.abortController!.signal);
+    } catch (error) {
+      record.status = "error";
+      record.error = error instanceof Error ? error.message : String(error);
+      record.completedAt = Date.now();
+      this.finalizeResultArtifact(record);
+      this.settleRun(record, true, "background");
+      throw error;
+    }
+
+    const startup = execution.startup;
+    this.startups.set(id, startup);
+    // Avoid an unhandled rejection when no caller awaits startup (queued runs).
+    void startup.catch(() => {});
+
+    record.promise = execution.result.then(
+      outcome => {
+        if (record.status !== "stopped") {
+          record.status = outcome.status ?? "completed";
+        }
+        record.result = outcome.text;
+        record.error = outcome.error;
+        record.completedAt ??= Date.now();
+        this.finalizeResultArtifact(record);
+        this.settleRun(record, true, "background");
+        return outcome.text;
+      },
+      error => {
+        if (record.status !== "stopped") record.status = "error";
+        record.error = error instanceof Error ? error.message : String(error);
+        record.completedAt ??= Date.now();
+        this.finalizeResultArtifact(record);
+        this.settleRun(record, true, "background");
+        return "";
+      },
+    );
   }
 
   /**
@@ -1210,7 +1376,7 @@ export class AgentManager {
    */
   private drainQueue() {
     for (;;) {
-      const i = this.queue.findIndex(e => this.poolHasRoom(e.pool));
+      const i = this.queue.findIndex(e => this.poolHasRoom(e.pool) && (e.ready?.() ?? true));
       if (i === -1) return;
       const [next] = this.queue.splice(i, 1);
       const record = this.agents.get(next.id);
@@ -1227,6 +1393,23 @@ export class AgentManager {
       // read a perfectly healthy agent as one that never ran.
       void next.start().then(() => next.release(), () => next.release());
     }
+  }
+
+  /** Let an external backend re-evaluate queued readiness after its own gate opens. */
+  notifyExternalReady(): void {
+    this.drainQueue();
+  }
+
+  failQueuedExternal(id: string, error: string): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.runtime !== "acp" || record.status !== "queued") return false;
+    this.dequeue(entry => entry.id === id);
+    record.status = "error";
+    record.error = error;
+    record.completedAt = Date.now();
+    this.finalizeResultArtifact(record);
+    try { this.onComplete?.(record); } catch { /* ignore completion side effects */ }
+    return true;
   }
 
   /**
@@ -1576,7 +1759,7 @@ export class AgentManager {
 
   /** Handles already in use, so a fresh spawn can pick an unclaimed one. */
   private takenHandles(): Set<string> {
-    const taken = new Set<string>();
+    const taken = new Set<string>(this.externalHandles);
     for (const record of this.agents.values()) {
       if (record.handle) taken.add(record.handle);
       if (record.alias) taken.add(record.alias);

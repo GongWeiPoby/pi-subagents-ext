@@ -16,6 +16,9 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
+import { ACP_IDLE_TIMEOUT_MS, AcpConversationManager, type PersistedAcpConversation } from "./acp/conversation-manager.js";
+import { type AcpMentionRouteTarget, acpMentionTargets, findAcpMentions } from "./acp/mention.js";
+import { loadAcpApprovals } from "./acp/registry.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, locateAgentFile, personalAgentsDir, projectAgentsDir } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent, resolveResultBodyEnabled } from "./agent-manager.js";
@@ -41,6 +44,8 @@ import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./
 import { registerTasks, type WorkflowTaskOutputSnapshot } from "./tasks/index.js";
 import type { TaskExecutionRef, TaskWorkflowAggregateMetadata } from "./tasks/types.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { showAcpAgentsMenu } from "./ui/acp-menu.js";
+import { AcpAttemptViewer } from "./ui/acp-viewer.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -402,6 +407,10 @@ export default function (pi: ExtensionAPI) {
   // activation rather than lazily.
   pi.registerEntryRenderer<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, (entry, _options, theme) =>
     renderWorkflowEntryCard(entry.data, theme));
+  pi.registerEntryRenderer<{ missing: string[] }>("subagents:acp-route-miss", (entry, _options, theme) => {
+    const missing = entry.data?.missing ?? [];
+    return new Text(theme.fg("warning", `ACP delegation missing: ${missing.map(handle => `@${handle}`).join(", ")}`), 0, 0);
+  });
 
   // Registered at activation; READ from session_start. The host applies CLI
   // values after every extension factory has run, so `getFlag` here would only
@@ -586,6 +595,10 @@ export default function (pi: ExtensionAPI) {
       durationMs,
       tokens,
       usage,
+      ...(record.runtime !== undefined ? { runtime: record.runtime } : {}),
+      ...(record.conversationId !== undefined ? { conversationId: record.conversationId } : {}),
+      ...(record.conversationHandle !== undefined ? { handle: record.conversationHandle } : {}),
+      ...(record.registryId !== undefined ? { registryId: record.registryId } : {}),
       ...(record.taskExecutionRef !== undefined ? { taskExecutionRef: record.taskExecutionRef } : {}),
     };
   }
@@ -612,6 +625,10 @@ export default function (pi: ExtensionAPI) {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
+      runtime: record.runtime,
+      conversationId: record.conversationId,
+      conversationHandle: record.conversationHandle,
+      registryId: record.registryId,
     });
 
     // Skip notification if result was already consumed via get_subagent_result
@@ -652,6 +669,9 @@ export default function (pi: ExtensionAPI) {
       id: record.id,
       type: record.type,
       description: record.description,
+      ...(record.runtime !== undefined ? { runtime: record.runtime } : {}),
+      ...(record.conversationId !== undefined ? { conversationId: record.conversationId } : {}),
+      ...(record.registryId !== undefined ? { registryId: record.registryId } : {}),
     });
   }, (record, info) => {
     if (!isTopLevelAgent(record)) return;
@@ -671,6 +691,11 @@ export default function (pi: ExtensionAPI) {
     // pool grows in a session that will never drain it.
     if (reportUsage) pendingUsage.add(usage);
   });
+
+  let acpConversations: AcpConversationManager | undefined;
+  let activeAcpRootSessionId: string | undefined;
+  let ownAcpToolDescription: string | undefined;
+  const reservedAcpIds = new Set<string>();
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -765,6 +790,8 @@ export default function (pi: ExtensionAPI) {
    * no result to read. Callers still enforce the nested-ownership rejection.
    */
   const resolveAgentRef = (ref: string): AgentRecord | undefined => {
+    const acp = acpConversations?.resolveAttempt(ref);
+    if (acp) return acp;
     const byId = manager.getRecord(ref);
     if (byId) return byId;
     const resolved = manager.resolveMention(ref);
@@ -865,6 +892,14 @@ export default function (pi: ExtensionAPI) {
       fleet.setUICtx(ctx.ui as any);
     }
     manager.clearCompleted(true);
+    if (activeAcpRootSessionId !== sessionId) {
+      await acpConversations?.closeAll();
+      acpConversations = undefined;
+      activeAcpRootSessionId = sessionId;
+      manager.clearExternalHandles();
+      reservedAcpIds.clear();
+    }
+    await bindAcpSession(ctx);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -910,8 +945,15 @@ export default function (pi: ExtensionAPI) {
           current,
           // Plain text, not renderAgentName: the same label FleetView and the
           // widget show, but the autocomplete description cannot carry ANSI.
-          () => mentionRoster(manager, mentionTypes(), type => getConfig(type).displayName),
-          isAgentMentionsEnabled,
+          () => [
+            ...(isAgentMentionsEnabled()
+              ? mentionRoster(manager, mentionTypes(), type => getConfig(type).displayName)
+              : []),
+            ...(isAcpEnabled() && acpConversations
+              ? acpMentionTargets(loadAcpApprovals().agents, acpConversations.list())
+              : []),
+          ],
+          () => isAgentMentionsEnabled() || (isAcpEnabled() && acpConversations !== undefined),
         ),
       );
     }
@@ -926,6 +968,52 @@ export default function (pi: ExtensionAPI) {
   const mentionTypes = (): TypeInfo[] =>
     getAvailableTypes().map(name => ({ name, description: getAgentConfig(name)?.description ?? name }));
 
+  interface ActiveAcpRoute {
+    required: AcpMentionRouteTarget[];
+    starting: Set<string>;
+    started: Set<string>;
+  }
+  let pendingAcpRoute: AcpMentionRouteTarget[] | undefined;
+  let suppressAcpRoute = false;
+  let activeAcpRoute: ActiveAcpRoute | undefined;
+
+  pi.on("before_agent_start", event => {
+    const prompt = typeof event.prompt === "string" ? event.prompt : "";
+    const fromPrompt = !suppressAcpRoute && isAcpEnabled() && acpConversations && prompt
+      ? findAcpMentions(prompt, loadAcpApprovals().agents, acpConversations.list())
+      : undefined;
+    const required = fromPrompt?.length ? fromPrompt : pendingAcpRoute;
+    pendingAcpRoute = undefined;
+    suppressAcpRoute = false;
+    activeAcpRoute = required?.length
+      ? { required, starting: new Set(), started: new Set() }
+      : undefined;
+    if (!activeAcpRoute) return;
+    const targets = activeAcpRoute.required.map(target =>
+      target.resume
+        ? `@${target.handle} => AcpAgent(resume="${target.resume}")`
+        : `@${target.handle} => AcpAgent(agent="${target.registryId}")`,
+    ).join("\n");
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nExternal ACP delegation requested by the user (authoritative routing):\n${targets}\n` +
+        "Every listed mention is an explicit instruction to delegate: call AcpAgent exactly once for each distinct target, using the mapped agent/resume value verbatim. " +
+        "Do not substitute the Pi Agent tool, a native subagent/task mechanism, or another target. " +
+        "When several targets are independent, emit their AcpAgent calls in the same assistant message so they start in parallel. All calls are background; do not poll or invent results.",
+    };
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    const route = activeAcpRoute;
+    activeAcpRoute = undefined;
+    if (!route) return;
+    const missing = route.required
+      .filter(target => !route.started.has(target.handle))
+      .map(target => target.handle);
+    if (missing.length === 0) return;
+    ctx.ui.notify(`Main agent did not delegate required ACP target(s): ${missing.map(handle => `@${handle}`).join(", ")}`, "warning");
+    pi.appendEntry("subagents:acp-route-miss", { missing });
+  });
+
   /**
    * `@handle message` typed at the prompt addresses that agent instead of the
    * main model — Claude Code's prompt mention, same grammar (see mention.ts).
@@ -939,8 +1027,23 @@ export default function (pi: ExtensionAPI) {
    * notification either way.
    */
   pi.on("input", async (event, ctx) => {
+    // ACP mentions always stay in the main turn so the coordinator can write a
+    // self-contained prompt per target. Claim their namespace before the
+    // existing leading Pi-agent mention handler can steer/start one directly.
+    const leadingMention = parseMention(event.text);
+    const forceMain = leadingMention !== null && isReservedHandle(leadingMention.handle);
+    if (event.source !== "extension" && !forceMain && isAcpEnabled() && acpConversations) {
+      const targets = findAcpMentions(event.text, loadAcpApprovals().agents, acpConversations.list());
+      pendingAcpRoute = targets.length > 0 ? targets : undefined;
+      suppressAcpRoute = false;
+      if (targets.length > 0) return { action: "continue" };
+    } else {
+      pendingAcpRoute = undefined;
+      suppressAcpRoute = forceMain;
+    }
+
     // Never hijack text the extension layer itself submitted (pi.sendMessage,
-    // scheduled prompts) — only something a person typed can be a mention.
+    // scheduled prompts) — only something a person typed can be a Pi-agent mention.
     if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
     // Claiming the turn is TUI only, matching the `@` completion that teaches
     // the syntax. Pi defaults `session.prompt()` to source "interactive", so a
@@ -1157,6 +1260,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", async () => {
+    pendingAcpRoute = undefined;
+    activeAcpRoute = undefined;
+    await acpConversations?.closeAll();
+    acpConversations = undefined;
+    activeAcpRootSessionId = undefined;
     await stopWorkflowControllersBeforeSwitch();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -1171,6 +1279,8 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
+    pendingAcpRoute = undefined;
+    activeAcpRoute = undefined;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1183,6 +1293,9 @@ export default function (pi: ExtensionAPI) {
       delete (globalThis as any)[MANAGER_KEY];
     }
     scheduler.stop();
+    await acpConversations?.closeAll();
+    acpConversations = undefined;
+    activeAcpRootSessionId = undefined;
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -1252,6 +1365,12 @@ export default function (pi: ExtensionAPI) {
   let schedulingEnabled = true;
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
+
+  // External ACP agents are opt-in. Read at registration time so a disabled
+  // project pays no tool-schema or mention-routing cost.
+  let acpEnabled = false;
+  function isAcpEnabled(): boolean { return acpEnabled; }
+  function setAcpEnabled(b: boolean): void { acpEnabled = b; }
 
   // Master switch for scripted workflows. Defaults to ON. Off means the
   // `SubagentWorkflow` tool is never registered: the model is not told the
@@ -1476,6 +1595,7 @@ export default function (pi: ExtensionAPI) {
       setDefaultJoinMode,
       setBackgroundByDefault,
       setSchedulingEnabled,
+      setAcpEnabled,
       setScopeModels: setScopeModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setToolDescriptionMode: setToolDescriptionMode,
@@ -2361,6 +2481,276 @@ Terse command-style prompts produce shallow, generic work.
   // mention-clone header on why the clone must call the registered tool.
   const registeredAgentTool = withUsageReporting(agentTool);
   pi.registerTool(registeredAgentTool);
+
+  // ---- External ACP Agent tool ----
+
+  function ensureAcpToolRegistered(): void {
+    if (ownAcpToolDescription) return;
+    if (!isAcpEnabled() || !loadAcpApprovals().agents.some(agent => agent.enabled)) return;
+    const approvedList = loadAcpApprovals().agents
+      .filter(agent => agent.enabled)
+      .map(agent => `${agent.registryId} (@${agent.handle}, ${agent.displayName})`)
+      .join(", ");
+
+    ownAcpToolDescription =
+      "Start or continue an approved external ACP coding agent in its own local process and session. Always runs in the background. " +
+      "The external agent cannot see this conversation, so `prompt` must spell out everything it needs: the goal, relevant background and absolute paths, any constraints, and exactly what to return. " +
+      "Use `agent` for a fresh conversation or `resume` for an existing ACP attempt id/handle, never both, and never send empty strings for either. " +
+      `Approved agents: ${approvedList}.`;
+    registerToolReportingUsage(defineTool({
+      name: SUBAGENT_TOOL_NAMES.ACP_AGENT,
+      label: "ACP Agent",
+      description: ownAcpToolDescription,
+      promptSnippet: "Delegate to approved external ACP coding agents",
+      promptGuidelines: [
+        "Use AcpAgent exactly once for every explicit @acp-* mention. Never substitute Agent or a native subagent mechanism.",
+        "Each @acp-* mention starts a fresh conversation: pass only `agent` and omit `resume`. Never send empty strings.",
+        "AcpAgent always runs in the background. Launch independent targets in the same assistant message, do not poll, and do not claim a result before its completion notification.",
+        "When several ACP agents share a cwd, give them read-only or non-overlapping write scopes; ACP worktree isolation is not available.",
+      ],
+      parameters: Type.Object({
+        agent: Type.Optional(Type.String({ description: "Approved ACP Registry id for a fresh conversation." })),
+        resume: Type.Optional(Type.String({ description: "Existing ACP attempt id or @acp-* conversation handle to continue or queue." })),
+        prompt: Type.String({ description: "Complete prompt for the sub-agent. It cannot see this conversation, so spell out the goal, relevant background and absolute paths, any constraints, and exactly what to return." }),
+        description: Type.String({ description: "Short 3-5 word label shown in the Agents widget." }),
+        cwd: Type.Optional(Type.String({ description: "Absolute existing working directory. Fresh starts only; defaults to the current project." })),
+      }, { additionalProperties: false }),
+      renderCall(args, theme) {
+        const target = args.resume ?? args.agent ?? "ACP";
+        return new Text(`${theme.fg("toolTitle", "▸ AcpAgent")}  ${theme.fg("muted", target)}`, 0, 0);
+      },
+      renderResult(result, _options, theme, renderContext) {
+        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+        if (renderContext.isError) return new Text(text, 0, 0);
+        return new Text(theme.fg("dim", `  ⎿  ${text.split("\n", 1)[0] ?? ""}`), 0, 0);
+      },
+      execute: async (toolCallId, params, _signal, _onUpdate, _ctx) => {
+        const agent = typeof params.agent === "string" && params.agent.trim() ? params.agent.trim() : undefined;
+        const resume = typeof params.resume === "string" && params.resume.trim() ? params.resume.trim() : undefined;
+        if (!isAcpEnabled() || !acpConversations) {
+          throw new Error("External ACP agents are disabled or no approved agents are active. Enable them in /agents → Settings.");
+        }
+        if ((agent === undefined) === (resume === undefined)) {
+          throw new Error("Provide exactly one of `agent` or `resume`.");
+        }
+        if (resume && params.cwd !== undefined) {
+          throw new Error("`cwd` is a fresh-start option and cannot be combined with `resume`.");
+        }
+        const routeTarget = activeAcpRoute?.required.find(target =>
+          agent !== undefined
+            ? target.registryId === agent
+            : resume !== undefined && (target.resume === resume || target.handle === resume),
+        );
+        if (routeTarget) {
+          if (activeAcpRoute!.starting.has(routeTarget.handle) || activeAcpRoute!.started.has(routeTarget.handle)) {
+            throw new Error(`ACP target @${routeTarget.handle} was already delegated in this turn.`);
+          }
+          activeAcpRoute!.starting.add(routeTarget.handle);
+        }
+
+        const { state, callbacks } = createActivityTracker(undefined);
+        const repaint = () => { widget.update(); fleet.update(); };
+        const hooks = {
+          onActivity: (activity: string) => {
+            state.activeTools.clear();
+            state.activeTools.set("acp", activity);
+            repaint();
+          },
+          onText: (fullText: string) => {
+            callbacks.onTextDelta("", fullText);
+            repaint();
+          },
+          onStarted: (record: AgentRecord) => {
+            agentActivity.set(record.id, state);
+            widget.ensureTimer();
+            fleet.ensureTimer();
+            repaint();
+          },
+          onQueued: (record: AgentRecord) => {
+            agentActivity.set(record.id, state);
+            widget.ensureTimer();
+            fleet.ensureTimer();
+            repaint();
+          },
+        };
+
+        let launched: ReturnType<AcpConversationManager["start"]>;
+        try {
+          launched = agent
+            ? acpConversations.start({
+                registryId: agent,
+                prompt: params.prompt,
+                description: params.description,
+                cwd: params.cwd,
+              }, hooks)
+            : acpConversations.continue({
+                ref: resume!,
+                prompt: params.prompt,
+                description: params.description,
+              }, hooks);
+        } catch (error) {
+          if (routeTarget) activeAcpRoute?.starting.delete(routeTarget.handle);
+          throw error;
+        }
+        const { conversation, record } = launched;
+        record.toolCallId = toolCallId;
+
+        const joinMode = resolveJoinMode(defaultJoinMode, true);
+        if (joinMode) record.joinMode = joinMode;
+        if (joinMode != null && joinMode !== "async") {
+          currentBatchAgents.push({ id: record.id, joinMode });
+          if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+          batchFinalizeTimer = setTimeout(finalizeBatch, 100);
+        }
+
+        pi.events.emit("subagents:created", {
+          id: record.id,
+          type: record.type,
+          description: record.description,
+          isBackground: true,
+          runtime: "acp",
+          conversationId: conversation.id,
+          registryId: conversation.registryId,
+          handle: conversation.handle,
+        });
+
+        if (routeTarget) {
+          activeAcpRoute?.starting.delete(routeTarget.handle);
+          activeAcpRoute?.started.add(routeTarget.handle);
+        }
+        const queued = record.status === "queued";
+        return {
+          ...textResult(
+            `ACP agent ${queued ? "queued" : "starting"} in background.\n` +
+            `Attempt ID: ${record.id}\n` +
+            `Conversation: @${conversation.handle}\n` +
+            `Agent: ${conversation.displayName} (${conversation.registryId})\n` +
+            (queued ? "The prompt will run after the current conversation turn and a background slot are available.\n" : "") +
+            "You will be notified when this attempt completes. Use get_subagent_result for the full result.",
+            {
+              displayName: conversation.displayName,
+              description: record.description,
+              subagentType: record.type,
+              toolUses: record.toolUses,
+              tokens: "",
+              durationMs: 0,
+              status: "background",
+              agentId: record.id,
+            },
+          ),
+          terminate: true,
+        };
+      },
+    }));
+  }
+  ensureAcpToolRegistered();
+
+  function queueAcpFollowUp(record: AgentRecord, message: string) {
+    if (!acpConversations) return undefined;
+    const { state, callbacks } = createActivityTracker(undefined);
+    const repaint = () => { widget.update(); fleet.update(); };
+    const launched = acpConversations.continue({
+      ref: record.conversationId ?? record.id,
+      prompt: message,
+      description: `Follow up ${record.description}`.slice(0, 40),
+    }, {
+      onActivity: activity => {
+        state.activeTools.clear();
+        state.activeTools.set("acp", activity);
+        repaint();
+      },
+      onText: fullText => callbacks.onTextDelta("", fullText),
+      onStarted: next => {
+        agentActivity.set(next.id, state);
+        widget.ensureTimer();
+        fleet.ensureTimer();
+        repaint();
+      },
+      onQueued: next => {
+        agentActivity.set(next.id, state);
+        widget.ensureTimer();
+        fleet.ensureTimer();
+        repaint();
+      },
+    });
+    pi.events.emit("subagents:created", {
+      id: launched.record.id,
+      type: launched.record.type,
+      description: launched.record.description,
+      isBackground: true,
+      runtime: "acp",
+      conversationId: launched.conversation.id,
+      registryId: launched.conversation.registryId,
+      handle: launched.conversation.handle,
+    });
+    return launched;
+  }
+
+  async function bindAcpSession(ctx: ExtensionContext): Promise<void> {
+    const enabledApprovals = isAcpEnabled()
+      ? loadAcpApprovals().agents.filter(agent => agent.enabled)
+      : [];
+    for (const agent of enabledApprovals) {
+      if (reservedAcpIds.has(agent.registryId)) continue;
+      if (!manager.hasExternalHandle(agent.handle) && !manager.reserveExternalHandle(agent.handle)) {
+        ctx.ui.notify(`ACP handle @${agent.handle} conflicts with an existing agent and is unavailable in this session.`, "warning");
+        continue;
+      }
+      reservedAcpIds.add(agent.registryId);
+    }
+    if (!isAcpEnabled() || reservedAcpIds.size === 0) {
+      acpConversations?.reconcileApprovals();
+      try {
+        const active = pi.getActiveTools();
+        if (active.includes(SUBAGENT_TOOL_NAMES.ACP_AGENT)) {
+          pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.ACP_AGENT));
+        }
+      } catch { /* non-interactive hosts may not expose active tools */ }
+      return;
+    }
+    if (!acpConversations) {
+      acpConversations = new AcpConversationManager(
+        manager,
+        ctx,
+        () => isAcpEnabled()
+          ? loadAcpApprovals().agents.filter(agent => reservedAcpIds.has(agent.registryId))
+          : [],
+        getOutputTranscriptDefault,
+        undefined,
+        ref => pi.appendEntry("subagents:acp-session", ref),
+        Date.now,
+        ACP_IDLE_TIMEOUT_MS,
+      );
+      const refs = new Map<string, PersistedAcpConversation>();
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type !== "custom" || entry.customType !== "subagents:acp-session" || !entry.data) continue;
+        const ref = entry.data as PersistedAcpConversation;
+        if (typeof ref.conversationId === "string") refs.set(ref.conversationId, ref);
+      }
+      acpConversations.restore([...refs.values()]);
+    }
+    ensureAcpToolRegistered();
+    try {
+      const registered = pi.getAllTools().find(tool => tool.name === SUBAGENT_TOOL_NAMES.ACP_AGENT);
+      if (registered && ownAcpToolDescription && registered.description !== ownAcpToolDescription) {
+        ctx.ui.notify("Another extension owns the AcpAgent tool; pi-subagents ACP routing is disabled for this session.", "warning");
+        await acpConversations.closeAll();
+        acpConversations = undefined;
+        manager.clearExternalHandles();
+        reservedAcpIds.clear();
+        const active = pi.getActiveTools();
+        if (active.includes(SUBAGENT_TOOL_NAMES.ACP_AGENT)) {
+          pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.ACP_AGENT));
+        }
+        return;
+      }
+      const active = pi.getActiveTools();
+      if (ownAcpToolDescription && !active.includes(SUBAGENT_TOOL_NAMES.ACP_AGENT)) {
+        pi.setActiveTools([...active, SUBAGENT_TOOL_NAMES.ACP_AGENT]);
+      }
+    } catch { /* host may not expose the tool registry */ }
+    acpConversations?.reconcileApprovals();
+  }
 
   // ---- Workflow tool ----
 
@@ -3276,9 +3666,13 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
-      if (!record || !isTopLevelAgent(record)) {
+      if (
+        !record
+        || !isTopLevelAgent(record)
+        || (record.runtime === "acp" && record.rootSessionId !== ctx.sessionManager.getSessionId())
+      ) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -3311,12 +3705,21 @@ Terse command-style prompts produce shallow, generic work.
       if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
       statsParts.push(`Duration: ${duration}`);
 
+      if (record.acpUsage) {
+        statsParts.push(`ACP context: ${record.acpUsage.used}/${record.acpUsage.size}`);
+        if (record.acpUsage.cost) statsParts.push(`ACP cost: ${record.acpUsage.cost.amount} ${record.acpUsage.cost.currency}`);
+      }
+
       let output =
         `Agent: ${record.id}\n` +
+        `Runtime: ${record.runtime ?? "pi"}\n` +
+        (record.conversationHandle ? `Conversation: @${record.conversationHandle}\n` : "") +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
+      if (record.status === "queued") {
+        output += "Agent attempt is queued. Use wait: true or check back later.";
+      } else if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
@@ -3348,21 +3751,36 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
+      "Send a message to a running agent. Pi agents receive it as mid-run steering after the current tool execution. " +
+      "ACP agents use stable ACP v1, so the message becomes a queued follow-up attempt after the current prompt turn.",
     promptSnippet: "Send a steering message to redirect a running background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explorer`, `explorer-2`).",
+        description: "The running agent ID or handle. ACP conversation handles queue a follow-up attempt; Pi agent handles steer the live turn.",
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
       }),
     }),
-    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
-      if (!record || !isTopLevelAgent(record)) {
+      if (
+        !record
+        || !isTopLevelAgent(record)
+        || (record.runtime === "acp" && record.rootSessionId !== ctx.sessionManager.getSessionId())
+      ) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      if (record.runtime === "acp") {
+        if (record.status !== "running" && record.status !== "queued") {
+          return textResult(`ACP attempt "${params.agent_id}" is not running (status: ${record.status}). Continue it with AcpAgent(resume=...) instead.`);
+        }
+        const launched = queueAcpFollowUp(record, params.message);
+        if (!launched) return textResult("ACP conversation manager is unavailable in this session.");
+        return textResult(
+          `ACP follow-up queued for @${launched.conversation.handle}.\n` +
+          `Attempt ID: ${launched.record.id}\nThe message will run after the current prompt turn.`,
+        );
       }
       if (record.status !== "running") {
         return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
@@ -3443,6 +3861,8 @@ Terse command-style prompts produce shallow, generic work.
       options.push(`Agent types (${allNames.length})`);
     }
 
+    options.push("External ACP agents");
+
     // Scheduled jobs entry (always present when scheduler is active)
     if (scheduler.isActive()) {
       const jobCount = scheduler.list().length;
@@ -3477,6 +3897,10 @@ Terse command-style prompts produce shallow, generic work.
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
+      await showAgentsMenu(ctx);
+    } else if (choice === "External ACP agents") {
+      await showAcpAgentsMenu(ctx);
+      await bindAcpSession(ctx);
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Scheduled jobs (")) {
       await showSchedulesMenu(ctx, scheduler);
@@ -3571,7 +3995,7 @@ Terse command-style prompts produce shallow, generic work.
     // same description render identically here, and resolving the choice by
     // string match would open whichever came first.
     const record = await selectItem(ctx.ui, "Running agents", agents, a => {
-      const dn = getDisplayName(a.type);
+      const dn = a.conversationHandle ? `@${a.conversationHandle}` : getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
       return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
@@ -3583,6 +4007,28 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord, controlled = true) {
+    if (record.runtime === "acp") {
+      const activity = agentActivity.get(record.id);
+      await ctx.ui.custom<undefined>(
+        (tui, theme, keybindings, done) => new AcpAttemptViewer(
+          tui,
+          record,
+          activity,
+          theme,
+          done,
+          controlled ? () => {
+            if (manager.abort(record.id)) ctx.ui.notify(`Stopped "${record.description}".`, "info");
+          } : undefined,
+          keybindings,
+          controlled ? message => { queueAcpFollowUp(record, message); } : undefined,
+        ),
+        {
+          overlay: true,
+          overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+        },
+      );
+      return;
+    }
     if (!record.session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
@@ -3919,6 +4365,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       defaultJoinMode: getDefaultJoinMode(),
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
+      acpEnabled: isAcpEnabled(),
       scopeModels: isScopeModelsEnabled(),
       strictAgentFiles,
       toolDescriptionMode: getToolDescriptionMode(),
@@ -4023,6 +4470,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           label: "Scheduling",
           description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
           currentValue: isSchedulingEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "acpEnabled",
+          label: "External ACP agents",
+          description: "Machine-wide switch for approved local ACP agents. YOLO automatically allows ACP permission requests. Stored in ~/.pi/agent/subagents.json; projects cannot override it.",
+          currentValue: isAcpEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4204,6 +4658,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(
             ctx,
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
+      } else if (id === "acpEnabled") {
+        const enabled = value === "on";
+        if (enabled === isAcpEnabled()) {
+          ctx.ui.notify(`External ACP agents already ${enabled ? "enabled" : "disabled"}.`, "info");
+        } else {
+          setAcpEnabled(enabled);
+          void bindAcpSession(ctx);
+          notifyApplied(
+            ctx,
+            enabled
+              ? "External ACP agents enabled for this machine. Mentions and AcpAgent apply in this session."
+              : "External ACP agents disabled for this machine. New attempts are refused; current turns may finish.",
           );
         }
       } else if (id === "workflowsEnabled") {

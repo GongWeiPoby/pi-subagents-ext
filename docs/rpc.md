@@ -4,7 +4,7 @@ Another pi extension can spawn a top-level subagent, listen for completion, cons
 
 The bus is in-process. Requests and replies are synchronous event-bus traffic, although handlers may complete asynchronously. This is why function values and an `AbortSignal` can work in a spawn payload, and why none of this is a process-boundary protocol.
 
-Every spawn must name an enabled user-defined agent. No built-in roster or fallback exists. Unknown, disabled, ambiguous, and missing types return an error before execution, including when `defaultAgent` is configured for workflows. On an empty installation, the error includes file-creation guidance.
+Every spawn must name an enabled user-defined Pi agent. No built-in roster or fallback exists. Unknown, disabled, ambiguous, and missing types return an error before execution, including when `defaultAgent` is configured for workflows. On an empty installation, the error includes file-creation guidance. The opt-in `AcpAgent` tool is a separate user-facing surface: protocol v4 RPC does not launch Registry ACP agents and `type: "acp-*"` is not a shortcut into it.
 
 ## Protocol and envelopes
 
@@ -155,11 +155,11 @@ Consumption tells pi-subagents that the caller already presented the settled res
 
 `subagents:rpc:stop` accepts only a top-level agent: records with neither `parentAgentId` nor `workflowId`. A nested child or workflow child is owned by the process waiting on it and cannot be stopped from another extension. `consume` accepts an id or handle through the same result-resolution path used by `get_subagent_result`; it marks only settled results.
 
-Six agent events are top-level only. `started`, `completed`, `failed`, and `compacted` are the four universal lifecycle events; `created` covers only the Agent tool's background path and detached resumes, while `steered` reports accepted steering.
+Six agent events are top-level only. `started`, `completed`, `failed`, and `compacted` are the four universal lifecycle events; `created` covers background tool paths and detached resumes, while `steered` reports accepted Pi-agent steering. External ACP attempts reuse the top-level created/started/completed/failed channels and add `runtime: "acp"`, `conversationId`, `handle`, and `registryId` where applicable. Their queued follow-ups are new immutable attempt ids, not `subagents:steered` events.
 
 | Event | Meaning |
 |---|---|
-| `subagents:created` | Agent registered by the Agent tool's background path or a detached resume; RPC, scheduler, and mention spawns do not emit it |
+| `subagents:created` | Agent registered by the Agent/AcpAgent background tool path or a detached Pi resume; RPC, scheduler, and direct Pi mention spawns do not emit it |
 | `subagents:started` | Agent began running |
 | `subagents:completed` | Agent completed successfully or with a steered result; a TaskExecute agent also carries its immutable `taskExecutionRef` |
 | `subagents:failed` | Agent stopped, aborted, or failed; a TaskExecute agent carries the same `taskExecutionRef` |

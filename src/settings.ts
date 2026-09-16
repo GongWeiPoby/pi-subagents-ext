@@ -1,6 +1,7 @@
 // Persistence for pi-subagents operational settings.
-// - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — manual defaults, never written here
-// - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load
+// - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — machine defaults.
+//   `acpEnabled` is written here by /agents → Settings and is never a project override.
+// - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load except `acpEnabled`.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -65,6 +66,12 @@ export interface SubagentsSettings {
    * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
    */
   schedulingEnabled?: boolean;
+  /**
+   * Machine-level master switch for external ACP agents. Defaults to `false`.
+   * Stored only in `<agentDir>/subagents.json`; a project file cannot override it.
+   * When off, the AcpAgent tool and @acp-* mention routing are not exposed.
+   */
+  acpEnabled?: boolean;
   /**
    * When true, the effective model of each subagent spawn is validated
    * against `enabledModels` from pi's settings — both global
@@ -295,6 +302,7 @@ export interface SettingsAppliers {
   setDefaultJoinMode: (mode: JoinMode) => void;
   setBackgroundByDefault: (b: boolean) => void;
   setSchedulingEnabled: (b: boolean) => void;
+  setAcpEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
   setStrictAgentFiles: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
@@ -381,6 +389,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.schedulingEnabled === "boolean") {
     out.schedulingEnabled = r.schedulingEnabled;
   }
+  if (typeof r.acpEnabled === "boolean") {
+    out.acpEnabled = r.acpEnabled;
+  }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
   }
@@ -441,6 +452,16 @@ function projectPath(cwd: string): string {
   return join(cwd, ".pi", "subagents.json");
 }
 
+function writeSettingsFile(path: string, s: SubagentsSettings): boolean {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(s, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read a settings file. Missing file is silent (returns `{}`). A file that
  * exists but can't be parsed emits a warning to stderr so users aren't
@@ -457,25 +478,35 @@ function readSettingsFile(path: string): SubagentsSettings {
   }
 }
 
-/** Load merged settings: global provides defaults, project overrides. */
+/** Load merged settings: global provides defaults, project overrides except `acpEnabled`. */
 export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
-  return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
+  const global = readSettingsFile(globalPath());
+  const project = readSettingsFile(projectPath(cwd));
+  const { acpEnabled: projectAcpEnabled, ...projectRest } = project;
+  let acpEnabled = global.acpEnabled;
+  // One-time lift: older builds stored the switch in the project file.
+  if (typeof acpEnabled !== "boolean" && typeof projectAcpEnabled === "boolean") {
+    acpEnabled = projectAcpEnabled;
+    writeSettingsFile(globalPath(), { ...global, acpEnabled });
+  }
+  return {
+    ...global,
+    ...projectRest,
+    ...(typeof acpEnabled === "boolean" ? { acpEnabled } : {}),
+  };
 }
 
 /**
- * Write project-local settings. Global is never touched from code.
- * Returns `true` on success, `false` if the write (or mkdir) failed so the
+ * Write project-local settings. `acpEnabled` is written only to the machine file.
+ * Returns `true` on success, `false` if a write (or mkdir) failed so the
  * caller can surface a warning — persistence isn't fatal but isn't silent.
  */
 export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
-  const path = projectPath(cwd);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(s, null, 2), "utf-8");
-    return true;
-  } catch {
-    return false;
-  }
+  const { acpEnabled, ...project } = s;
+  const projectOk = writeSettingsFile(projectPath(cwd), project);
+  if (typeof acpEnabled !== "boolean") return projectOk;
+  const global = readSettingsFile(globalPath());
+  return projectOk && writeSettingsFile(globalPath(), { ...global, acpEnabled });
 }
 
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
@@ -491,6 +522,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
+  if (typeof s.acpEnabled === "boolean") appliers.setAcpEnabled(s.acpEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);

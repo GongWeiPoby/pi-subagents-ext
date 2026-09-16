@@ -494,6 +494,7 @@ export class AgentWidget {
   private renderFinishedLine(a: {
     id: string;
     type: SubagentType;
+    conversationHandle?: string;
     status: string;
     description: string;
     toolUses: number;
@@ -538,7 +539,7 @@ export class AgentWidget {
     });
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-    return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
+    return `${icon} ${renderAgentName(a.conversationHandle ?? a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
   /** Workflows visible under the same mode and four-second settled linger as FleetView. */
@@ -726,7 +727,7 @@ export class AgentWidget {
       runningLines.push([
         truncate(
           theme.fg("dim", "├─")
-          + ` ${theme.fg("accent", frame)} ${renderAgentName(agent.type, theme, { bold: true })}${modeTag}`
+          + ` ${theme.fg("accent", frame)} ${renderAgentName(agent.conversationHandle ?? agent.type, theme, { bold: true })}${modeTag}`
           + `  ${theme.fg("muted", agent.description)} ${theme.fg("dim", "·")}`
           + ` ${fgPreservingNestedStyles(theme, "dim", parts.join(" · "))}`,
         ),

@@ -163,6 +163,16 @@ export type MentionResolution =
 
 export interface AgentRecord {
   id: string;
+  /** Execution backend. Omitted on historical records, which are Pi agents. */
+  runtime?: "pi" | "acp";
+  /** Stable ACP conversation identity; one conversation may have many immutable attempt records. */
+  conversationId?: string;
+  /** Typeable ACP conversation handle owned outside the ordinary Pi-agent handle registry. */
+  conversationHandle?: string;
+  /** Approved ACP Registry id used to launch the external adapter. */
+  registryId?: string;
+  /** ACP context/cost snapshot; intentionally not projected into Pi token breakdowns. */
+  acpUsage?: { used: number; size: number; cost?: { amount: number; currency: string } };
   /** Immutable result-attempt identity. A resume replaces it with a new ID. */
   artifactId: string;
   /**

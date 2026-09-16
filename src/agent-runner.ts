@@ -37,6 +37,7 @@ import type { LifetimeUsage } from "./usage.js";
  */
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
+  ACP_AGENT: "AcpAgent",
   WORKFLOW: "SubagentWorkflow",
   PLAYBOOK: "WorkflowPlaybook",
   PLAYBOOK_SAVE: "WorkflowPlaybookSave",

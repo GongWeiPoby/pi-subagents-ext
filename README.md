@@ -27,6 +27,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
 - **Agent mentions** — subagents are first-class: type `@explorer also check the RPC path` at the prompt and it goes to that agent instead of the main model, without a word of it entering the chat. One syntax covers the whole lifecycle — message it while it runs, resume it once it has finished, reopen its session from disk long after that, or start it if it never ran. Mentioning an agent that isn't running spawns it through an off-screen clone of the conversation, so it gets Claude Code's context-written prompt and a real `Agent` tool call without a word of it reaching the chat; `direct` mode starts it here from your text instead, with no model call at all. The orchestrator can `name` an agent so you address it as `@auth-audit`, and handles work in `steer_subagent`/`get_subagent_result` too. `@` completes live agents, resumable ones, and startable types alongside pi's file completion; `@main` forces text back to the main model. Toggle via `/agents → Settings → Agent mentions`
+- **External ACP agents (opt-in)** — use the official `@agentclientprotocol/sdk` to run Codeg's 15 built-in ACP coding agents as background processes. Machine-level command approval, npx/binary install, YOLO permission handling, native CLI/config reuse, session resume/load, immutable attempt results, Widget activity and inline `@acp-*` routing are included. ACP v1 follow-ups queue after the current prompt turn; ACP worktree isolation, terminal-auth UI and full transcript viewing are intentionally out of scope. **[ACP guide](docs/acp-agents.md)**
 - **Scripted workflows** — a `SubagentWorkflow` tool for user-explicit deterministic JavaScript orchestration: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, and `budget`, with a pure-literal `meta` block declaring phases. Trusted headless automation may also compose one level of saved named workflows; interactive approval rejects nested behavior it cannot preview. `pipeline()` has no barrier between stages; `parallel()` waits for all thunks. Runs continue in the background with a live card, fixed-height direct approval dialog, `/agents → Workflows` inspector, FleetView tree, ordinary child activity/live output/turns, journal resume, gates, worktree isolation, budgets, and pause/skip/retry/stop controls. Every child returns text/Markdown; scripts may deterministically return JSON-shaped objects, statuses, or paths. Legacy `agent({ schema })` calls are rejected with an explicit migration error. On by default, but it stands down if another extension already provides `Workflow`, `workflow`, or `SubagentWorkflow`; pin it with `workflowsEnabled`. **[Full guide](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md)**
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes detached by default and notifies you on completion, just like a fresh spawn; pass `run_in_background: false` to block and get the result inline
@@ -365,6 +366,16 @@ Result artifacts are an internal persistence aid, not verification credentials a
 
 
 
+## External ACP agents
+
+External ACP agents are disabled by default. Enable `/agents → Settings → External ACP agents`, then use `/agents → External ACP agents` to approve one of Codeg's 15 built-in launch pins. New approvals and first enablement apply after `/reload` or a new session.
+
+Approved agents appear as `@acp-*` handles. These mentions stay in the main turn so the coordinator can write a self-contained task and call `AcpAgent`; several inline mentions require one background call per distinct target. An all-ACP tool batch ends after returning launch receipts instead of spending another main-model round trip announcing that delegation started. Completion and failure notifications then wake the main model, matching ordinary background subagents, so it can retrieve the full result and continue dependent work. A silent ACP `end_turn` is reported as an error with structured response failure metadata, bounded/redacted agent stderr, or an agent-specific persisted diagnostic when available. Stable ACP v1 has no universal mid-turn steering, so a message to a running ACP conversation becomes a queued follow-up attempt. All ACP permission requests use YOLO mode (`allow_always`, falling back to `allow_once`). The client does not advertise `fs/*` or `terminal/*`; adapters use their own tools and existing CLI/config stores. Binary entries (OpenCode, Cursor, Antigravity) are installed on approval into a version-locked machine directory.
+
+ACP agents run in the current or explicitly supplied `cwd`. This feature does **not** create worktrees and cannot prevent multiple external processes from writing the same files. Give concurrent agents read-only or non-overlapping scopes, or point them at directories/worktrees you created yourself.
+
+See [`docs/acp-agents.md`](docs/acp-agents.md) for setup, tool parameters, persistence, failure behavior, and limitations.
+
 ## User-Defined Agents
 
 The main session should normally read, reason, edit, and validate directly. Delegate only when a separate context provides useful parallelism, substantial context isolation, specialist capabilities, or an independent review perspective. A plan, several steps, or an available Worker is not by itself a reason to delegate. Explicit user requests to delegate or not to delegate take precedence; there is no mandatory Explorer/Worker/Reviewer pipeline.
@@ -600,6 +611,20 @@ Launch a sub-agent.
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 | `schedule` | string | no | Fire later instead of now: 6-field cron (`"0 0 9 * * 1"`), interval (`"5m"`, `"1h"`), or one-shot (`"+10m"` or ISO timestamp). Forces `run_in_background`; incompatible with `inherit_context` and `resume`. Omitted from the schema entirely when scheduling is disabled |
 
+### `AcpAgent`
+
+Start or continue one approved external ACP coding-agent conversation. The tool is registered only when `acpEnabled` is on and at least one machine approval is enabled. It always runs in the background.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent` | string | exactly one of `agent`/`resume` | Approved ACP Registry id for a fresh conversation |
+| `resume` | string | exactly one of `agent`/`resume` | Existing ACP attempt id or `@acp-*` conversation handle; queues when its prompt is running |
+| `prompt` | string | yes | Complete prompt for the sub-agent (goal, background, paths, constraints, what to return) |
+| `description` | string | yes | Short UI label |
+| `cwd` | absolute path | no | Fresh-conversation working directory; defaults to the main session cwd |
+
+`AcpAgent` does not accept Pi model/thinking/tools/skills/extensions options, foreground execution, scheduling, nesting, or worktree isolation. Results use the existing completion notification, `get_subagent_result`, and a live ACP overlay from FleetView or `/agents`.
+
 ### `WorkflowPlaybook`
 
 Discover and read reusable adaptive Markdown Playbooks. Reading a Playbook returns coordinator guidance and prompt resources; it never launches agents.
@@ -701,20 +726,20 @@ Check status and retrieve results from a background agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to check |
+| `agent_id` | string | yes | Attempt ID or handle. ACP conversation handles resolve to active/queued/latest-settled attempt |
 | `wait` | boolean | no | Wait for completion |
-| `verbose` | boolean | no | Include full conversation log |
+| `verbose` | boolean | no | Include the full Pi Agent conversation; ACP attempts have no full viewer/transcript in this release |
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
 
 ### `steer_subagent`
 
-Send a steering message to a running agent. The message interrupts after the current tool execution.
+Send a message to a running agent. Pi agents receive mid-run steering after the current tool execution. ACP agents create an immutable queued follow-up attempt because stable ACP v1 has no universal mid-turn steering.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to steer |
-| `message` | string | yes | Message to inject into agent conversation |
+| `agent_id` | string | yes | Running Pi Agent ID/handle or ACP attempt/conversation handle |
+| `message` | string | yes | Pi: mid-run message. ACP: queued next-turn prompt |
 
 ## Commands
 
@@ -766,6 +791,7 @@ The `/agents` command opens an interactive menu:
 ```
 Running agents (2) — 1 running, 1 done     ← only shown when agents exist
 Agent types (6)                             ← registered user-defined agents
+External ACP agents                         ← Registry refresh and machine approvals
 Create new agent                            ← manual wizard or AI-generated
 Settings                                    ← max concurrency (background + foreground), max turns, grace turns, join mode
 ```
@@ -777,7 +803,8 @@ Settings                                    ← max concurrency (background + fo
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual configuration or generation by an existing user-selected agent with file-writing tools. On an empty installation, use manual configuration or copy an example first; generation never creates an implicit executor.
 - **Main-session profiles** — select the same Agent file with `/profile <agent name>`. No separate creation tool is needed. The body always appends, model/thinking defaults apply only on explicit switches, and skills become metadata-only guidance. Child-only fields such as tools, extensions, isolation and turn limits are not applied; [full semantics](docs/profiles.md).
-- **Settings** — configure max concurrency (background and foreground), default max turns, grace turns, and join mode at runtime
+- **External ACP agents** — approve Codeg's 15 built-in launch pins, install current-platform binaries, and enable/disable/remove machine approvals
+- **Settings** — configure max concurrency (background and foreground), ACP master switch, default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
 
@@ -815,7 +842,7 @@ When background agents complete, they notify the main agent. The **join mode** c
 | Mode | Behavior |
 |------|----------|
 | `smart` (default) | 2+ background agents spawned in the same turn are auto-grouped into a single consolidated notification. Solo agents notify individually. |
-| `async` | Each agent sends its own notification on completion (original behavior). Best when results need incremental processing. |
+| `async` | Each agent sends its own notification on completion. Best when results need incremental processing. |
 | `group` | Force grouping even when spawning a single agent. Useful when you know more agents will follow. |
 
 **Timeout behavior:** When agents are grouped, a 30-second timeout starts after the first agent completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers.
@@ -848,10 +875,10 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, default workflow agent, default join mode, scheduling on/off, scope models on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, default workflow agent, default join mode, scheduling on/off, external ACP agents on/off, scope models on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
-- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
-- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
+- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. `/agents` → Settings writes `acpEnabled` here; other keys are still edited by hand.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings. `acpEnabled` in this file is ignored after it has been lifted into the machine file.
 
 **Precedence:** project overrides global on any field present in both. Missing operational settings use background concurrency `10`, workflow concurrency `2` per run, foreground concurrency `0` (unlimited), unlimited turns, grace turns `5`, nested depth `2`, and join mode `smart`. No agent is configured implicitly. An empty project `defaultAgent` clears a global default.
 
@@ -862,6 +889,8 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable [agent file](#custom-agents) aborts extension load at startup and names the file, instead of being skipped with a warning — so a checked-in `.pi/agents/` can't silently fall through to a same-named agent from another location. Startup only: the mid-session reload that runs on each `Agent` call keeps warning either way, since a bad edit shouldn't kill a session on an unrelated spawn. Also settable from `/agents → Settings → Strict agent files`.
 
 **Removed settings:** `disableDefaultAgents` and `fallbackSubagent` are ignored. All agents are user-defined and explicit unknown types always fail closed.
+
+**External ACP agents** (`acpEnabled`, default `false`): machine-wide opt in to the `AcpAgent` tool, Codeg's 15 built-in ACP agents, and `@acp-*` mention rows. The switch lives only in `<agentDir>/subagents.json`; a project file cannot override it. Launch commands are stored separately in machine-level `<agentDir>/acp-agents.json`; project settings cannot inject command/args/env. Enabling or approving an agent binds it in the current session. Disabling immediately hides ACP mentions and refuses new attempts while current turns may finish. See [External ACP agents](#external-acp-agents).
 
 **Agent mentions** (`agentMentions`, default `"model"`): whether [`@handle message`](#agent-mentions) at the prompt addresses that subagent instead of the main model — messaging, resuming or starting it — and whether `@` offers agents alongside pi's file completion. `"model"` and `"direct"` differ only in [who starts an agent that isn't running](#starting-a-new-agent): an off-screen clone of this conversation, via a `<system-reminder>` and a real `Agent` call, or this extension, immediately and with no model call. Messaging and resuming are direct in both. `"off"` gates all three actions plus the suggestion list, so `@` means only "attach a file" again and every `@…` prompt reaches the main model verbatim. Toggle via `/agents → Settings → Agent mentions`; applied live. The booleans this setting used to take are still read — `true` as `"model"`, `false` as `"off"`.
 
@@ -964,7 +993,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | Event | When | Key fields |
 |-------|------|------------|
 | `subagents:created` | `Agent`-tool background spawn, or a detached resume — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started` | `id`, `type`, `description`, `isBackground` (always `true`) |
-| `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
+| `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description`; ACP attempts add `runtime`, `conversationId`, `registryId` |
 | `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `description`, `status`, `durationMs`, `tokens` (display total, `{ input, output, total }` — see the note below), `usage` (the run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD; absent when nothing was spent), `toolUses`, `result`, optional `taskExecutionRef` for `TaskExecute` agents |
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | identical payload to `subagents:completed` — both are built by the same formatter, so `error` and `status` are present on that row too, just empty |
 | `subagents:steered` | Steering message accepted — fires for a *queued* steer as well as a delivered one | `id`, `message` |
@@ -974,6 +1003,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | `{}` (empty object) |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
+
+ACP attempts use the same top-level lifecycle events. Their completed/failed payload adds `runtime: "acp"`, `conversationId`, `handle`, and `registryId`; Pi-only token `usage` remains absent when ACP did not provide an equivalent breakdown. Cross-extension RPC v4 still spawns only user-defined Pi agents.
 
 The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`, `:compacted` — are emitted for **top-level agents only**. Nested subagents and a workflow's children emit nothing at all; they report through the parent or workflow that owns them.
 
@@ -1174,6 +1205,7 @@ docs/                 # Long-form guides (shipped to npm; README links out to th
   tasks.md            # Task widget config, sort specs, glyphs, recipes and troubleshooting
   playbooks.md        # Adaptive WORKFLOW.md discovery, prompts, planning and approval
   profiles.md         # Reuse Agent definitions for main-session guidance and model baseline
+  acp-agents.md       # Codeg builtin ACP approvals, AcpAgent, mentions and limitations
   workflows.md        # SubagentWorkflow: writing, editing, saving and re-running scripts
   rpc.md              # Cross-extension integration: pi.events, subagents:rpc:*, manager registry
 examples/
@@ -1185,6 +1217,13 @@ test/                 # vitest suite; e2e/ and perf/ subdirectories
 src/
   index.ts            # Extension entry: tool/command registration, /agents menu, rendering
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
+
+  # External ACP agents
+  acp/registry.ts     # Official Registry parsing/cache and machine-level command approvals
+  acp/installer.ts    # HTTPS binary download, SHA-256 verification and safe extraction
+  acp/runtime.ts      # Official TypeScript SDK client + ACP adapter process lifecycle
+  acp/conversation-manager.ts # Stable conversations, immutable attempts and FIFO follow-ups
+  acp/mention.ts      # @acp-* roster and inline mention extraction
 
   # Agent registry
   custom-agents.ts    # Load user-defined agents from .pi/agents/, .agents/agents/, and global agents
@@ -1266,7 +1305,8 @@ src/
     fleet-list.ts         # FleetView: navigable agent list below the editor
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer scroll keys resolved through user keybindings
-    agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
+    agent-mention.ts      # `@` roster (Pi and ACP targets) + popup rows
+    acp-menu.ts            # /agents → External ACP agents Registry/approval UI
     schedule-menu.ts      # /agents → Scheduled jobs submenu
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)

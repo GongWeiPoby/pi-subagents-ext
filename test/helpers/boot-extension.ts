@@ -59,7 +59,7 @@ export function makePi(flags: Record<string, boolean | string> = {}): BootedPi {
     // Only bound after the session exists in real pi — the extension calls these
     // from `session_start` for exactly that reason. Default to "nothing else is
     // registered"; a test that cares overrides them.
-    getAllTools: vi.fn(() => [] as any[]),
+    getAllTools: vi.fn(() => [...tools.values()]),
     getCommands: vi.fn(() => [] as any[]),
     // The active set starts as whatever was registered, which is what pi does
     // for a freshly loaded extension tool. `setActiveTools` writes it back so a
