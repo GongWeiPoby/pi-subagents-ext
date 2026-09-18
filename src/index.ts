@@ -8,6 +8,7 @@
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
+ *   /chat /room             — Hosted group chat (host = main model)
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -27,6 +28,9 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { type AgentSnapshot, createSeatTools, dropAllQueued, type GroupChatHost, ROOM_ENTRY_TYPE, ROOM_LINE_ENTRY_TYPE, type RoomBinding, registerGroupChat, restoreRoomStatus, tryHandleRoomInput } from "./group-chat/index.js";
+import { hostPrompt } from "./group-chat/prompts.js";
+import { GroupStore } from "./group-chat/store.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
@@ -410,6 +414,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerEntryRenderer<{ missing: string[] }>("subagents:acp-route-miss", (entry, _options, theme) => {
     const missing = entry.data?.missing ?? [];
     return new Text(theme.fg("warning", `ACP delegation missing: ${missing.map(handle => `@${handle}`).join(", ")}`), 0, 0);
+  });
+  pi.registerEntryRenderer<{ handle: string; text: string; to?: string[] }>(ROOM_LINE_ENTRY_TYPE, (entry, _options, theme) => {
+    const handle = entry.data?.handle ?? "seat";
+    const to = entry.data?.to?.length ? ` → ${entry.data.to.map(t => `@${t}`).join(",")}` : "";
+    const text = (entry.data?.text ?? "").replace(/\s+/g, " ").slice(0, 240);
+    return new Text(theme.fg("muted", `[@${handle}${to}] ${text}`), 0, 0);
   });
 
   // Registered at activation; READ from session_start. The host applies CLI
@@ -836,6 +846,8 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  let roomHost!: () => GroupChatHost;
+  let roomBinding: RoomBinding | null = null;
   /** Invalidates detached workflow completions when the active session changes. */
   let workflowSessionGeneration = 0;
   let activeWorkflowSessionId: string | undefined;
@@ -874,7 +886,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     // Some hosts switch sessions without first emitting session_before_switch.
     // Only treat a different concrete session id as that fallback transition;
@@ -934,6 +946,21 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:ready", {});
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
+    if ((event as { reason?: string }).reason === "new") {
+      dropAllQueued(sessionId);
+      roomBinding = null;
+    } else if (!roomBinding) {
+      const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (entry?.type === "custom" && entry.customType === ROOM_ENTRY_TYPE) {
+          const data = entry.data as RoomBinding | null;
+          if (data?.chat && typeof data.roomId === "string") roomBinding = data;
+          break;
+        }
+      }
+    }
+    if (typeof roomHost === "function") restoreRoomStatus(ctx, roomHost());
     // Stack `@handle` suggestions on pi's built-in autocomplete. Registered at
     // most once per activation: pi appends wrappers to a list it never prunes,
     // so a second call would layer a duplicate provider on the first. TUI only
@@ -979,6 +1006,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", event => {
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
+    const extras: string[] = [];
+    const binding = roomHost?.()?.readBinding();
+    if (binding && currentCtx) {
+      const room = new GroupStore(currentCtx.cwd).readMeta(binding.roomId);
+      if (room) extras.push(hostPrompt(room, new GroupStore(currentCtx.cwd).readLog(room.id)));
+    }
     const fromPrompt = !suppressAcpRoute && isAcpEnabled() && acpConversations && prompt
       ? findAcpMentions(prompt, loadAcpApprovals().agents, acpConversations.list())
       : undefined;
@@ -988,16 +1021,19 @@ export default function (pi: ExtensionAPI) {
     activeAcpRoute = required?.length
       ? { required, starting: new Set(), started: new Set() }
       : undefined;
-    if (!activeAcpRoute) return;
-    const targets = activeAcpRoute.required.map(target =>
-      `@${target.handle} => AcpAgent(agent="${target.registryId}")`,
-    ).join("\n");
-    return {
-      systemPrompt: `${event.systemPrompt}\n\nExternal ACP delegation requested by the user (authoritative routing):\n${targets}\n` +
+    if (activeAcpRoute) {
+      const targets = activeAcpRoute.required.map(target =>
+        `@${target.handle} => AcpAgent(agent="${target.registryId}")`,
+      ).join("\n");
+      extras.push(
+        `External ACP delegation requested by the user (authoritative routing):\n${targets}\n` +
         "Every listed mention is an explicit instruction to delegate: call AcpAgent exactly once for each distinct target, using the mapped agent/resume value verbatim. " +
         "Do not substitute the Pi Agent tool, a native subagent/task mechanism, or another target. " +
         "When several targets are independent, emit their AcpAgent calls in the same assistant message so they start in parallel. All calls are background; do not poll or invent results.",
-    };
+      );
+    }
+    if (extras.length === 0) return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${extras.join("\n\n")}` };
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -1025,6 +1061,9 @@ export default function (pi: ExtensionAPI) {
    * notification either way.
    */
   pi.on("input", async (event, ctx) => {
+    const roomed = tryHandleRoomInput(event, ctx, roomHost());
+    if (roomed?.action === "handled") return roomed;
+
     // ACP mentions always stay in the main turn so the coordinator can write a
     // self-contained prompt per target. Claim their namespace before the
     // existing leading Pi-agent mention handler can steer/start one directly.
@@ -1539,6 +1578,94 @@ export default function (pi: ExtensionAPI) {
 
     return record;
   }
+
+  async function waitForRoomAgent(id: string): Promise<AgentSnapshot> {
+    await manager.awaitStartup(id);
+    const record = manager.getRecord(id);
+    if (!record) return { id, status: "error", error: "Agent failed to start", hasSession: false };
+    record.resultConsumed = true;
+    if (record.status === "queued") await record.startGate;
+    if (record.promise) await record.promise;
+    return {
+      id: record.id,
+      handle: record.handle,
+      alias: record.alias,
+      status: record.status,
+      result: record.result,
+      error: record.error,
+      hasSession: !!record.session,
+    };
+  }
+
+  roomHost = (): GroupChatHost => ({
+    async spawn(type, prompt, options) {
+      if (!currentCtx) throw new Error("No active session");
+      const id = spawnResolved(pi, currentCtx, type, prompt, {
+        description: options.description,
+        name: options.name,
+        isBackground: true,
+        customTools: options.customTools,
+      });
+      const record = manager.getRecord(id);
+      if (record) record.resultConsumed = true;
+      return waitForRoomAgent(id);
+    },
+    async resume(id, prompt, options) {
+      if (!currentCtx) return undefined;
+      const existing = manager.getRecord(id);
+      if (!existing) return undefined;
+      existing.resultConsumed = true;
+      const id2 = spawnResolved(pi, currentCtx, existing.type, prompt, {
+        description: existing.description,
+        isBackground: true,
+        customTools: options?.customTools,
+        reclaim: existing.handle ? { handle: existing.handle, alias: existing.alias } : undefined,
+        resumeSessionFile: existing.sessionFile,
+      });
+      return waitForRoomAgent(id2);
+    },
+    abort(id) {
+      return manager.abort(id);
+    },
+    resolveLive(handle) {
+      const resolved = manager.resolveMention(handle);
+      if (resolved?.kind !== "live") return undefined;
+      const record = resolved.record;
+      return { id: record.id, status: record.status, hasSession: !!record.session };
+    },
+    getRecord(id) {
+      const record = manager.getRecord(id);
+      if (!record) return undefined;
+      return { id: record.id, status: record.status, hasSession: !!record.session };
+    },
+    resolveType(spec) {
+      reloadCustomAgents();
+      const dispatch = resolveSpawnType(spec);
+      if (dispatch.ok) return dispatch.type;
+      return resolveHandleToType(spec, getAvailableTypes());
+    },
+    sessionId() {
+      return currentCtx?.sessionManager.getSessionId();
+    },
+    cwd() {
+      return currentCtx?.cwd ?? process.cwd();
+    },
+    appendBinding(binding) {
+      roomBinding = binding;
+      pi.appendEntry(ROOM_ENTRY_TYPE, binding);
+      if (currentCtx) restoreRoomStatus(currentCtx, roomHost());
+    },
+    readBinding() {
+      return roomBinding;
+    },
+    appendRoomLine(line) {
+      pi.appendEntry(ROOM_LINE_ENTRY_TYPE, line);
+    },
+    seatTools(handle) {
+      return createSeatTools(roomHost, handle);
+    },
+  });
+  registerGroupChat(pi, roomHost);
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {

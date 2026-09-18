@@ -34,6 +34,7 @@ Read the file that covers a surface before changing its behavior; update it in t
 | `docs/playbooks.md` | Adaptive Markdown `WORKFLOW.md` Playbooks, prompt resources, discovery precedence, `WorkflowPlaybook`, and confirmed `WorkflowPlaybookSave` promotion. Source: `src/workflow/playbook*.ts`. |
 | `docs/workflows.md` | `SubagentWorkflow` in depth — explicit deterministic JavaScript, direct approval, editing/saving/re-running scripts, text-only child results, `agent()` options, recipes, troubleshooting. Examples in `examples/workflows/`. |
 | `docs/rpc.md` | Calling this extension from another pi extension — `pi.events` lifecycle events (`subagents:completed`, `subagents:ready`, …), the `subagents:rpc:*` channels (`ping`, `spawn`, `stop`, `consume`), spawn options, error strings, and the `Symbol.for("pi-subagents:manager")` registry. Source: `src/cross-extension-rpc.ts`. |
+| `docs/group-chat.md` | Hosted group chat — `/chat on`, host forwarding, `room_tell`/`handoff`, session binding. Source: `src/group-chat/`. |
 | `CONTRIBUTING.md` | Contributor guidelines and quality bar. |
 | `SECURITY.md` | Vulnerability reporting. |
 

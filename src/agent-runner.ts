@@ -16,6 +16,7 @@ import {
   getAgentDir,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
@@ -43,6 +44,11 @@ export const SUBAGENT_TOOL_NAMES = {
   PLAYBOOK_SAVE: "WorkflowPlaybookSave",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  ROOM_JOIN: "RoomEnsure",
+  ROOM_LEAVE: "RoomLeave",
+  ROOM_TELL: "room_tell",
+  ROOM_HANDOFF: "handoff",
+  ROOM_CANCEL: "room_cancel",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -474,6 +480,8 @@ export interface RunOptions {
     depth: number;
     maxSubagentDepth?: number;
   };
+  /** Extra tools for this run only (chat-room seat tools). */
+  customTools?: ToolDefinition[];
 }
 
 export interface RunResult {
@@ -832,6 +840,8 @@ export async function runAgent(
         configCwd,
       })
     : [];
+  const extraCustomTools = options.customTools ?? [];
+  const extraCustomNames = new Set(extraCustomTools.map(tool => tool.name));
   const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
 
   const readmitToolNames = new Set(
@@ -877,12 +887,13 @@ export async function runAgent(
         (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
       ),
       ...[...nestedToolNames].filter((t) => !disallowedSet?.has(t)),
+      ...[...extraCustomNames].filter((t) => !disallowedSet?.has(t)),
     ];
   } else {
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
     // those are injected as customTools and must survive the registry gate.
     const denyTools = new Set<string>(
-      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t)),
+      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t) && !extraCustomNames.has(t)),
     );
     // Keep only the built-ins the agent asked for — deny the rest.
     for (const name of BUILTIN_TOOL_NAMES) {
@@ -938,7 +949,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: nestedTools,
+    customTools: [...nestedTools, ...(options.customTools ?? [])],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {

@@ -340,6 +340,8 @@ interface SpawnOptions {
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
   rootSessionId?: string;
+  /** Extra tools for this run (chat-room seats). */
+  customTools?: import("@earendil-works/pi-coding-agent").ToolDefinition[];
 }
 
 interface ResumeOptions {
@@ -1178,6 +1180,7 @@ export class AgentManager {
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
       },
+      customTools: options.customTools,
       onSessionCreated: (session) => {
         record.session = session;
         // Capture now, while the session object exists: after eviction this

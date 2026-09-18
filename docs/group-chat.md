@@ -1,63 +1,74 @@
-# Group Chat (Rooms) MVP
+# Group chat rooms
 
-Named multi-member rooms for long-lived collaboration. **Not** the same as
-`group-join.ts` (that only batches completion notifications).
+For users who want several experts in one hosted conversation. While chat is **on**, this Pi session is the host: bare text reaches the main model, which `room_tell`s / `handoff`s seats. `@handle` still wakes a seat directly. Agent mentions outside a room stay in [README](../README.md#agent-mentions).
 
-## Quick start
+A room is a seat list plus a shared log bound to **this session**, not the project cwd.
+
+## Mental model
 
 ```text
-/room create 技术中台开发小组 --members Explorer,Worker
+/chat on zbase-dev gateway-dev
+  -> .pi/groups/<id>/meta.json + log.jsonl
+  -> session entry subagents:room { chat: true, leader: main }
+
+user types (no @)
+  -> append to the log
+  -> host (main model) runs and may room_tell / handoff
+
+user types @gateway look at the route
+  -> append to the log
+  -> wake @gateway only; host does not run
 ```
 
-Replace `Explorer,Worker` with agent types from `.pi/agents/*.md` (or global
-agents). The room becomes **active** immediately.
-
-Then type normally in the TUI:
-
-| Input | Behavior |
-|---|---|
-| `大家看一下网关超时问题` | Wake **all** members (serial turns) |
-| `@explorer 先查日志` | Wake **mentioned** only; full text still stored |
-| `/room leave` | Exit room mode (input goes to main again) |
+`group-join.ts` is unrelated: that module batches **completion notifications**. Rooms live in `src/group-chat/`.
 
 ## Commands
 
-| Command | Action |
-|---|---|
-| `/room create <name> --members <type>[,<type>…]` | Create + enter |
-| `/room list` | List rooms |
-| `/room switch <name\|id>` | Enter an existing room |
-| `/room leave` | Clear active room |
-| `/room status` | Active room + recent transcript |
+| Command | Effect |
+|---------|--------|
+| `/chat on <type> [type...]` | Create/enter a room on **this session**; host = main |
+| `/chat off` | Clear the session binding; queued seat work is dropped |
+| `/room create <name> <type> [type...]` | Same as chat on, with a display name |
+| `/room list` | Rooms on disk; `*` is bound to this session |
+| `/room leave` | Same as `/chat off` |
+| `/room status` | Binding and seats |
 
-## Product rules (locked)
+`<type>` is a user-defined agent type (1–6 seats). Duplicate types get numbered seats (`explorer`, `explorer-2`). `/new` turns chat off. `/resume` of the same session restores the binding.
 
-1. **No `@`** → wake **all** members.
-2. **`@handle`** → wake **mentioned** members only; always append the **full** user text to the room transcript.
-3. When a room is **active**, the extension performs **direct fan-out** and returns `handled` — the **main model is bypassed**.
-4. Member turns are **serial** (one finishes before the next starts).
-5. Implemented under `src/group-chat/` — does **not** overload `group-join`.
+## Mentions inside a room
+
+| Typed | Who runs | Log |
+|-------|----------|-----|
+| No `@` | Host only | Full user text |
+| `@handle` | Matching seats | Full user text |
+| `@everyone` | All seats | Full user text |
+| `@main` | Host | Full user text |
+| `@unknown` only | Host (warning) | Full user text |
+
+`@acp-*` is logged and still routed through `AcpAgent`. Seats are Pi agent types, not ACP processes.
+
+Seat turns are **serial**. A busy seat **queues**; `room_cancel` drops queued work; aborting the running turn is explicit.
 
 ## Persistence
 
 ```text
-.pi/groups/index.json                 # activeRoomId
-.pi/groups/<roomId>/meta.json         # name, members, bindings
-.pi/groups/<roomId>/transcript.jsonl  # append-only messages
+.pi/groups/<roomId>/meta.json
+.pi/groups/<roomId>/log.jsonl
 ```
 
-Each member still has a normal subagent session (spawn / resume / steer via
-`AgentManager`). Room posts are the replies captured after each serial turn.
+Who is listening is the session entry `subagents:room`, not a cwd `active.json`.
 
 ## Tools
 
-| Tool | Purpose |
-|---|---|
-| `room_read` | Read recent room transcript |
-| `room_post` | Append a note as main (does not wake members) |
+| Tool | Who | Meaning |
+|------|-----|---------|
+| `RoomEnsure` | Host | Open chat on this session |
+| `RoomLeave` | Host | `/chat off` |
+| `room_tell` | Host and seats | Wake a seat; does not end the turn |
+| `handoff` | Host and seats | Transfer the stage; caller should end the turn |
+| `room_cancel` | Host | Drop queued (and optionally abort running) work |
+| `room_say` / `room_pass` | Seats | Speak or skip |
 
-## Relation to `@handle` mentions
+Seats do not inherit `Agent`, `AcpAgent`, or bash. Code changes go through the host `AcpAgent`.
 
-Outside a room, leading `@handle message` keeps the existing Claude Code-style
-delegation behavior (steer / resume / start). Inside an active room, **all**
-non-slash input is room chat, including inline `@handle` wake selection.
+Prose that names another seat does **not** wake them.
