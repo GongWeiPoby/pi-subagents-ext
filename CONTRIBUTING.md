@@ -63,7 +63,6 @@ Other guidelines:
   harder and are likely to be split out or declined.
 - Add or update tests for behavior you change.
 - Match the surrounding code style (enforced by biome).
-- Do not edit `CHANGELOG.md`. Changelog entries are added by the maintainer.
 - Update the README when you add or change user-facing behavior.
 
 ## Questions?

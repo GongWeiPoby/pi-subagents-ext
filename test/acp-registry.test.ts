@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,10 +8,8 @@ import {
   deriveAcpHandle,
   launchCandidateFor,
   loadAcpApprovals,
-  loadAcpRegistryCache,
   parseAcpRegistry,
   removeAcpApproval,
-  saveAcpRegistryCache,
   upsertAcpApproval,
 } from "../src/acp/registry.js";
 
@@ -153,26 +151,6 @@ describe("ACP registry and approvals", () => {
       sha256: "a".repeat(64),
       requiresInstalledBinary: true,
     });
-  });
-
-  it("caches only a validated registry", () => {
-    const registry = parseAcpRegistry({
-      version: "1.0.0",
-      agents: [{
-        id: "gemini",
-        name: "Gemini",
-        version: "1.0.0",
-        description: "Gemini CLI",
-        distribution: { npx: { package: "gemini@1.0.0" } },
-      }],
-    });
-    expect(saveAcpRegistryCache(registry, agentDir, "2026-09-15T00:00:00.000Z")).toBe(true);
-    expect(loadAcpRegistryCache(agentDir)).toEqual({
-      version: 1,
-      fetchedAt: "2026-09-15T00:00:00.000Z",
-      registry,
-    });
-    expect(JSON.parse(readFileSync(join(agentDir, "acp-registry-cache.json"), "utf-8")).registry.version).toBe("1.0.0");
   });
 
   it("lists Codeg's 15 built-ins, including Kimi Code", () => {

@@ -38,7 +38,9 @@ function writeApproval(staticEnv: Record<string, string> = {}) {
 }
 
 function boot(enabled: boolean, staticEnv: Record<string, string> = {}) {
-  environment = hermeticDir({ testAgents: true, settings: { acpEnabled: enabled, outputTranscript: false } });
+  environment = hermeticDir({ testAgents: true, settings: { outputTranscript: false } });
+  mkdirSync(getAgentDir(), { recursive: true });
+  writeFileSync(join(getAgentDir(), "subagents.json"), JSON.stringify({ acpEnabled: enabled }));
   writeApproval(staticEnv);
   const booted = makePi();
   subagentsExtension(booted.pi);
@@ -172,5 +174,66 @@ describe("ACP extension wiring", () => {
     expect(result.items.map((item: { value: string }) => item.value)).toContain("@acp-codex");
     const prefix = await provider.getSuggestions(["@acp-"], 0, 5, { signal: new AbortController().signal });
     expect(prefix.items.map((item: { value: string }) => item.value)).toContain("@acp-codex");
+  });
+
+  it("hides AcpAgent after the last approval is disabled and refreshes the approved-agent list", async () => {
+    const { tools, lifecycle, pi } = boot(true);
+    const context = tuiContext();
+    await lifecycle.get("session_start")({ type: "session_start" }, context);
+    expect(pi.getActiveTools()).toContain("AcpAgent");
+    expect(tools.get("AcpAgent").description).toContain("codex-acp");
+    expect(tools.get("AcpAgent").description).not.toContain("other-acp");
+
+    mkdirSync(getAgentDir(), { recursive: true });
+    writeFileSync(join(getAgentDir(), "acp-agents.json"), JSON.stringify({
+      version: 1,
+      agents: [
+        {
+          registryId: "codex-acp",
+          displayName: "Codex",
+          handle: "acp-codex",
+          registryVersion: "1.0.0",
+          sourceUrl: "https://example.test/codex",
+          command: process.execPath,
+          args: [fixture],
+          staticEnv: {},
+          approvedAt: "2026-09-15T00:00:00.000Z",
+          enabled: true,
+        },
+        {
+          registryId: "other-acp",
+          displayName: "Other",
+          handle: "acp-other",
+          registryVersion: "1.0.0",
+          sourceUrl: "https://example.test/other",
+          command: process.execPath,
+          args: [fixture],
+          staticEnv: {},
+          approvedAt: "2026-09-15T00:00:00.000Z",
+          enabled: true,
+        },
+      ],
+    }));
+    await lifecycle.get("session_start")({ type: "session_start" }, context);
+    expect(tools.get("AcpAgent").description).toContain("codex-acp");
+    expect(tools.get("AcpAgent").description).toContain("other-acp");
+
+    writeFileSync(join(getAgentDir(), "acp-agents.json"), JSON.stringify({
+      version: 1,
+      agents: [{
+        registryId: "codex-acp",
+        displayName: "Codex",
+        handle: "acp-codex",
+        registryVersion: "1.0.0",
+        sourceUrl: "https://example.test/codex",
+        command: process.execPath,
+        args: [fixture],
+        staticEnv: {},
+        approvedAt: "2026-09-15T00:00:00.000Z",
+        enabled: false,
+      }],
+    }));
+    await lifecycle.get("session_start")({ type: "session_start" }, context);
+    expect(pi.getActiveTools()).not.toContain("AcpAgent");
   });
 });

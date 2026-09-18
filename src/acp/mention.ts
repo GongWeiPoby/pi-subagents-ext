@@ -5,7 +5,6 @@ import type { ApprovedAcpAgent } from "./registry.js";
 export interface AcpMentionRouteTarget {
   handle: string;
   registryId: string;
-  resume?: string;
 }
 
 function escapeRegex(value: string): string {

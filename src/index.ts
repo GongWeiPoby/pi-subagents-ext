@@ -695,7 +695,7 @@ export default function (pi: ExtensionAPI) {
   let acpConversations: AcpConversationManager | undefined;
   let activeAcpRootSessionId: string | undefined;
   let ownAcpToolDescription: string | undefined;
-  const reservedAcpIds = new Set<string>();
+  const reservedAcpIds = new Map<string, string>();
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -990,9 +990,7 @@ export default function (pi: ExtensionAPI) {
       : undefined;
     if (!activeAcpRoute) return;
     const targets = activeAcpRoute.required.map(target =>
-      target.resume
-        ? `@${target.handle} => AcpAgent(resume="${target.resume}")`
-        : `@${target.handle} => AcpAgent(agent="${target.registryId}")`,
+      `@${target.handle} => AcpAgent(agent="${target.registryId}")`,
     ).join("\n");
     return {
       systemPrompt: `${event.systemPrompt}\n\nExternal ACP delegation requested by the user (authoritative routing):\n${targets}\n` +
@@ -1361,7 +1359,7 @@ export default function (pi: ExtensionAPI) {
   // param schema reflects the persisted setting. Runtime toggles via /agents
   // → Settings short-circuit the menu entry + the execute-time addJob path
   // immediately, but the schema-level removal only takes effect on next
-  // extension load (next pi session). Documented in CHANGELOG/README.
+  // extension load (next pi session). Documented in README.
   let schedulingEnabled = true;
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
@@ -2485,22 +2483,28 @@ Terse command-style prompts produce shallow, generic work.
   // ---- External ACP Agent tool ----
 
   function ensureAcpToolRegistered(): void {
-    if (ownAcpToolDescription) return;
-    if (!isAcpEnabled() || !loadAcpApprovals().agents.some(agent => agent.enabled)) return;
-    const approvedList = loadAcpApprovals().agents
-      .filter(agent => agent.enabled)
-      .map(agent => `${agent.registryId} (@${agent.handle}, ${agent.displayName})`)
-      .join(", ");
-
-    ownAcpToolDescription =
+    const enabled = isAcpEnabled() ? loadAcpApprovals().agents.filter(agent => agent.enabled) : [];
+    if (enabled.length === 0) return;
+    const description =
       "Start or continue an approved external ACP coding agent in its own local process and session. Always runs in the background. " +
       "The external agent cannot see this conversation, so `prompt` must spell out everything it needs: the goal, relevant background and absolute paths, any constraints, and exactly what to return. " +
       "Use `agent` for a fresh conversation or `resume` for an existing ACP attempt id/handle, never both, and never send empty strings for either. " +
-      `Approved agents: ${approvedList}.`;
+      `Approved agents: ${enabled.map(agent => `${agent.registryId} (@${agent.handle}, ${agent.displayName})`).join(", ")}.`;
+    if (ownAcpToolDescription) {
+      if (description === ownAcpToolDescription) return;
+      try {
+        const registered = pi.getAllTools().find(tool => tool.name === SUBAGENT_TOOL_NAMES.ACP_AGENT);
+        if (!registered || registered.description !== ownAcpToolDescription) return;
+        registered.description = description;
+        ownAcpToolDescription = description;
+      } catch { /* host may not expose the tool registry */ }
+      return;
+    }
+    ownAcpToolDescription = description;
     registerToolReportingUsage(defineTool({
       name: SUBAGENT_TOOL_NAMES.ACP_AGENT,
       label: "ACP Agent",
-      description: ownAcpToolDescription,
+      description,
       promptSnippet: "Delegate to approved external ACP coding agents",
       promptGuidelines: [
         "Use AcpAgent exactly once for every explicit @acp-* mention. Never substitute Agent or a native subagent mechanism.",
@@ -2509,7 +2513,7 @@ Terse command-style prompts produce shallow, generic work.
         "When several ACP agents share a cwd, give them read-only or non-overlapping write scopes; ACP worktree isolation is not available.",
       ],
       parameters: Type.Object({
-        agent: Type.Optional(Type.String({ description: "Approved ACP Registry id for a fresh conversation." })),
+        agent: Type.Optional(Type.String({ description: "Approved Codeg builtin id for a fresh conversation." })),
         resume: Type.Optional(Type.String({ description: "Existing ACP attempt id or @acp-* conversation handle to continue or queue." })),
         prompt: Type.String({ description: "Complete prompt for the sub-agent. It cannot see this conversation, so spell out the goal, relevant background and absolute paths, any constraints, and exactly what to return." }),
         description: Type.String({ description: "Short 3-5 word label shown in the Agents widget." }),
@@ -2539,7 +2543,7 @@ Terse command-style prompts produce shallow, generic work.
         const routeTarget = activeAcpRoute?.required.find(target =>
           agent !== undefined
             ? target.registryId === agent
-            : resume !== undefined && (target.resume === resume || target.handle === resume),
+            : resume !== undefined && target.handle === resume,
         );
         if (routeTarget) {
           if (activeAcpRoute!.starting.has(routeTarget.handle) || activeAcpRoute!.started.has(routeTarget.handle)) {
@@ -2690,15 +2694,30 @@ Terse command-style prompts produce shallow, generic work.
     const enabledApprovals = isAcpEnabled()
       ? loadAcpApprovals().agents.filter(agent => agent.enabled)
       : [];
+    const enabledIds = new Set(enabledApprovals.map(agent => agent.registryId));
+    const inFlightIds = new Set<string>();
+    for (const conversation of acpConversations?.list() ?? []) {
+      if (!conversation.closed) inFlightIds.add(conversation.registryId);
+    }
+    for (const record of manager.listAgents()) {
+      if (record.runtime === "acp" && (record.status === "running" || record.status === "queued") && record.registryId) {
+        inFlightIds.add(record.registryId);
+      }
+    }
+    for (const [id, handle] of [...reservedAcpIds]) {
+      if (enabledIds.has(id) || inFlightIds.has(id)) continue;
+      manager.releaseExternalHandle(handle);
+      reservedAcpIds.delete(id);
+    }
     for (const agent of enabledApprovals) {
       if (reservedAcpIds.has(agent.registryId)) continue;
       if (!manager.hasExternalHandle(agent.handle) && !manager.reserveExternalHandle(agent.handle)) {
         ctx.ui.notify(`ACP handle @${agent.handle} conflicts with an existing agent and is unavailable in this session.`, "warning");
         continue;
       }
-      reservedAcpIds.add(agent.registryId);
+      reservedAcpIds.set(agent.registryId, agent.handle);
     }
-    if (!isAcpEnabled() || reservedAcpIds.size === 0) {
+    if (!isAcpEnabled() || enabledApprovals.length === 0) {
       acpConversations?.reconcileApprovals();
       try {
         const active = pi.getActiveTools();

@@ -12,6 +12,16 @@ function isAcpHandle(value: string): boolean {
   return /^acp-[a-z0-9_-]{1,60}$/.test(value);
 }
 
+function existingDirectory(cwd: string): string {
+  if (!isAbsolute(cwd)) throw new Error("ACP `cwd` must be an absolute existing directory.");
+  try {
+    if (!statSync(cwd).isDirectory()) throw new Error();
+  } catch {
+    throw new Error(`ACP cwd is not an existing directory: "${cwd}".`);
+  }
+  return cwd;
+}
+
 export interface AcpRuntime {
   readonly info: AcpSessionRuntime["info"];
   readonly isClosed: boolean;
@@ -113,20 +123,21 @@ export class AcpConversationManager {
         || typeof ref.conversationId !== "string"
         || !ref.conversationId.startsWith("acp-conv-")
         || !isAcpHandle(ref.handle)
-        || !isAbsolute(ref.cwd)
         || typeof ref.sessionId !== "string"
         || !ref.sessionId
         || !["resume", "load", "none"].includes(ref.resumeMode)
       ) continue;
       const approval = this.approvals().find(agent => agent.enabled && agent.registryId === ref.registryId);
       if (!approval || this.conversations.has(ref.conversationId)) continue;
+      let cwd: string;
+      try { cwd = existingDirectory(ref.cwd); } catch { continue; }
       if (ref.handle !== approval.handle && !this.manager.reserveExternalHandle(ref.handle)) continue;
       this.conversations.set(ref.conversationId, {
         id: ref.conversationId,
         handle: ref.handle,
         registryId: ref.registryId,
         displayName: approval.displayName,
-        cwd: ref.cwd,
+        cwd,
         rootSessionId: ref.rootSessionId,
         sessionId: ref.sessionId,
         resumeMode: ref.resumeMode,
@@ -178,14 +189,7 @@ export class AcpConversationManager {
 
   start(input: AcpStartInput, hooks: AcpAttemptHooks = {}): { conversation: AcpConversation; record: AgentRecord } {
     const approval = this.approval(input.registryId);
-    if (input.cwd !== undefined) {
-      if (!isAbsolute(input.cwd)) throw new Error("ACP `cwd` must be an absolute existing directory.");
-      try {
-        if (!statSync(input.cwd).isDirectory()) throw new Error();
-      } catch {
-        throw new Error(`ACP cwd is not an existing directory: "${input.cwd}".`);
-      }
-    }
+    const cwd = existingDirectory(input.cwd ?? this.ctx.cwd);
     const baseInUse = [...this.conversations.values()].some(conversation => conversation.handle === approval.handle);
     let handle: string;
     if (baseInUse) {
@@ -202,7 +206,7 @@ export class AcpConversationManager {
       handle,
       registryId: approval.registryId,
       displayName: approval.displayName,
-      cwd: input.cwd ?? this.ctx.cwd,
+      cwd,
       rootSessionId: this.ctx.sessionManager.getSessionId(),
       resumeMode: "none",
       closed: false,

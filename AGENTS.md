@@ -113,18 +113,6 @@ Testing section: paste real results (`npm run lint`, `npm run typecheck`, `npm r
 - Write the comment to a temp file and post with `gh issue/pr comment --body-file` (never multi-line markdown via `--body`).
 - Keep comments concise, technical, and in the user's tone.
 
-## Changelog
-
-Location: `CHANGELOG.md` (single file, [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format).
-
-- All new entries go under `## [Unreleased]`, in the right subsection (`### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Security`, `### Refactored`). Read the section first and append to existing subsections; never duplicate them.
-- One bullet per issue/PR. Never combine separate issues or pull requests into a single entry, even when they touch the same or similar components. (A PR together with the issue it closes or that diagnosed it is one change — one bullet citing both.)
-- Breaking changes are not a separate subsection. Call them out with a `> **⚠️ Breaking: …**` blockquote at the top of the version section, and/or a bold `**BREAKING:**` bullet under `### Changed`, with a migration note.
-- Entries are concise — a bold lead-in stating what changed, then a sentence or two on why it changed and anything a user must do about it. Aim for 2–4 sentences; a genuinely intricate change may run longer, but length is never the goal. Do not match the density of older entries, several of which are far too long.
-- Cut what the reader doesn't need: narration of the investigation, alternatives considered and rejected, restatements of the diff, and detail recoverable from the code or the linked issue. Name a file or symbol only when it helps someone find the change.
-- Released version sections (e.g. `## [0.12.0]`) are immutable; never modify them.
-- Attribute external contributions: `... ([#456](https://github.com/tintinweb/pi-subagents/pull/456) — thanks [@username](https://github.com/username))`.
-
 ## Releasing
 
 **Versioning** (all releases are `0.x`, no major bumps):
@@ -134,7 +122,6 @@ Location: `CHANGELOG.md` (single file, [Keep a Changelog](https://keepachangelog
 
 Before a release:
 
-- Update `CHANGELOG.md` — move the `## [Unreleased]` entries under a new `## [X.Y.Z]` version section, and add a fresh empty `## [Unreleased]` for the next cycle.
 - Update `README.md` if user-facing behavior changed (features list, settings, usage), and the matching guide in `docs/` if the change touches workflows or the event/RPC surface.
 - Run the full check suite plus the e2e tests, and fix anything that fails:
   ```bash

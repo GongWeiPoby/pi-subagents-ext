@@ -18,7 +18,7 @@ The master switch is `acpEnabled` in `<agentDir>/subagents.json` and defaults to
 
 Project configuration cannot supply or override an executable, arguments or environment. The approve list is the Codeg builtin catalog, not the official ACP Registry.
 
-`npx` commands use `--prefix <agentDir>` so they do not inherit a project's `package.json` or `.npmrc`. `uvx` still uses its own cache. Binary Registry entries are downloaded on approval into `<agentDir>/acp-binaries/<registryId>/<version-hash>/`, SHA-256 verified when the Registry supplies a digest, extracted without archive links/symlinks, and approved as an exact absolute command. Installer formats such as `.dmg`, `.deb`, `.rpm` and `.msi` are rejected. Missing SHA-256 is shown in the approval prompt and is a known Registry gap.
+`npx` commands use `--prefix <agentDir>` so they do not inherit a project's `package.json` or `.npmrc`, and the `npx`/`uvx` binaries themselves are resolved from PATH (never the project cwd). The catalog has no `uvx` entries. Binary pins are streamed on approval into `<agentDir>/acp-binaries/<registryId>/<version-hash>/` with a 1 GiB cap, SHA-256 verified only when that pin supplies a digest (Codeg binary pins currently do not), extracted without archive links/symlinks, and approved as an exact absolute command. Installer formats such as `.dmg`, `.deb`, `.rpm` and `.msi` are rejected. Missing SHA-256 is shown in the approval prompt.
 
 ## Security and permissions
 
@@ -32,7 +32,7 @@ Permission policy is **YOLO**:
 
 The client does not advertise ACP `fs/*`, `terminal/*` or elicitation capabilities. External agents use their own file and command tools. Their capabilities are not constrained by Pi Agent `tools:`, `extensions:` or `isolated:` configuration.
 
-Authentication reuses the agent/adapter's existing CLI login. Pi-subagents does not collect or store provider credentials and does not advertise ACP terminal-auth capability. Kimi Code preserves a real `~/.kimi-code/credentials/kimi-code.json` login. Its local ACP gate token is created only when `config.toml` or `KIMI_MODEL_API_KEY` contains a non-empty API key; OAuth configurations with an empty `api_key` must have a real access/refresh token and remove any synthetic token previously written by this extension. Native `settings.json` `env` string values are projected only into the launched child for Claude (`~/.claude` or `CLAUDE_CONFIG_DIR`), Gemini (`$GEMINI_CLI_HOME/.gemini` or `~/.gemini`) and Qwen (`$QWEN_HOME` or `~/.qwen`); approved static env still wins.
+Authentication reuses the agent/adapter's existing CLI login. Pi-subagents does not collect or store provider credentials and does not advertise ACP terminal-auth capability. Kimi Code preserves a real `~/.kimi-code/credentials/kimi-code.json` login. Its local ACP gate token is created only when `config.toml` or `KIMI_MODEL_API_KEY` contains a non-empty API key; OAuth configurations with an empty `api_key` must have a real access/refresh token and remove any synthetic token previously written by this extension. Native `settings.json` `env` string values are projected only into the launched child for Claude (`claude-acp`; `~/.claude` or `CLAUDE_CONFIG_DIR`), Gemini (`gemini`; `$GEMINI_CLI_HOME/.gemini` or `~/.gemini`) and Qwen (`qwen-code`; `$QWEN_HOME` or `~/.qwen`); approved static env still wins. The catalog pin is `qoder-cli`, not `qwen-code`, so that Qwen projection does not apply to Qoder.
 
 Codex ACP otherwise ignores `~/.codex/config.toml` sandbox/approval for ordinary turns. The launch sets `DISABLE_MCP_CONFIG_FILTERING=true` and, when those keys are present, `INITIAL_AGENT_MODE` (`read-only` / `agent` / `agent-full-access`) so a `danger-full-access` + `never` config can use the network. Grok gets `--no-auto-update` and a non-default `[ui].permission_mode` as `--permission-mode` before `agent stdio`. Cursor gets `--force` / `--model` from `CURSOR_FORCE` / `CURSOR_MODEL` when set. `npx --prefix` is launch-only; `npm_config_prefix` is stripped from the child unless the approval stored it. If an attempt reports authentication required, the error lists the methods the agent actually advertised. Verify the corresponding CLI can complete a non-interactive prompt, then log in again if needed.
 
@@ -130,19 +130,18 @@ Lifecycle events reuse the top-level subagent channels. ACP attempts add `runtim
 | Agent selects another protocol version | Startup fails; no v2 fallback |
 | Agent returns `end_turn` without output | Attempt fails instead of being reported as completed. The error includes a structured prompt-response failure when supplied, otherwise bounded/redacted stderr from this turn (or recent stderr), plus an agent diagnostic adapter when the ACP wire hides the underlying failure |
 | Authentication missing | The background attempt reports a CLI-login instruction and advertised method ids; no credentials are stored, and the notification wakes the main model to report or handle the failure |
-| Binary archive missing SHA-256 | Approval still proceeds after an explicit warning; the downloaded bytes are hashed only when the Registry supplies a digest |
+| Binary archive missing SHA-256 | Approval still proceeds after an explicit warning; the downloaded bytes are hashed only when the pin supplies a digest |
 | Binary archive contains links or unsupported formats | Install fails before the approval is saved |
 | Permission has no allow option | Attempt fails instead of choosing reject and pretending success |
 | `session/resume`/`session/load` unsupported | Persisted conversation is not silently replaced by a fresh one |
 | Process ignores cancellation | Connection closes, then the extension terminates its owned process tree |
-| Registry unavailable | Refresh reports the error; existing approved launch specs still work |
 | Approval removed/disabled | New starts and follow-ups fail; the current running turn may finish or be stopped |
 
 ## Limitations
 
 - ACP v1 only; no experimental v2 behavior.
-- Any current-platform Registry agent can be approved. Codex ACP 1.12.0 has a complete live smoke; Claude Agent ACP 0.78.0 has been verified through ACP session/prompt, with remaining failures belonging to the configured provider rather than ACP itself. Other entries remain untested against live models.
-- Binary installs are version-locked at approval time; later Registry updates require a new approval. Automatic uninstall/update is not provided.
+- Only Codeg's 15 builtin pins can be approved. Codex ACP 1.10.0 and Claude Agent ACP 0.75.1 are the approved pins and match live smoke. Other catalog entries remain untested against live models.
+- Binary installs are version-locked at approval time; a later pin change requires a new approval. Automatic uninstall/update is not provided.
 - No ACP terminal login UI, client filesystem, elicitation, rich diff or complete transcript UI.
 - No ACP agents from `TaskExecute`, `SubagentWorkflow`, schedules, nested agents or cross-extension RPC.
 - No external-agent recursive delegation through this extension.

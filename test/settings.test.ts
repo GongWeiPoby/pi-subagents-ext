@@ -120,10 +120,10 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ acpEnabled: false, maxConcurrent: 8 });
   });
 
-  it("lifts a legacy project acpEnabled into the machine file when global has none", () => {
+  it("ignores project acpEnabled and does not lift it into the machine file", () => {
     writeProject({ acpEnabled: true, maxConcurrent: 3 });
-    expect(loadSettings(projectDir)).toEqual({ acpEnabled: true, maxConcurrent: 3 });
-    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ acpEnabled: true });
+    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 3 });
+    expect(existsSync(globalFile())).toBe(false);
   });
 
   it("drops non-boolean acpEnabled values", () => {

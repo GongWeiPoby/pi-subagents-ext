@@ -368,7 +368,7 @@ Result artifacts are an internal persistence aid, not verification credentials a
 
 ## External ACP agents
 
-External ACP agents are disabled by default. Enable `/agents → Settings → External ACP agents`, then use `/agents → External ACP agents` to approve one of Codeg's 15 built-in launch pins. New approvals and first enablement apply after `/reload` or a new session.
+External ACP agents are disabled by default. Enable `/agents → Settings → External ACP agents`, then use `/agents → External ACP agents` to approve one of Codeg's 15 built-in launch pins. Enabling or approving binds in the current session.
 
 Approved agents appear as `@acp-*` handles. These mentions stay in the main turn so the coordinator can write a self-contained task and call `AcpAgent`; several inline mentions require one background call per distinct target. An all-ACP tool batch ends after returning launch receipts instead of spending another main-model round trip announcing that delegation started. Completion and failure notifications then wake the main model, matching ordinary background subagents, so it can retrieve the full result and continue dependent work. A silent ACP `end_turn` is reported as an error with structured response failure metadata, bounded/redacted agent stderr, or an agent-specific persisted diagnostic when available. Stable ACP v1 has no universal mid-turn steering, so a message to a running ACP conversation becomes a queued follow-up attempt. All ACP permission requests use YOLO mode (`allow_always`, falling back to `allow_once`). The client does not advertise `fs/*` or `terminal/*`; adapters use their own tools and existing CLI/config stores. Binary entries (OpenCode, Cursor, Antigravity) are installed on approval into a version-locked machine directory.
 
@@ -617,7 +617,7 @@ Start or continue one approved external ACP coding-agent conversation. The tool 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent` | string | exactly one of `agent`/`resume` | Approved ACP Registry id for a fresh conversation |
+| `agent` | string | exactly one of `agent`/`resume` | Approved Codeg builtin id for a fresh conversation |
 | `resume` | string | exactly one of `agent`/`resume` | Existing ACP attempt id or `@acp-*` conversation handle; queues when its prompt is running |
 | `prompt` | string | yes | Complete prompt for the sub-agent (goal, background, paths, constraints, what to return) |
 | `description` | string | yes | Short UI label |
@@ -878,7 +878,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, default workflow agent, default join mode, scheduling on/off, external ACP agents on/off, scope models on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. `/agents` → Settings writes `acpEnabled` here; other keys are still edited by hand.
-- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings. `acpEnabled` in this file is ignored after it has been lifted into the machine file.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings. A project file cannot turn ACP on; `acpEnabled` there is ignored.
 
 **Precedence:** project overrides global on any field present in both. Missing operational settings use background concurrency `10`, workflow concurrency `2` per run, foreground concurrency `0` (unlimited), unlimited turns, grace turns `5`, nested depth `2`, and join mode `smart`. No agent is configured implicitly. An empty project `defaultAgent` clears a global default.
 
@@ -1219,7 +1219,7 @@ src/
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
 
   # External ACP agents
-  acp/registry.ts     # Official Registry parsing/cache and machine-level command approvals
+  acp/registry.ts     # Codeg builtin catalog and machine-level command approvals
   acp/installer.ts    # HTTPS binary download, SHA-256 verification and safe extraction
   acp/runtime.ts      # Official TypeScript SDK client + ACP adapter process lifecycle
   acp/conversation-manager.ts # Stable conversations, immutable attempts and FIFO follow-ups

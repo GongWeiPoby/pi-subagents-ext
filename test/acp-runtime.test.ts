@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovedAcpAgent } from "../src/acp/registry.js";
-import { AcpSessionRuntime } from "../src/acp/runtime.js";
+import { AcpSessionRuntime, resolvePathLauncher } from "../src/acp/runtime.js";
+import { emptyTurnError } from "../src/acp/turn-diagnostics.js";
 
 const fixture = resolve("test/fixtures/acp-test-agent.mjs");
 
@@ -166,6 +167,34 @@ describe("AcpSessionRuntime", () => {
     await runtime.close();
   });
 
+  it("redacts secrets in prompt-response failure metadata", () => {
+    const message = emptyTurnError({
+      registryId: "fixture-acp",
+      agentName: "Fixture",
+      sessionId: "session-1",
+      response: {
+        stopReason: "end_turn",
+        _meta: {
+          jetbrains: {
+            air: {
+              sessionFailure: {
+                title: "Authorization failed",
+                details: "Bearer tok_live_abcdefg sk-live-secretvalue99",
+              },
+            },
+          },
+        },
+      },
+      stderrBefore: "",
+      stderrAfter: "",
+      env: {},
+    });
+    expect(message).toContain("Bearer [REDACTED]");
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("tok_live_abcdefg");
+    expect(message).not.toContain("sk-live-secretvalue99");
+  });
+
   it("includes bounded agent stderr when an adapter returns an empty end_turn", async () => {
     const runtime = await AcpSessionRuntime.start({ approval: approval(), cwd });
     await expect(runtime.run("empty-stderr")).rejects.toThrow(
@@ -254,5 +283,31 @@ describe("AcpSessionRuntime", () => {
       approval: { ...approval(), command: join(cwd, "missing-agent") },
       cwd,
     })).rejects.toThrow(/during initialize.*(?:ENOENT|spawn)/);
+  });
+});
+
+describe("resolvePathLauncher", () => {
+  it("resolves npx from PATH and ignores a same-named file in cwd", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-acp-path-"));
+    try {
+      const pathDir = join(root, "bin");
+      const cwd = join(root, "cwd");
+      mkdirSync(pathDir);
+      mkdirSync(cwd);
+      const onPath = join(pathDir, "npx");
+      const onPathCmd = join(pathDir, "npx.cmd");
+      const inCwd = join(cwd, "npx");
+      writeFileSync(onPath, "#!/bin/sh\n");
+      writeFileSync(onPathCmd, "@echo off\n");
+      writeFileSync(inCwd, "#!/bin/sh\n");
+      chmodSync(onPath, 0o755);
+      chmodSync(inCwd, 0o755);
+      expect(resolvePathLauncher("npx", { PATH: pathDir }, "linux")).toBe(onPath);
+      expect(resolvePathLauncher("npx.cmd", { Path: pathDir }, "win32")).toBe(onPathCmd);
+      expect(() => resolvePathLauncher("npx", { PATH: "" }, "linux")).toThrow(/not found on PATH/);
+      expect(resolvePathLauncher(onPath, { PATH: "" })).toBe(onPath);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

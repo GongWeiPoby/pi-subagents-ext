@@ -482,17 +482,12 @@ function readSettingsFile(path: string): SubagentsSettings {
 export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
   const global = readSettingsFile(globalPath());
   const project = readSettingsFile(projectPath(cwd));
-  const { acpEnabled: projectAcpEnabled, ...projectRest } = project;
-  let acpEnabled = global.acpEnabled;
-  // One-time lift: older builds stored the switch in the project file.
-  if (typeof acpEnabled !== "boolean" && typeof projectAcpEnabled === "boolean") {
-    acpEnabled = projectAcpEnabled;
-    writeSettingsFile(globalPath(), { ...global, acpEnabled });
-  }
+  const projectRest = { ...project };
+  delete projectRest.acpEnabled;
   return {
     ...global,
     ...projectRest,
-    ...(typeof acpEnabled === "boolean" ? { acpEnabled } : {}),
+    ...(typeof global.acpEnabled === "boolean" ? { acpEnabled: global.acpEnabled } : {}),
   };
 }
 

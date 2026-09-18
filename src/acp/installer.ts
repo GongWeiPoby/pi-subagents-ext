@@ -13,8 +13,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import decompress from "decompress";
 import type { AcpLaunchCandidate } from "./registry.js";
 
-const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
-const MAX_EXTRACTED_BYTES = 512 * 1024 * 1024;
+/** Linux/x64 Antigravity 1.1.1 zip is 681969407 bytes; 1 GiB leaves headroom. */
+const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_FILES = 50_000;
 
 function installKey(candidate: AcpLaunchCandidate): string {
@@ -116,18 +117,44 @@ async function fetchHttps(url: URL, signal?: AbortSignal): Promise<Response> {
   throw new Error(`Registry binary download exceeded ${MAX_REDIRECTS} redirects.`);
 }
 
+export async function readCappedArchiveBody(
+  response: Response,
+  signal?: AbortSignal,
+  maxBytes = MAX_ARCHIVE_BYTES,
+): Promise<Buffer> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`Registry binary exceeds the ${maxBytes} byte download limit.`);
+  }
+  if (!response.body) throw new Error("Registry binary download returned an empty body.");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        throw new Error(`Registry binary exceeds the ${maxBytes} byte download limit.`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  return Buffer.concat(chunks, received);
+}
+
 async function download(candidate: AcpLaunchCandidate, signal?: AbortSignal): Promise<Buffer> {
   const archive = candidate.archive;
   if (!archive) throw new Error(`Registry entry ${candidate.registryId} has no binary archive URL.`);
   const response = await fetchHttps(new URL(archive), signal);
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_ARCHIVE_BYTES) {
-    throw new Error(`Registry binary exceeds the ${MAX_ARCHIVE_BYTES} byte download limit.`);
-  }
-  const body = Buffer.from(await response.arrayBuffer());
-  if (body.length > MAX_ARCHIVE_BYTES) {
-    throw new Error(`Registry binary exceeds the ${MAX_ARCHIVE_BYTES} byte download limit.`);
-  }
+  const body = await readCappedArchiveBody(response, signal);
   if (candidate.sha256) {
     const actual = createHash("sha256").update(body).digest("hex");
     if (actual !== candidate.sha256.toLowerCase()) throw new Error("Registry binary SHA-256 mismatch.");

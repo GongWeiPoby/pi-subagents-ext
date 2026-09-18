@@ -53,14 +53,17 @@ function promptFailure(response: PromptResponse): string | undefined {
   const jetbrains = object(meta?.jetbrains);
   const air = object(jetbrains?.air);
   const failure = object(air?.sessionFailure);
+  let raw: string | undefined;
   if (failure) {
     const title = text(failure.title);
     const details = text(failure.details);
-    if (title || details) return [title, details].filter(Boolean).join(": ");
+    if (title || details) raw = [title, details].filter(Boolean).join(": ");
+  } else {
+    const codex = object(meta?.codex);
+    const codexError = object(codex?.error);
+    raw = text(codexError?.message) ?? text(codexError?.error);
   }
-  const codex = object(meta?.codex);
-  const codexError = object(codex?.error);
-  return text(codexError?.message) ?? text(codexError?.error);
+  return raw ? sanitizeDiagnostic(raw) : undefined;
 }
 
 function readTail(path: string): string | undefined {

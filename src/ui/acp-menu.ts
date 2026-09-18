@@ -133,7 +133,7 @@ async function showApproved(ctx: ExtensionCommandContext): Promise<void> {
   const result = upsertAcpApproval({ ...selected, enabled: !selected.enabled });
   ctx.ui.notify(
     result.ok
-      ? `${selected.displayName} ${selected.enabled ? "disabled" : "enabled"}. Run /reload for tool/mention changes.`
+      ? `${selected.displayName} ${selected.enabled ? "disabled" : "enabled"} in this session.`
       : result.error,
     result.ok ? "info" : "error",
   );

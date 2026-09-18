@@ -3,10 +3,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { handleBase } from "../mention.js";
 
-export const ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const APPROVALS_VERSION = 1;
-const REGISTRY_CACHE_VERSION = 1;
-const MAX_REGISTRY_BYTES = 5 * 1024 * 1024;
 const REGISTRY_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 export interface ApprovedAcpAgent {
@@ -66,12 +63,6 @@ export interface AcpRegistryIndex {
   agents: AcpRegistryAgent[];
 }
 
-interface AcpRegistryCache {
-  version: 1;
-  fetchedAt: string;
-  registry: AcpRegistryIndex;
-}
-
 export interface AcpLaunchCandidate {
   registryId: string;
   displayName: string;
@@ -89,10 +80,6 @@ export interface AcpLaunchCandidate {
 
 function approvalsPath(agentDir = getAgentDir()): string {
   return join(agentDir, "acp-agents.json");
-}
-
-function registryCachePath(agentDir = getAgentDir()): string {
-  return join(agentDir, "acp-registry-cache.json");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -385,43 +372,6 @@ export function parseAcpRegistry(value: unknown): AcpRegistryIndex {
   return { version: value.version, agents };
 }
 
-export async function fetchAcpRegistry(signal?: AbortSignal): Promise<AcpRegistryIndex> {
-  const response = await fetch(ACP_REGISTRY_URL, { signal });
-  if (!response.ok) throw new Error(`ACP registry request failed: HTTP ${response.status}`);
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_REGISTRY_BYTES) {
-    throw new Error(`ACP registry response exceeds ${MAX_REGISTRY_BYTES} bytes.`);
-  }
-  const text = await response.text();
-  if (Buffer.byteLength(text) > MAX_REGISTRY_BYTES) {
-    throw new Error(`ACP registry response exceeds ${MAX_REGISTRY_BYTES} bytes.`);
-  }
-  return parseAcpRegistry(JSON.parse(text));
-}
-
-export function saveAcpRegistryCache(
-  registry: AcpRegistryIndex,
-  agentDir = getAgentDir(),
-  fetchedAt = new Date().toISOString(),
-): boolean {
-  const cache: AcpRegistryCache = { version: REGISTRY_CACHE_VERSION, fetchedAt, registry };
-  return atomicWrite(registryCachePath(agentDir), cache);
-}
-
-export function loadAcpRegistryCache(agentDir = getAgentDir()): AcpRegistryCache | undefined {
-  const path = registryCachePath(agentDir);
-  if (!existsSync(path)) return undefined;
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"));
-    if (!isPlainObject(raw) || raw.version !== REGISTRY_CACHE_VERSION || typeof raw.fetchedAt !== "string") {
-      return undefined;
-    }
-    return { version: REGISTRY_CACHE_VERSION, fetchedAt: raw.fetchedAt, registry: parseAcpRegistry(raw.registry) };
-  } catch {
-    return undefined;
-  }
-}
-
 function registryPlatform(): string | undefined {
   const os = process.platform === "darwin" ? "darwin"
     : process.platform === "linux" ? "linux"
@@ -437,7 +387,7 @@ export function launchCandidateFor(
   agent: AcpRegistryAgent,
   agentDir = getAgentDir(),
 ): AcpLaunchCandidate | undefined {
-  const sourceUrl = agent.repository ?? agent.website ?? ACP_REGISTRY_URL;
+  const sourceUrl = agent.repository ?? agent.website ?? CODEG_SOURCE;
   if (agent.distribution.npx) {
     return {
       registryId: agent.id,

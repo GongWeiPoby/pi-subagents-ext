@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { installAcpBinary } from "../src/acp/installer.js";
+import { installAcpBinary, readCappedArchiveBody } from "../src/acp/installer.js";
 import type { AcpLaunchCandidate } from "../src/acp/registry.js";
 
 function candidate(overrides: Partial<AcpLaunchCandidate> = {}): AcpLaunchCandidate {
@@ -25,13 +25,12 @@ function candidate(overrides: Partial<AcpLaunchCandidate> = {}): AcpLaunchCandid
 }
 
 function response(body: Buffer, url: string): Response {
-  return {
-    ok: true,
+  const res = new Response(body, {
     status: 200,
-    headers: new Headers({ "content-length": String(body.length) }),
-    url,
-    arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
-  } as Response;
+    headers: { "content-length": String(body.length) },
+  });
+  Object.defineProperty(res, "url", { value: url });
+  return res;
 }
 
 const tempDirs: string[] = [];
@@ -163,5 +162,18 @@ describe("ACP binary installer", () => {
       archive: "https://example.test/linked.tar.gz",
       command: "./link",
     }), { agentDir })).rejects.toThrow(/unsupported symlink/);
+  });
+
+  it("aborts oversized downloads without trusting Content-Length", async () => {
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new Uint8Array(8));
+      },
+    });
+    const res = new Response(body, { status: 200 });
+    await expect(readCappedArchiveBody(res, undefined, 16)).rejects.toThrow(/16 byte download limit/);
+    expect(pulls).toBeLessThan(8);
   });
 });

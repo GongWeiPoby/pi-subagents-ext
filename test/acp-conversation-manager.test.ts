@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AcpConversationManager,
   type AcpRuntime,
@@ -33,20 +36,26 @@ const approval: ApprovedAcpAgent = {
   enabled: true,
 };
 
-const ctx = {
-  cwd: "/tmp/project",
-  sessionManager: {
-    getSessionId: () => "root-session",
-    getSessionFile: () => undefined,
-  },
-} as unknown as ExtensionContext;
-
 describe("AcpConversationManager", () => {
   const managers: AgentManager[] = [];
+  let projectCwd: string;
+  let ctx: ExtensionContext;
+
+  beforeEach(() => {
+    projectCwd = mkdtempSync(join(tmpdir(), "pi-acp-conv-"));
+    ctx = {
+      cwd: projectCwd,
+      sessionManager: {
+        getSessionId: () => "root-session",
+        getSessionFile: () => undefined,
+      },
+    } as unknown as ExtensionContext;
+  });
 
   afterEach(async () => {
     await Promise.all(managers.map(manager => manager.dispose()));
     managers.length = 0;
+    rmSync(projectCwd, { recursive: true, force: true });
   });
 
   it("keeps a stable conversation handle while each prompt gets an immutable attempt", async () => {
@@ -322,7 +331,7 @@ describe("AcpConversationManager", () => {
     }));
 
     const foreignCtx = {
-      cwd: "/tmp/project",
+      cwd: projectCwd,
       sessionManager: { getSessionId: () => "other-session", getSessionFile: () => undefined },
     } as unknown as ExtensionContext;
     const foreign = new AcpConversationManager(
@@ -392,7 +401,36 @@ describe("AcpConversationManager", () => {
       description: "One",
       cwd: "/path/that/does/not/exist",
     })).toThrow(/not an existing directory/);
+    expect(() => new AcpConversationManager(
+      manager,
+      { ...ctx, cwd: join(projectCwd, "gone") } as ExtensionContext,
+      () => [approval],
+      () => false,
+      startRuntime,
+    ).start({
+      registryId: approval.registryId,
+      prompt: "one",
+      description: "One",
+    })).toThrow(/not an existing directory/);
     expect(startRuntime).not.toHaveBeenCalled();
+  });
+
+  it("skips restore when the persisted cwd is missing", () => {
+    const manager = new AgentManager(undefined, 10);
+    managers.push(manager);
+    manager.reserveExternalHandle(approval.handle);
+    const conversations = new AcpConversationManager(manager, ctx, () => [approval], () => false);
+    conversations.restore([{
+      rootSessionId: "root-session",
+      conversationId: "acp-conv-missing-cwd",
+      handle: approval.handle,
+      registryId: approval.registryId,
+      displayName: approval.displayName,
+      cwd: join(projectCwd, "missing-restore"),
+      sessionId: "session-old",
+      resumeMode: "resume",
+    }]);
+    expect(conversations.resolve(approval.handle)).toBeUndefined();
   });
 
   it("preserves a non-resumable conversation as an explicit unavailable target", () => {
@@ -406,7 +444,7 @@ describe("AcpConversationManager", () => {
       handle: approval.handle,
       registryId: approval.registryId,
       displayName: approval.displayName,
-      cwd: "/tmp/project",
+      cwd: projectCwd,
       sessionId: "session-old",
       resumeMode: "none",
     }]);
@@ -425,7 +463,7 @@ describe("AcpConversationManager", () => {
       handle: "explorer",
       registryId: approval.registryId,
       displayName: approval.displayName,
-      cwd: "/tmp/project",
+      cwd: projectCwd,
       sessionId: "session-old",
       resumeMode: "resume",
     }]);
@@ -437,7 +475,7 @@ describe("AcpConversationManager", () => {
       handle: approval.handle,
       registryId: approval.registryId,
       displayName: "Forged",
-      cwd: "/tmp/project",
+      cwd: projectCwd,
       sessionId: "session-old",
       resumeMode: "bogus" as PersistedAcpConversation["resumeMode"],
     }]);

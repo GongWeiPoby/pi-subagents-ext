@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
   type AgentCapabilities,
@@ -63,6 +63,36 @@ export interface AcpRuntimeInfo {
 function appendBounded(current: string, chunk: string, limit = STDERR_LIMIT): string {
   const next = current + chunk;
   return next.length <= limit ? next : next.slice(next.length - limit);
+}
+
+const PATH_LAUNCHERS = new Set(["npx", "npx.cmd", "uvx", "uvx.exe"]);
+
+function isExecutableFile(path: string, windows: boolean): boolean {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) return false;
+    return windows || (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve catalog npx/uvx names on PATH only — never cwd, never the app dir unless it is a PATH entry. */
+export function resolvePathLauncher(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (isAbsolute(command) || !PATH_LAUNCHERS.has(command.toLowerCase())) return command;
+  const windows = platform === "win32";
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === "path");
+  const pathValue = pathKey ? env[pathKey] : undefined;
+  for (const dir of (pathValue ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    if (isExecutableFile(candidate, windows)) return candidate;
+  }
+  throw new Error(`ACP command "${command}" was not found on PATH.`);
 }
 
 function nativeSettingsPath(registryId: string, env: NodeJS.ProcessEnv): string | undefined {
@@ -179,7 +209,8 @@ export class AcpSessionRuntime {
       (options.approval.command === "npx" || options.approval.command === "npx.cmd")
       && prefix
     ) mkdirSync(prefix, { recursive: true, mode: 0o700 });
-    const child = spawn(options.approval.command, args, {
+    const command = resolvePathLauncher(options.approval.command, env);
+    const child = spawn(command, args, {
       cwd: options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
