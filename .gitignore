@@ -28,17 +28,19 @@ Thumbs.db
 # Temporary files
 *.tmp
 .temp/
-.pi/readcache
 .claude
-.vscode
 coverage/
 
 # Benchmark output — absolute timings are machine-specific, never committed
 test/perf/.results/
 .gitnexus
-.pi/subagents.json
-.pi/tasks/tasks-*.json
-.pi/tasks/*.lock
+
+# Local session / research / demo (not part of the package)
+.pi/
+docs/ic-do/
+docs/ic-prepare/
+docs/ic-research/
+minecraft-demo/
 
 # Pi internal files
 progress.md
