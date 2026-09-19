@@ -622,6 +622,7 @@ Start or continue one approved external ACP coding-agent conversation. The tool 
 | `prompt` | string | yes | Complete prompt for the sub-agent (goal, background, paths, constraints, what to return) |
 | `description` | string | yes | Short UI label |
 | `cwd` | absolute path | no | Fresh-conversation working directory; defaults to the main session cwd |
+| `name` | string | no | Fresh-conversation name; the handle becomes `@acp-<name>`, persisted for later `resume` |
 
 `AcpAgent` does not accept Pi model/thinking/tools/skills/extensions options, foreground execution, scheduling, nesting, or worktree isolation. Results use the existing completion notification, `get_subagent_result`, and a live ACP overlay from FleetView or `/agents`.
 

@@ -53,6 +53,8 @@ export interface AcpStartInput {
   prompt: string;
   description: string;
   cwd?: string;
+  /** Optional user-chosen name; the conversation handle becomes `acp-<name>`. */
+  name?: string;
 }
 
 export interface AcpContinueInput {
@@ -187,19 +189,40 @@ export class AcpConversationManager {
     this.manager.notifyExternalReady();
   }
 
+  private namedHandle(name: string, approval: ApprovedAcpAgent): string {
+    const handle = `acp-${handleBase(name)}`;
+    if (!isAcpHandle(handle)) {
+      throw new Error(`ACP conversation name "${name}" does not produce a valid handle. Use letters, digits, "-" or "_" (max 60 chars).`);
+    }
+    if (this.approvals().some(agent => agent.handle === handle && agent.registryId !== approval.registryId)) {
+      throw new Error(`ACP conversation name "${name}" collides with the approved agent handle @${handle}. Pick another name.`);
+    }
+    if ([...this.conversations.values()].some(conversation => !conversation.closed && conversation.handle === handle)) {
+      throw new Error(`ACP conversation @${handle} already exists. Continue it with \`resume\` or pick another \`name\`.`);
+    }
+    if (!this.manager.hasExternalHandle(handle) && !this.manager.reserveExternalHandle(handle)) {
+      throw new Error(`ACP conversation handle @${handle} is already taken. Pick another \`name\`.`);
+    }
+    return handle;
+  }
+
   start(input: AcpStartInput, hooks: AcpAttemptHooks = {}): { conversation: AcpConversation; record: AgentRecord } {
     const approval = this.approval(input.registryId);
     const cwd = existingDirectory(input.cwd ?? this.ctx.cwd);
-    const baseInUse = [...this.conversations.values()].some(conversation => conversation.handle === approval.handle);
     let handle: string;
-    if (baseInUse) {
-      handle = this.allocateHandle(approval.handle);
-    } else if (this.manager.hasExternalHandle(approval.handle)) {
-      handle = approval.handle;
-    } else if (this.manager.reserveExternalHandle(approval.handle)) {
-      handle = approval.handle;
+    if (input.name?.trim()) {
+      handle = this.namedHandle(input.name.trim(), approval);
     } else {
-      handle = this.allocateHandle(approval.handle);
+      const baseInUse = [...this.conversations.values()].some(conversation => conversation.handle === approval.handle);
+      if (baseInUse) {
+        handle = this.allocateHandle(approval.handle);
+      } else if (this.manager.hasExternalHandle(approval.handle)) {
+        handle = approval.handle;
+      } else if (this.manager.reserveExternalHandle(approval.handle)) {
+        handle = approval.handle;
+      } else {
+        handle = this.allocateHandle(approval.handle);
+      }
     }
     const conversation: AcpConversation = {
       id: `acp-conv-${randomUUID()}`,

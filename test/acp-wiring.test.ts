@@ -149,6 +149,53 @@ describe("ACP extension wiring", () => {
     expect(notification?.[1]).toMatchObject({ triggerTurn: true });
   });
 
+  it("runs a named conversation and resumes it by its @acp-<name> handle", async () => {
+    const { tools, lifecycle } = boot(true);
+    const context = tuiContext();
+    await lifecycle.get("session_start")({ type: "session_start" }, context);
+
+    const launched = await tools.get("AcpAgent").execute(
+      "tc-acp-named",
+      { agent: "codex-acp", prompt: "hello", description: "Named run", name: "review" },
+      undefined,
+      undefined,
+      context,
+    );
+    expect(launched.content[0].text).toContain("acp-review");
+
+    const resumed = await tools.get("AcpAgent").execute(
+      "tc-acp-named-resume",
+      { resume: "acp-review", prompt: "again", description: "Resume named" },
+      undefined,
+      undefined,
+      context,
+    );
+    const id = /Attempt ID: (\S+)/.exec(resumed.content[0].text as string)?.[1];
+    expect(id).toBeTruthy();
+
+    const result = await tools.get("get_subagent_result").execute(
+      "tc-acp-named-result",
+      { agent_id: id, wait: true },
+      undefined,
+      undefined,
+      context,
+    );
+    expect(result.content[0].text).toContain("fixture:again");
+  });
+
+  it("rejects `name` combined with `resume`", async () => {
+    const { tools, lifecycle } = boot(true);
+    const context = tuiContext();
+    await lifecycle.get("session_start")({ type: "session_start" }, context);
+    await expect(tools.get("AcpAgent").execute(
+      "tc-acp-name-resume",
+      { resume: "acp-codex", prompt: "hello", description: "Bad combo", name: "review" },
+      undefined,
+      undefined,
+      context,
+    )).rejects.toThrow(/cannot be combined with `resume`/);
+  });
+
   it("keeps @main as an escape hatch for literal ACP handles", async () => {
     const { lifecycle } = boot(true);
     const context = tuiContext();

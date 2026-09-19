@@ -239,6 +239,130 @@ describe("AcpConversationManager", () => {
     expect(runtime.run).toHaveBeenCalledTimes(2);
   });
 
+  it("uses a user-chosen name as the handle, persists it, and resumes by it", async () => {
+    const manager = new AgentManager(undefined, 10);
+    managers.push(manager);
+    const runtime: AcpRuntime = {
+      info: {
+        capabilities: { sessionCapabilities: { resume: {} } },
+        sessionId: "session-1",
+        resumeMode: "none",
+      },
+      isClosed: false,
+      run: vi.fn(async prompt => turn(prompt)),
+      close: async () => {},
+    };
+    const persisted: PersistedAcpConversation[] = [];
+    const conversations = new AcpConversationManager(
+      manager,
+      ctx,
+      () => [approval],
+      () => false,
+      async () => runtime,
+      ref => persisted.push(ref),
+    );
+    const named = conversations.start({
+      registryId: approval.registryId,
+      prompt: "one",
+      description: "One",
+      name: "My Review",
+    });
+    expect(named.conversation.handle).toBe("acp-my-review");
+    await manager.waitForAll();
+    expect(persisted.at(-1)).toMatchObject({ handle: "acp-my-review", sessionId: "session-1" });
+
+    const continued = conversations.continue({ ref: "acp-my-review", prompt: "two", description: "Two" });
+    expect(continued.conversation.id).toBe(named.conversation.id);
+    await manager.waitForAll();
+    expect(continued.record.result).toBe("two");
+  });
+
+  it("rejects a duplicate name or one colliding with another approval's handle", async () => {
+    const manager = new AgentManager(undefined, 10);
+    managers.push(manager);
+    const runtime: AcpRuntime = {
+      info: {
+        capabilities: { sessionCapabilities: { resume: {} } },
+        sessionId: "session-1",
+        resumeMode: "none",
+      },
+      isClosed: false,
+      run: vi.fn(async prompt => turn(prompt)),
+      close: async () => {},
+    };
+    const other: ApprovedAcpAgent = { ...approval, registryId: "other-acp", handle: "acp-other" };
+    const conversations = new AcpConversationManager(
+      manager,
+      ctx,
+      () => [approval, other],
+      () => false,
+      async () => runtime,
+    );
+    conversations.start({ registryId: approval.registryId, prompt: "one", description: "One", name: "task" });
+    await manager.waitForAll();
+    expect(() => conversations.start({
+      registryId: approval.registryId,
+      prompt: "two",
+      description: "Two",
+      name: "task",
+    })).toThrow(/already exists/);
+    expect(() => conversations.start({
+      registryId: approval.registryId,
+      prompt: "two",
+      description: "Two",
+      name: "other",
+    })).toThrow(/collides/);
+  });
+
+  it("restores a named conversation from persistence in the owning session", async () => {
+    const firstManager = new AgentManager(undefined, 10);
+    managers.push(firstManager);
+    const persisted: PersistedAcpConversation[] = [];
+    const runtime: AcpRuntime = {
+      info: {
+        capabilities: { sessionCapabilities: { resume: {} } },
+        sessionId: "session-persisted",
+        resumeMode: "none",
+      },
+      isClosed: false,
+      run: async prompt => turn(prompt),
+      close: async () => {},
+    };
+    const first = new AcpConversationManager(
+      firstManager,
+      ctx,
+      () => [approval],
+      () => false,
+      async () => runtime,
+      ref => persisted.push(ref),
+    );
+    first.start({ registryId: approval.registryId, prompt: "one", description: "One", name: "review" });
+    await firstManager.waitForAll();
+    expect(persisted.at(-1)).toMatchObject({ handle: "acp-review" });
+
+    const restoredManager = new AgentManager(undefined, 10);
+    managers.push(restoredManager);
+    const startRuntime = vi.fn(async options => ({
+      ...runtime,
+      info: { ...runtime.info, sessionId: options.resume?.sessionId ?? "new" },
+    }));
+    const restored = new AcpConversationManager(
+      restoredManager,
+      ctx,
+      () => [approval],
+      () => false,
+      startRuntime,
+    );
+    restored.restore([persisted.at(-1)!]);
+    expect(restored.resolve("acp-review")?.sessionId).toBe("session-persisted");
+    const resumed = restored.continue({ ref: "acp-review", prompt: "two", description: "Two" });
+    await restoredManager.waitForAll();
+    expect(resumed.record.result).toBe("two");
+    expect(startRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      resume: { sessionId: "session-persisted", mode: "resume" },
+    }));
+  });
+
   it("starts a second conversation for the same agent instead of reusing the first", async () => {
     const manager = new AgentManager(undefined, 10);
     managers.push(manager);

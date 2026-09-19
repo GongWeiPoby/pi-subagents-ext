@@ -58,6 +58,19 @@ AcpAgent({
 })
 ```
 
+Give a fresh conversation a stable name so it is easy to resume later:
+
+```text
+AcpAgent({
+  agent: "codex-acp",
+  name: "auth-review",
+  prompt: "Review the current authentication changes. Return Markdown findings.",
+  description: "Review auth changes",
+})
+```
+
+The conversation handle becomes `@acp-auth-review`, persisted with its ACP session id, so `resume: "acp-auth-review"` keeps working after the idle disconnect. Names must be unique across live conversations and must not collide with another approved agent's handle; a duplicate `name` fails instead of silently numbering.
+
 Parameters:
 
 | Field | Meaning |
@@ -67,6 +80,7 @@ Parameters:
 | `prompt` | Complete prompt for the sub-agent (goal, background, paths, constraints, what to return) |
 | `description` | Short Widget/notification label |
 | `cwd` | Absolute fresh-conversation working directory; defaults to the main Pi cwd |
+| `name` | Optional fresh-conversation name; the handle becomes `@acp-<name>` for `resume` and persistence |
 
 The tool has no foreground mode, model/thinking override, Pi tools/skills/extensions configuration, scheduling, nesting, inheritance, or worktree isolation.
 

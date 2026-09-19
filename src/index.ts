@@ -2489,6 +2489,7 @@ Terse command-style prompts produce shallow, generic work.
       "Start or continue an approved external ACP coding agent in its own local process and session. Always runs in the background. " +
       "The external agent cannot see this conversation, so `prompt` must spell out everything it needs: the goal, relevant background and absolute paths, any constraints, and exactly what to return. " +
       "Use `agent` for a fresh conversation or `resume` for an existing ACP attempt id/handle, never both, and never send empty strings for either. " +
+      "Pass `name` on a fresh start to give the conversation a stable @acp-<name> handle you can `resume` later. " +
       `Approved agents: ${enabled.map(agent => `${agent.registryId} (@${agent.handle}, ${agent.displayName})`).join(", ")}.`;
     if (ownAcpToolDescription) {
       if (description === ownAcpToolDescription) return;
@@ -2518,6 +2519,7 @@ Terse command-style prompts produce shallow, generic work.
         prompt: Type.String({ description: "Complete prompt for the sub-agent. It cannot see this conversation, so spell out the goal, relevant background and absolute paths, any constraints, and exactly what to return." }),
         description: Type.String({ description: "Short 3-5 word label shown in the Agents widget." }),
         cwd: Type.Optional(Type.String({ description: "Absolute existing working directory. Fresh starts only; defaults to the current project." })),
+        name: Type.Optional(Type.String({ description: "Name for a fresh conversation; its handle becomes @acp-<name>, usable with `resume` later. Fresh starts only." })),
       }, { additionalProperties: false }),
       renderCall(args, theme) {
         const target = args.resume ?? args.agent ?? "ACP";
@@ -2539,6 +2541,10 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (resume && params.cwd !== undefined) {
           throw new Error("`cwd` is a fresh-start option and cannot be combined with `resume`.");
+        }
+        const name = typeof params.name === "string" && params.name.trim() ? params.name.trim() : undefined;
+        if (resume && name !== undefined) {
+          throw new Error("`name` is a fresh-start option and cannot be combined with `resume`.");
         }
         const routeTarget = activeAcpRoute?.required.find(target =>
           agent !== undefined
@@ -2586,6 +2592,7 @@ Terse command-style prompts produce shallow, generic work.
                 prompt: params.prompt,
                 description: params.description,
                 cwd: params.cwd,
+                name,
               }, hooks)
             : acpConversations.continue({
                 ref: resume!,
