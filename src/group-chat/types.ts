@@ -7,6 +7,8 @@ export const ROOM_LINE_ENTRY_TYPE = "subagents:room-line";
 export const MAX_SEATS = 6;
 export const MAX_HOP = 3;
 export const TRANSCRIPT_CAP = 40;
+/** Extra attempts after the first failure (11 runs total). */
+export const SEAT_RETRY_LIMIT = 10;
 
 export interface RoomMember {
   handle: string;
@@ -72,7 +74,7 @@ export interface QueuedWake {
 }
 
 export interface GroupChatHost {
-  spawn(type: string, prompt: string, options: { description: string; name?: string; customTools?: import("@earendil-works/pi-coding-agent").ToolDefinition[] }): Promise<AgentSnapshot>;
+  spawn(type: string, prompt: string, options: { description: string; name?: string; model?: string; customTools?: import("@earendil-works/pi-coding-agent").ToolDefinition[] }): Promise<AgentSnapshot>;
   resume(id: string, prompt: string, options?: { customTools?: import("@earendil-works/pi-coding-agent").ToolDefinition[] }): Promise<AgentSnapshot | undefined>;
   abort(id: string): boolean;
   resolveLive(handle: string): LiveAgentRef | undefined;
@@ -83,5 +85,8 @@ export interface GroupChatHost {
   readBinding(): RoomBinding | null;
   appendRoomLine(line: { handle: string; text: string; to?: string[] }): void;
   seatTools(handle: string): import("@earendil-works/pi-coding-agent").ToolDefinition[];
+  /** Model key this seat starts on (`provider/modelId`). */
+  modelFor(type: string): string | undefined;
+  modelFallbacks(): Record<string, string>;
   cwd(): string;
 }

@@ -18,6 +18,7 @@ Replace cwd-wide `/room` intercept (bare text woke every member, skipped the mai
 - Bare text → host continues. `@seat` → seats only (`handled`). `@everyone` → all seats.
 - Tools: `RoomEnsure`, `RoomLeave`, `room_tell`, `handoff`, `room_cancel`; seats also get `room_say` / `room_pass` via `customTools`
 - Hop cap 3; self-handoff refused; busy seats queue
+- Seat spawn/resume retries twice on anything except user-stop / policy refusal (500ms then 1s)
 - ACP `@acp-*` not swallowed (host still runs when no seat @)
 - ACP is not a seat
 

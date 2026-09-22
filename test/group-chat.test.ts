@@ -13,12 +13,13 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent, SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { parseMemberSpecs } from "../src/group-chat/commands.js";
-import { enqueueSeatWork, hopExhausted } from "../src/group-chat/runtime.js";
+import { enqueueSeatWork, hopExhausted, isRetryableSeatError, seatRetryDelayMs } from "../src/group-chat/runtime.js";
 import { GroupStore } from "../src/group-chat/store.js";
 import type { GroupChatHost, RoomBinding, RoomMember } from "../src/group-chat/types.js";
 import { MAX_HOP } from "../src/group-chat/types.js";
 import { extractMentionHandles, planWake } from "../src/group-chat/wake.js";
 import subagentsExtension from "../src/index.js";
+import { nextModelFallback } from "../src/model-fallback.js";
 import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 const members: RoomMember[] = [
@@ -74,7 +75,10 @@ describe("hop", () => {
 describe("enqueueSeatWork", () => {
   let hermetic: Hermetic;
   beforeEach(() => { hermetic = hermeticDir(); });
-  afterEach(() => { hermetic.restore(); });
+  afterEach(() => {
+    vi.useRealTimers();
+    hermetic.restore();
+  });
 
   function host(): GroupChatHost {
     const binding: { current: RoomBinding | null } = { current: null };
@@ -96,6 +100,8 @@ describe("enqueueSeatWork", () => {
       readBinding: () => binding.current,
       appendRoomLine: vi.fn(),
       seatTools: () => [],
+      modelFor: () => undefined,
+      modelFallbacks: () => ({}),
     };
   }
 
@@ -108,6 +114,105 @@ describe("enqueueSeatWork", () => {
       from: "explorer", text: "self", hop: 1,
     });
     expect(self).toEqual({ ok: false, error: "cannot hand off to yourself" });
+  });
+
+  it("retries a transient spawn error then succeeds", async () => {
+    vi.useFakeTimers();
+    const store = new GroupStore(hermetic.dir);
+    const room = store.create("pair", members);
+    const h = host();
+    vi.mocked(h.spawn)
+      .mockRejectedValueOnce(new Error("fetch failed: ECONNRESET"))
+      .mockResolvedValueOnce({
+        id: "id-Explorer",
+        status: "completed",
+        result: "ok",
+        hasSession: true,
+      });
+    await enqueueSeatWork({
+      store, room, host: h, sessionId: "s1", seat: members[0], kind: "tell",
+      from: "main", text: "go", hop: 0,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    const log = store.readLog(room.id).map(l => l.text);
+    expect(log.some(t => /retry 1\/10 after: fetch failed/.test(t))).toBe(true);
+    expect(log).toContain("ok");
+  });
+
+  it("does not retry a user stop", async () => {
+    const store = new GroupStore(hermetic.dir);
+    const room = store.create("pair", members);
+    const h = host();
+    vi.mocked(h.spawn).mockResolvedValue({
+      id: "id-Explorer",
+      status: "stopped",
+      error: "STOPPED BY THE USER",
+      hasSession: true,
+    });
+    await enqueueSeatWork({
+      store, room, host: h, sessionId: "s1", seat: members[0], kind: "tell",
+      from: "main", text: "go", hop: 0,
+    });
+    await vi.waitFor(() => expect(h.spawn).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches model after the retry budget", async () => {
+    vi.useFakeTimers();
+    const store = new GroupStore(hermetic.dir);
+    const room = store.create("pair", members);
+    const h = host();
+    h.modelFor = () => "openai/primary";
+    h.modelFallbacks = () => ({ "openai/primary": "openai/backup" });
+    vi.mocked(h.spawn).mockResolvedValue({
+      id: "id-Explorer",
+      status: "error",
+      error: "fetch failed",
+      hasSession: false,
+    });
+    const pending = enqueueSeatWork({
+      store, room, host: h, sessionId: "s1", seat: members[0], kind: "tell",
+      from: "main", text: "go", hop: 0,
+    });
+    await pending;
+    await vi.runAllTimersAsync();
+    const models = vi.mocked(h.spawn).mock.calls.map(call => call[2]?.model);
+    expect(models.filter(model => model === undefined).length).toBeGreaterThan(1);
+    expect(models).toContain("openai/backup");
+    expect(store.readLog(room.id).some(line => line.text.includes("switching to openai/backup"))).toBe(true);
+  });
+});
+
+describe("seat retry and model fallback", () => {
+  it("backs off from 2s and caps at 32s", () => {
+    expect(seatRetryDelayMs(1)).toBe(2_000);
+    expect(seatRetryDelayMs(2)).toBe(4_000);
+    expect(seatRetryDelayMs(5)).toBe(32_000);
+  });
+
+  it("walks a backup chain once", () => {
+    const map = { "openai/a": "openai/b", "openai/b": "openai/a" };
+    const tried = new Set<string>();
+    expect(nextModelFallback("openai/a", map, tried)).toBe("openai/b");
+    tried.add("openai/a");
+    tried.add("openai/b");
+    expect(nextModelFallback("openai/b", map, tried)).toBeUndefined();
+  });
+});
+
+describe("isRetryableSeatError", () => {
+  it("retries network-ish failures and skips user/policy stops", () => {
+    expect(isRetryableSeatError("fetch failed")).toBe(true);
+    expect(isRetryableSeatError("429 rate limit")).toBe(true);
+    expect(isRetryableSeatError("STOPPED BY THE USER")).toBe(false);
+    expect(isRetryableSeatError("unknown agent type: ghost")).toBe(false);
   });
 });
 

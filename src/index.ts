@@ -35,6 +35,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
+import { modelKeyOf, nextModelFallback } from "./model-fallback.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -848,6 +849,7 @@ export default function (pi: ExtensionAPI) {
   let currentCtx: ExtensionContext | undefined;
   let roomHost!: () => GroupChatHost;
   let roomBinding: RoomBinding | null = null;
+  const modelFallbackTried = new Set<string>();
   /** Invalidates detached workflow completions when the active session changes. */
   let workflowSessionGeneration = 0;
   let activeWorkflowSessionId: string | undefined;
@@ -1048,6 +1050,37 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry("subagents:acp-route-miss", { missing });
   });
 
+  pi.on("agent_settled", async (_event, ctx) => {
+    const current = modelKeyOf(ctx.model);
+    if (!current || modelFallbackTried.has(current)) return;
+    const entries = ctx.sessionManager.getBranch();
+    let error: string | undefined;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry?.type !== "message") continue;
+      const message = entry.message as { role?: string; stopReason?: string; errorMessage?: string };
+      if (message.role !== "assistant") continue;
+      if (message.stopReason !== "error") return;
+      error = message.errorMessage?.trim() || "provider error";
+      break;
+    }
+    if (!error) return;
+    const next = nextModelFallback(current, loadSettings(ctx.cwd).modelFallbacks, modelFallbackTried);
+    if (!next) return;
+    const resolved = resolveModel(next, ctx.modelRegistry);
+    if (typeof resolved === "string") {
+      modelFallbackTried.add(current);
+      ctx.ui.notify(`Backup model unavailable (${next}): ${resolved}`, "warning");
+      return;
+    }
+    modelFallbackTried.add(current);
+    if (!await pi.setModel(resolved)) return;
+    ctx.ui.notify(`Model failed; switched to ${next}`, "warning");
+    await pi.sendUserMessage(
+      `The previous model failed (${error}). Continue the same task on this model. Do not repeat completed work.`,
+    );
+  });
+
   /**
    * `@handle message` typed at the prompt addresses that agent instead of the
    * main model — Claude Code's prompt mention, same grammar (see mention.ts).
@@ -1061,6 +1094,7 @@ export default function (pi: ExtensionAPI) {
    * notification either way.
    */
   pi.on("input", async (event, ctx) => {
+    if (event.source !== "extension") modelFallbackTried.clear();
     const roomed = tryHandleRoomInput(event, ctx, roomHost());
     if (roomed?.action === "handled") return roomed;
 
@@ -1534,6 +1568,8 @@ export default function (pi: ExtensionAPI) {
     // run_in_background in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
+      modelRegistry: ctx.modelRegistry,
+      cwd: ctx.cwd,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
       // Fires when the run actually starts — immediately, or on queue
@@ -1600,11 +1636,19 @@ export default function (pi: ExtensionAPI) {
   roomHost = (): GroupChatHost => ({
     async spawn(type, prompt, options) {
       if (!currentCtx) throw new Error("No active session");
+      let model: ReturnType<typeof resolveModel> | undefined;
+      if (options.model) {
+        const resolved = resolveModel(options.model, currentCtx.modelRegistry);
+        if (typeof resolved === "string") throw new Error(resolved);
+        model = resolved;
+      }
       const id = spawnResolved(pi, currentCtx, type, prompt, {
         description: options.description,
         name: options.name,
         isBackground: true,
         customTools: options.customTools,
+        model,
+        skipModelFallback: true,
       });
       const record = manager.getRecord(id);
       if (record) record.resultConsumed = true;
@@ -1621,6 +1665,7 @@ export default function (pi: ExtensionAPI) {
         customTools: options?.customTools,
         reclaim: existing.handle ? { handle: existing.handle, alias: existing.alias } : undefined,
         resumeSessionFile: existing.sessionFile,
+        skipModelFallback: true,
       });
       return waitForRoomAgent(id2);
     },
@@ -1663,6 +1708,12 @@ export default function (pi: ExtensionAPI) {
     },
     seatTools(handle) {
       return createSeatTools(roomHost, handle);
+    },
+    modelFor(type) {
+      return getAgentConfig(type)?.model ?? modelKeyOf(currentCtx?.model);
+    },
+    modelFallbacks() {
+      return loadSettings(currentCtx?.cwd ?? process.cwd()).modelFallbacks ?? {};
     },
   });
   registerGroupChat(pi, roomHost);
@@ -2321,7 +2372,10 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(existing.id, params.prompt, signal);
+        const record = await manager.resume(existing.id, params.prompt, signal, {
+          modelRegistry: ctx.modelRegistry,
+          cwd: ctx.cwd,
+        });
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
@@ -4535,6 +4589,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
       viewerMarkdown: getViewerMarkdown(),
+      modelFallbacks: loadSettings().modelFallbacks,
     } satisfies SubagentsSettings;
   }
 

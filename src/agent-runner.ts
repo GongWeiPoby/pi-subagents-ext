@@ -23,8 +23,11 @@ import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { nextModelFallback } from "./model-fallback.js";
+import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { loadSettings } from "./settings.js";
 import { preloadSkills } from "./skill-loader.js";
 import { isSkillNameAllowed } from "./skill-rules.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -400,6 +403,8 @@ export interface RunOptions {
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explorer#a1b2c3d4`). */
   agentId?: string;
   model?: Model<any>;
+  /** Seat retries pick the backup model themselves. */
+  skipModelFallback?: boolean;
   maxTurns?: number;
   signal?: AbortSignal;
   isolated?: boolean;
@@ -585,6 +590,54 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
   if (isAbsolute(sessionDir)) return sessionDir;
   return resolve(cwd, sessionDir);
+}
+
+function providerFailure(
+  session: AgentSession,
+  startIndex: number,
+): { key: string; error: string } | undefined {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
+    const msg = session.messages[i];
+    if (msg.role !== "assistant") continue;
+    if (msg.stopReason !== "error") return undefined;
+    const provider = (msg as { provider?: string }).provider;
+    const model = (msg as { model?: string }).model;
+    if (!provider || !model) return undefined;
+    return {
+      key: `${provider}/${model}`,
+      error: (msg as { errorMessage?: string }).errorMessage?.trim() || "provider error",
+    };
+  }
+  return undefined;
+}
+
+async function applyModelFallback(
+  session: AgentSession,
+  registry: ModelRegistry,
+  cwd: string,
+  startIndex: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const fallbacks = loadSettings(cwd).modelFallbacks;
+  if (!fallbacks) return;
+  const tried = new Set<string>();
+  while (!signal?.aborted) {
+    const failed = providerFailure(session, startIndex);
+    if (!failed || tried.has(failed.key)) return;
+    tried.add(failed.key);
+    const next = nextModelFallback(failed.key, fallbacks, tried);
+    if (!next) return;
+    const resolved = resolveModel(next, registry);
+    if (typeof resolved === "string") return;
+    try {
+      await session.setModel(resolved);
+      await session.prompt(
+        `The previous model failed (${failed.error}). Continue the same task on this model. Do not repeat completed work.`,
+      );
+    } catch {
+      return;
+    }
+  }
 }
 
 export async function runAgent(
@@ -1064,6 +1117,9 @@ export async function runAgent(
   const startLen = session.messages.length;
   try {
     await session.prompt(effectivePrompt);
+    if (!options.skipModelFallback) {
+      await applyModelFallback(session, ctx.modelRegistry, configCwd, startLen, options.signal);
+    }
   } finally {
     unsubTurns();
     collector.unsubscribe();
@@ -1095,6 +1151,9 @@ export async function resumeAgent(
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
+    modelRegistry?: ModelRegistry;
+    cwd?: string;
+    skipModelFallback?: boolean;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
   // Boundary for the history fallback: the session already holds prior turns,
@@ -1135,6 +1194,9 @@ export async function resumeAgent(
 
   try {
     await session.prompt(prompt);
+    if (!options.skipModelFallback && options.modelRegistry && options.cwd) {
+      await applyModelFallback(session, options.modelRegistry, options.cwd, startLen, options.signal);
+    }
   } finally {
     collector.unsubscribe();
     unsubEvents();

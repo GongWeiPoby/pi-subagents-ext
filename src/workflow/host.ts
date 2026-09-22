@@ -417,7 +417,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       const baseline = existing === undefined
         ? { toolUses: 0, usage: { input: 0, output: 0, cacheWrite: 0 } }
         : { toolUses: existing.toolUses, usage: { ...existing.lifetimeUsage } };
-      const record = await manager.resume(id, prompt, deps.signal, { onTurnEnd, onToolActivity, onTextDelta });
+      const record = await manager.resume(id, prompt, deps.signal, {
+        onTurnEnd, onToolActivity, onTextDelta, modelRegistry: ctx.modelRegistry, cwd: ctx.cwd,
+      });
       if (record === undefined) {
         return {
           ok: false,

@@ -47,7 +47,7 @@ user types @gateway look at the route
 
 `@acp-*` is logged and still routed through `AcpAgent`. Seats are Pi agent types, not ACP processes.
 
-Seat turns are **serial**. A busy seat **queues**; `room_cancel` drops queued work; aborting the running turn is explicit.
+Seat turns are **serial**. A busy seat **queues**; `room_cancel` drops queued work; aborting the running turn is explicit. A failed seat turn retries up to 10 times (2s, 4s, 8s, 16s, then 32s) unless the error is a user stop or a policy refusal. After that budget, `modelFallbacks` in `subagents.json` selects the next model and the budget starts over.
 
 ## Persistence
 

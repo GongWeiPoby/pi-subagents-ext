@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
-import { describeModel } from "./model-resolver.js";
+import { describeModel, type ModelRegistry } from "./model-resolver.js";
 import { getOutputTranscriptDefault, sessionTaskDir } from "./output-file.js";
 import { type WriteResultArtifactInput, writeResultArtifact } from "./result-artifact.js";
 import { STRUCTURED_OUTPUT_MIGRATION_ERROR } from "./subagent-contract.js";
@@ -236,6 +236,8 @@ interface SpawnOptions {
   /** Whether the final text may be persisted as a Markdown result body. */
   resultBodyEnabled?: boolean;
   model?: Model<any>;
+  /** When set, a provider failure does not walk `modelFallbacks`. */
+  skipModelFallback?: boolean;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -372,6 +374,9 @@ interface ResumeOptions {
    * torn that subscription down.
    */
   onStarted?: () => void;
+  /** Registry and cwd for `modelFallbacks` after this resume's provider retries fail. */
+  modelRegistry?: ModelRegistry;
+  cwd?: string;
 }
 
 interface ArtifactAttemptContext {
@@ -1137,6 +1142,7 @@ export class AgentManager {
       pi,
       agentId: id,
       model: options.model,
+      skipModelFallback: options.skipModelFallback,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
       inheritContext: options.inheritContext,
@@ -1579,6 +1585,8 @@ export class AgentManager {
     const wasStopped = (): boolean => record.status === "stopped";
     try {
       const { text, failure } = await resumeAgent(record.session, prompt, {
+        modelRegistry: options?.modelRegistry,
+        cwd: options?.cwd,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
@@ -1688,6 +1696,8 @@ export class AgentManager {
     };
 
     const promise = resumeAgent(record.session, prompt, {
+      modelRegistry: options.modelRegistry,
+      cwd: options.cwd,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
