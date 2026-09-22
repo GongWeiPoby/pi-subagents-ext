@@ -25,6 +25,7 @@ import { buildNewAgentFile, disableInContent, enableInContent, locateAgentFile, 
 import { AgentManager, isTopLevelAgent, resolveResultBodyEnabled } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getDefaultAgent, registerAgents, resolveSpawnType, setDefaultAgent } from "./agent-types.js";
+import backgroundTasksExtension from "./background/extension.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -328,6 +329,7 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
+  void backgroundTasksExtension(pi);
   registerProfiles(pi);
   const taskExecutions = registerTasks(pi, {
     workflowOutput: {

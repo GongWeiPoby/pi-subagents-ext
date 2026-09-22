@@ -17,6 +17,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Agent profiles** — `/profile <agent name>` reuses an existing Agent definition in the main session: appended instructions, metadata-only skill guidance, and model/thinking defaults on explicit switches. Branch-local state survives resume/reload without overriding manual `/model` choices; off restores the baseline. Tools, extensions and child isolation settings are not applied to the main session. **[Profile guide](docs/profiles.md)**
 - **Grill sessions** (`/grill`) — a relentless interview that sharpens a plan before anything is built. Questions arrive a round at a time, each with a recommended answer, and the frontier advances as decisions settle. Resolved vocabulary lands in `CONTEXT.md` the moment it resolves, and a decision that is hard to reverse, surprising without context, and a real trade-off lands as an ADR under `docs/adr/`. Ships as a self-contained prompt template (`prompts/grill.md`), so it needs no configuration and no other skill installed
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
+- **Background tasks** — durable background shell jobs (`/bg`, `bg_run`), a footer dock, a read-only delegated child agent (`bg_delegate` + `bg_result`), fixed-purpose multi-model Fusion (`fusion_reason`, `fusion_investigate`, `fusion_research`, `fusion_validate`), and local attested Pi runs (`bg_run_pi_attested`). Ported from [pi-background-tasks](https://github.com/ismailsaleekh/pi-background-tasks) (ISC). Its task manager is `/bg-tasks`, not `/tasks`, which stays this extension's structured-task command. Select capabilities with `PI_BG_FEATURES` (`process,delegate,fusion,attested,attribution`; `process` is mandatory) and the dock key with `PI_BG_DOCK_SHORTCUT` (`shift+down` default, `ctrl+alt+b`, `off`).
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, optional subagent cascade, and attempt-aware single-executor binding that prevents duplicate or stale task completion. **[Task guide](docs/tasks.md)**
 - **Dynamic coordination** — the main session chooses the next action from current evidence, using direct tools and optional task delegation. No fixed role pipeline, mandatory Worker, or workflow script is required. **[Choosing an approach](#dynamic-workflows)**
 - **Adaptive Markdown Playbooks** — reusable `<name>/WORKFLOW.md` coordinator guidance with frontmatter metadata and optional `prompts/*.md` resources. `WorkflowPlaybook` lists and reads the guidance; the main coordinator adapts it to current evidence and chooses ordinary tools, optional skills, and Agent calls only when useful. Reading Markdown does not launch work or require every instruction to run. `WorkflowPlaybookSave` promotes generalized Markdown to project/global scope only after direct preview confirmation. **[Playbook guide](docs/playbooks.md)**
@@ -750,6 +751,16 @@ Send a message to a running agent. Pi agents receive mid-run steering after the 
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
 | `/tasks` | View, create, update, clear, and configure structured tasks |
+| `/bg` | Start a tracked background shell command: `/bg [--survive-reload] [--agent] [--name "Task name"] <command>` |
+| `/bg-tasks` | Open the background task manager dock. Takes the place of pi-background-tasks' `/tasks`, which would collide with the structured-task command above |
+| `/bg-clear` | Clear finished background task footer notices |
+| `/bg-update` | Print update instructions for the bundled background-tasks code |
+| `/jobs` | List running and recent background tasks |
+| `/logs` | Show bounded output from a background task: `/logs <id> [maxBytes]` |
+| `/kill` | Stop a running background task: `/kill <id>` |
+| `/fusion` | Start a Fusion reason workflow in the background |
+| `/fusion-models` | Open the five-slot Fusion model selector |
+| `/claude-cache` | Show or change the session's Anthropic cache retention |
 | `/profile` | Select an enabled Agent as main-session guidance; also `<agent name>` / `use <agent name>`, `show` / `status`, `list`, `off` / `default`. Names may contain spaces; `use` escapes command-word names |
 | `/chat` | Hosted group chat: `on <type> [type...]`, `off`. Bare text goes to the host; `@handle` wakes a seat. **[Guide](docs/group-chat.md)** |
 | `/room` | Roster helpers: `create`, `list`, `leave`, `status`. **[Guide](docs/group-chat.md)** |
@@ -1318,6 +1329,10 @@ src/
     agent-mention.ts      # `@` roster (Pi and ACP targets) + popup rows
     acp-menu.ts            # /agents → External ACP agents Registry/approval UI
     schedule-menu.ts      # /agents → Scheduled jobs submenu
+  background/            # Ported pi-background-tasks (ISC, ismailsaleekh): shell jobs, delegate, Fusion, attested runs
+    extension.ts        # /bg, /bg-tasks, /jobs, /logs, /kill and the bg_* tools
+    core/               # Task registry, reload-survival owner, delegate and Fusion runtimes
+    ui/                 # Footer dock task manager and Fusion model selector
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
     workflow-dialog.ts    # /agents → Workflows two-pane inspector
