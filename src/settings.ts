@@ -95,6 +95,11 @@ export interface SubagentsSettings {
    */
   scopeModels?: boolean;
   /**
+   * `provider/modelId` → backup `provider/modelId`.
+   * Used after that model's retries are exhausted, on the main session and on subagents.
+   */
+  modelFallbacks?: Record<string, string>;
+  /**
    * When true, an unreadable or unparseable agent `.md` aborts extension load
    * instead of being skipped with a warning — pi exits, naming the file.
    *
@@ -394,6 +399,18 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (r.modelFallbacks && typeof r.modelFallbacks === "object" && !Array.isArray(r.modelFallbacks)) {
+    const map: Record<string, string> = {};
+    for (const [key, value] of Object.entries(r.modelFallbacks)) {
+      if (typeof value !== "string") continue;
+      const from = key.trim();
+      const to = value.trim();
+      if (!from.includes("/") || !to.includes("/") || from === to) continue;
+      map[from] = to;
+      if (Object.keys(map).length >= 32) break;
+    }
+    if (Object.keys(map).length > 0) out.modelFallbacks = map;
   }
   if (typeof r.strictAgentFiles === "boolean") {
     out.strictAgentFiles = r.strictAgentFiles;
