@@ -15,6 +15,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Features
 
 - **Agent profiles** — `/profile <agent name>` reuses an existing Agent definition in the main session: appended instructions, metadata-only skill guidance, and model/thinking defaults on explicit switches. Branch-local state survives resume/reload without overriding manual `/model` choices; off restores the baseline. Tools, extensions and child isolation settings are not applied to the main session. **[Profile guide](docs/profiles.md)**
+- **Grill sessions** (`/grill`) — a relentless interview that sharpens a plan before anything is built. Questions arrive a round at a time, each with a recommended answer, and the frontier advances as decisions settle. Resolved vocabulary lands in `CONTEXT.md` the moment it resolves, and a decision that is hard to reverse, surprising without context, and a real trade-off lands as an ADR under `docs/adr/`. Ships as a self-contained prompt template (`prompts/grill.md`), so it needs no configuration and no other skill installed
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Structured task tracking** — bundled `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, and `TaskExecute` tools with dependencies, persistent storage, a live task widget, reminders, auto-clear, optional subagent cascade, and attempt-aware single-executor binding that prevents duplicate or stale task completion. **[Task guide](docs/tasks.md)**
 - **Dynamic coordination** — the main session chooses the next action from current evidence, using direct tools and optional task delegation. No fixed role pipeline, mandatory Worker, or workflow script is required. **[Choosing an approach](#dynamic-workflows)**
@@ -752,6 +753,7 @@ Send a message to a running agent. Pi agents receive mid-run steering after the 
 | `/profile` | Select an enabled Agent as main-session guidance; also `<agent name>` / `use <agent name>`, `show` / `status`, `list`, `off` / `default`. Names may contain spaces; `use` escapes command-word names |
 | `/chat` | Hosted group chat: `on <type> [type...]`, `off`. Bare text goes to the host; `@handle` wakes a seat. **[Guide](docs/group-chat.md)** |
 | `/room` | Roster helpers: `create`, `list`, `leave`, `status`. **[Guide](docs/group-chat.md)** |
+| `/grill` | Relentless design interview; writes resolved terms to `CONTEXT.md` and gated decisions to `docs/adr/`. Optional argument scopes what to grill |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
