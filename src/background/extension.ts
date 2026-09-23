@@ -72,7 +72,7 @@ const STATUS_INTERVAL_MS = 1000;
 const COMMAND_PREVIEW_CHARS = 90;
 const GIT_INSTALL_TARGET = 'git:github.com/ismailsaleekh/pi-background-tasks';
 
-const packageInfo = readPackageInfo(new URL('../package.json', import.meta.url), (error) => {
+const packageInfo = readPackageInfo(new URL('../../package.json', import.meta.url), (error) => {
   console.error(`[background-tasks] failed to read package version: ${error.message}`);
 });
 const PACKAGE_NAME = packageInfo.name ?? 'pi-background-tasks';
