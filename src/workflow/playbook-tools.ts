@@ -13,15 +13,15 @@ import {
 const MAX_TOOL_TEXT_CHARS = 48_000;
 const MAX_LISTED_PLAYBOOKS = 100;
 
-const actionSchema = Type.Unsafe<"list" | "read">({
-  type: "string",
-  enum: ["list", "read"],
+const actionSchema = Type.Union([Type.Literal("list"), Type.Literal("read")], {
   description: "list discovers available playbooks; read returns one playbook and its prompt resources.",
 });
 
-const playbookSourceSchema = Type.Unsafe<WorkflowPlaybookSource>({
-  type: "string",
-  enum: ["project", "workspace", "global"],
+const playbookSourceSchema = Type.Union([
+  Type.Literal("project"),
+  Type.Literal("workspace"),
+  Type.Literal("global"),
+], {
   description: "Optional exact source for action=read; omit for normal precedence.",
 });
 

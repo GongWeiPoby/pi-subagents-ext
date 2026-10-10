@@ -3,7 +3,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { SUBAGENT_TOOL_NAMES } from "../agent-runner.js";
 import { parseMemberSpecs } from "./commands.js";
 import { bindingFromRoom } from "./runtime.js";

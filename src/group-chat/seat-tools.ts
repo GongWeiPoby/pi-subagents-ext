@@ -4,7 +4,7 @@
  */
 
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { SUBAGENT_TOOL_NAMES } from "../agent-runner.js";
 import { abortSeat, dropQueued, enqueueSeatWork, latestUserHop } from "./runtime.js";
 import { GroupStore } from "./store.js";

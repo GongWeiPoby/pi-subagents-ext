@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { SUBAGENT_TOOL_NAMES } from "../agent-runner.js";
-import { loadWorkflowPlaybookDirectory, type WorkflowApprovalMode } from "./playbook.js";
+import { loadWorkflowPlaybookDirectory } from "./playbook.js";
 import {
   previewWorkflowPlaybookSave,
   saveWorkflowPlaybook,
@@ -13,16 +13,15 @@ import {
 
 const MAX_SAVE_APPROVAL_CHARS = 32_000;
 
-const scopeSchema = Type.Unsafe<WorkflowPlaybookSaveScope>({
-  type: "string",
-  enum: ["project", "global"],
+const scopeSchema = Type.Union([Type.Literal("project"), Type.Literal("global")], {
   description: "project saves under .pi/workflows; global saves under the configured agent directory.",
 });
 
-const approvalSchema = Type.Unsafe<WorkflowApprovalMode>({
-  type: "string",
-  enum: ["adaptive", "required", "none"],
-});
+const approvalSchema = Type.Union([
+  Type.Literal("adaptive"),
+  Type.Literal("required"),
+  Type.Literal("none"),
+]);
 
 const saveSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 128 }),
@@ -37,10 +36,7 @@ const saveSchema = Type.Object({
   approval: Type.Optional(approvalSchema),
   sideEffects: Type.Optional(Type.String({ maxLength: 128 })),
   inputs: Type.Optional(
-    Type.Unsafe<Record<string, unknown>>({
-      type: "object",
-      additionalProperties: true,
-    }),
+    Type.Record(Type.String(), Type.Unknown()),
   ),
   example: Type.String({
     minLength: 1,

@@ -61,7 +61,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **0.84.0 or newer**: the workflow UI uses pi-tui's `stripTerminalSequences` from 0.84.0. The `peerDependencies` range declares the floor, so npm flags an older pi at install time.
+Requires pi **0.84.0 or newer**: the workflow UI uses pi-tui's `stripTerminalSequences` from 0.84.0. The `peerDependencies` range declares the floor, so npm flags an older pi at install time. `typebox` is a host-provided peer (`*`); pi maps extension imports onto its own copy.
 
 Task tracking is bundled. If `@tintinweb/pi-tasks` is already installed separately, remove it before loading this package to avoid duplicate task tools, `/tasks` commands, widgets, and lifecycle listeners:
 

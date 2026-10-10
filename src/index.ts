@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { ACP_IDLE_TIMEOUT_MS, AcpConversationManager, type PersistedAcpConversation } from "./acp/conversation-manager.js";
 import { type AcpMentionRouteTarget, acpMentionTargets, findAcpMentions } from "./acp/mention.js";

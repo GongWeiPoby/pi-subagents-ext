@@ -1634,11 +1634,12 @@ Set up task dependencies:
 \`\`\``,
     parameters: Type.Object({
       taskId: Type.String({ description: "The ID of the task to update" }),
-      status: Type.Optional(Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
-        type: "string",
-        enum: ["pending", "in_progress", "completed", "deleted"],
-        description: "New status for the task",
-      })),
+      status: Type.Optional(Type.Union([
+        Type.Literal("pending"),
+        Type.Literal("in_progress"),
+        Type.Literal("completed"),
+        Type.Literal("deleted"),
+      ], { description: "New status for the task" })),
       subject: Type.Optional(Type.String({ description: "New subject for the task" })),
       description: Type.Optional(Type.String({ description: "New description for the task" })),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress" })),
@@ -1734,11 +1735,11 @@ Set up task dependencies:
       task_id: Type.String({ description: "The task ID, agent ID/prefix, or SubagentWorkflow wf_* run ID to inspect" }),
       block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion", default: true })),
       timeout: Type.Optional(Type.Number({ description: "Max wait time in ms", default: 30000, minimum: 0, maximum: 600000 })),
-      view: Type.Optional(Type.Unsafe<"summary" | "children" | "result">({
-        type: "string",
-        enum: ["summary", "children", "result"],
-        description: "Metadata views or an explicitly requested persisted result body slice.",
-      })),
+      view: Type.Optional(Type.Union([
+        Type.Literal("summary"),
+        Type.Literal("children"),
+        Type.Literal("result"),
+      ], { description: "Metadata views or an explicitly requested persisted result body slice." })),
       offset: Type.Optional(Type.Number({ description: "Character offset for view=result", minimum: 0 })),
       limit: Type.Optional(Type.Number({
         description: "Maximum characters for view=result",
