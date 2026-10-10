@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { Api, Model } from '@earendil-works/pi-ai';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
-import { CLAUDE_CODE_200K_SUBSCRIPTION_CONTEXT_WINDOW } from '../anthropic-attribution';
-import { isJsonObject, type JsonObject, parseJsonText } from '../common';
+import type { Api, Model } from '@earendil-works/pi-ai';
+import { isJsonObject, parseJsonText, type JsonObject } from '../common';
 import { replaceFileDurable } from '../durable-fs';
+import { CLAUDE_CODE_200K_SUBSCRIPTION_CONTEXT_WINDOW } from '../anthropic-attribution';
 import { CURRENT_MODEL_SELECTION } from './facade-contract';
 import {
   FUSION_MODEL_CONFIG_SCHEMA_VERSION,
@@ -45,10 +45,8 @@ export function defaultFusionModelConfig(): FusionModelConfigV1 {
   };
 }
 
-export function fusionModelConfigPath(agentDir?: string): string {
-  // ponytail: resolve getAgentDir lazily; a default parameter runs at every call,
-  // including registration paths that only need the function reference
-  return join(agentDir ?? getAgentDir(), FUSION_MODEL_CONFIG_FILE);
+export function fusionModelConfigPath(agentDir = getAgentDir()): string {
+  return join(agentDir, FUSION_MODEL_CONFIG_FILE);
 }
 
 function sha256Hex(bytes: Buffer): string {
@@ -79,7 +77,7 @@ function assertClosed(record: JsonObject, expected: readonly string[], label: st
     if (!expectedSet.has(key)) throw configError(`${label} contains unknown key ${key}`);
   }
   for (const key of expected) {
-    if (!Object.hasOwn(record, key)) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) {
       throw configError(`${label} is missing key ${key}`);
     }
   }
@@ -131,7 +129,7 @@ export function parseFusionModelConfig(value: unknown): FusionModelConfigV1 {
 }
 
 export async function loadFusionModelConfig(
-  path: string = fusionModelConfigPath(),
+  path = fusionModelConfigPath(),
 ): Promise<LoadedFusionModelConfig> {
   const revision = await revisionForPath(path);
   if (!revision.exists) return { config: defaultFusionModelConfig(), revision };

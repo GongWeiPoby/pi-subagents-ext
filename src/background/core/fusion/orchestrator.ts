@@ -1,14 +1,15 @@
 import { createHash, randomBytes as nodeRandomBytes } from 'node:crypto';
 import { canonicalJson } from '../canonical-json';
 import { parseJsonText } from '../common';
+import { FUSION_BUDGET_POLICY, FusionBudget } from './budget';
+import { assertChildOutputWithinContract } from './output-contract';
 import {
-  buildFusionFailureSummary,
-  type CreateFusionArtifactStoreOptions,
-  buildFusionRunProgress as deriveFusionRunProgress,
   FusionArtifactStore,
+  buildFusionFailureSummary,
+  buildFusionRunProgress as deriveFusionRunProgress,
+  type CreateFusionArtifactStoreOptions,
   type RecordFusionFailedAttemptInput,
 } from './artifacts';
-import { FUSION_BUDGET_POLICY, FusionBudget } from './budget';
 import {
   boundedEvaluationErrors,
   formatEvaluationErrors,
@@ -18,32 +19,36 @@ import {
   validateFusionEvaluation,
   validateFusionFindingAccounting,
 } from './evaluation';
-import { assertChildOutputWithinContract } from './output-contract';
-import { FusionChildRunError, type RunPiChildOptions, runPiChild } from './pi-child';
+import { FusionChildRunError, runPiChild, type RunPiChildOptions } from './pi-child';
 import {
-  type AnonymousFusionCandidate,
   buildBlindEvaluationInput,
   buildCandidatePrompt,
   buildEvaluationPrompt,
   buildEvaluationRepairPrompt,
   buildMergeInput,
   buildMergePrompt,
+  type AnonymousFusionCandidate,
 } from './prompts';
+import {
+  assertWorkflowCapability,
+  fusionWorkflowProfile,
+  type FusionWorkflowProfile,
+} from './workflows';
 import { buildFusionSourcePolicy, sourcePolicyCanonicalBytes } from './source-policy';
 import {
-  addFusionUsage,
-  createEmptyFusionUsage,
   FUSION_INPUT_SCHEMA_VERSION,
   FUSION_NO_TOOLS_CAPABILITY,
   FUSION_RESULT_SCHEMA_VERSION,
   FUSION_VALIDATE_CANDIDATE_SCHEMA_VERSION,
-  type FusionCalibrationViolation,
-  type FusionCandidateId,
-  type FusionCanonicalInputV3,
-  type FusionCapability,
-  type FusionChildRunResult,
-  type FusionContextOmissionLedgerV2,
   FusionError,
+  addFusionUsage,
+  createEmptyFusionUsage,
+  type FusionCalibrationViolation,
+  type FusionCapability,
+  type FusionCanonicalInputV3,
+  type FusionCandidateId,
+  type FusionContextOmissionLedgerV2,
+  type FusionChildRunResult,
   type FusionErrorDetails,
   type FusionEvaluationV1,
   type FusionModelConfigV1,
@@ -57,11 +62,6 @@ import {
   type ResolvedFusionModel,
   type ResolvedFusionModels,
 } from './types';
-import {
-  assertWorkflowCapability,
-  type FusionWorkflowProfile,
-  fusionWorkflowProfile,
-} from './workflows';
 
 export type FusionChildRunner = (options: RunPiChildOptions) => Promise<FusionChildRunResult>;
 export type FusionProgressSink = (event: FusionProgressEvent) => void;
@@ -528,6 +528,7 @@ async function prepareValidationSourceData(
       findings.push(...report.findings);
       verified.push(...report.verified);
       limitations.push(...report.limitations);
+      continue;
     } catch (strictError) {
       try {
         const recovered = recoverFencedFusionValidationCandidateReport(
@@ -552,6 +553,7 @@ async function prepareValidationSourceData(
         verified.push(...recovered.report.verified);
         limitations.push(...recovered.report.limitations);
         normalizationCount += 1;
+        continue;
       } catch (recoveryError) {
         failures.push({
           candidate,

@@ -6,8 +6,8 @@ import { canonicalJson } from '../canonical-json';
 import { isJsonObject, parseJsonText } from '../common';
 import {
   FUSION_SOURCE_POLICY_SCHEMA_VERSION,
-  type FusionDeclaredSourceV1,
   FusionError,
+  type FusionDeclaredSourceV1,
   type FusionSourcePolicyV1,
 } from './types';
 

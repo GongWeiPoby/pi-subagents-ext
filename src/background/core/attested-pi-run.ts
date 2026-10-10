@@ -3,40 +3,38 @@ import { randomBytes } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import {
-  ATTESTED_GIT_KILL_GRACE_MS,
-  ATTESTED_GIT_MAX_OUTPUT_BYTES,
-  ATTESTED_GIT_TIMEOUT_MS,
-} from './attested-pi-contract';
-import { canonicalJson, sha256Buffer } from './canonical-json';
-import { type BgTaskSnapshot, isJsonObject, type JsonObject, parseJsonText } from './common';
 import type {
   BackgroundTaskChildProcess,
   BackgroundTaskContext,
   BackgroundTaskSpawn,
 } from './registry';
-
+import { isJsonObject, parseJsonText, type BgTaskSnapshot, type JsonObject } from './common';
+import { canonicalJson, sha256Buffer } from './canonical-json';
+import {
+  ATTESTED_GIT_KILL_GRACE_MS,
+  ATTESTED_GIT_MAX_OUTPUT_BYTES,
+  ATTESTED_GIT_TIMEOUT_MS,
+} from './attested-pi-contract';
+export { canonicalJson, sha256Buffer } from './canonical-json';
 export {
   ATTESTED_GIT_KILL_GRACE_MS,
   ATTESTED_GIT_MAX_OUTPUT_BYTES,
   ATTESTED_GIT_TIMEOUT_MS,
   ATTESTED_TASK_ID_PATTERN,
 } from './attested-pi-contract';
-export { canonicalJson, sha256Buffer } from './canonical-json';
 export { closeAndFsyncOutputStream, writeFileFsynced, writeJsonAtomic } from './task-durable';
-
-import {
-  assertWindowsCommandLineWithinLimit,
-  type PiLaunchSpec,
-  piLaunchArgv,
-  resolvePiLaunch,
-} from './pi-launch';
 import {
   runWindowsTaskkill,
   type TaskkillOutcome,
   type WindowsKillPhase,
   type WindowsTaskkillOptions,
 } from './windows-taskkill';
+import {
+  assertWindowsCommandLineWithinLimit,
+  piLaunchArgv,
+  resolvePiLaunch,
+  type PiLaunchSpec,
+} from './pi-launch';
 
 export const PI_TASK_ATTESTATION_SCHEMA_VERSION = 'phase2.pi_task_attestation.v1';
 

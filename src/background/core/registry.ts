@@ -7,64 +7,63 @@ import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { formatSize } from '@earendil-works/pi-coding-agent';
 import {
-  ATTESTED_GIT_KILL_GRACE_MS,
-  ATTESTED_GIT_MAX_OUTPUT_BYTES,
-  ATTESTED_TASK_ID_PATTERN,
-} from './attested-pi-contract';
-import type { AttestedGitSpawn, GitCommandOptions } from './attested-pi-run';
-import {
-  type BgLogsDetails,
-  type BgTask,
-  type BgTaskSnapshot,
   boundedRead,
   deriveTaskNameFromCommand,
   escapeXml,
   formatAgentActivityLine,
   formatDuration,
   isJsonObject,
-  type JsonObject,
-  type KillKind,
   normalizeTaskName,
   parseAgentActivity,
   parseJsonText,
-  type ReloadableShellExecutionV1,
-  type ReloadShellActivationClaimV1,
-  type ReloadShellActivationLeaseV1,
-  type ReloadShellHostAdapterV1,
-  type ReloadShellIdentityV1,
-  type ReloadShellOwnerHubV1,
-  ReloadSurvivalError,
-  type ResolvedShellPolicy,
   rejectSurvivalForTaskKind,
   resolveShellPolicy,
-  type StartAttestedPiTaskOptions,
-  type StartDelegateTaskOptions,
-  type StartManagedTaskOptions,
-  type StartTaskOptions,
   sanitizePathSegment,
   shellInvocationForPolicy,
   shellPolicySnapshot,
   shellQuote,
   snapshot,
+  taskDisplayName,
+  type BgLogsDetails,
+  type BgTask,
+  type BgTaskSnapshot,
+  type JsonObject,
+  type KillKind,
+  type ReloadShellActivationClaimV1,
+  type ReloadShellActivationLeaseV1,
+  type ReloadShellHostAdapterV1,
+  type ReloadShellIdentityV1,
+  type ReloadShellOwnerHubV1,
+  type ReloadableShellExecutionV1,
+  type ResolvedShellPolicy,
+  type StartAttestedPiTaskOptions,
+  type StartDelegateTaskOptions,
+  type StartManagedTaskOptions,
+  type StartTaskOptions,
   type TaskContextUsage,
   type TaskStatus,
   type TaskTokenUsage,
   type TaskToolUsage,
   type TerminalPublicationAbandonReason,
-  taskDisplayName,
+  ReloadSurvivalError,
 } from './common';
+import {
+  ATTESTED_GIT_KILL_GRACE_MS,
+  ATTESTED_GIT_MAX_OUTPUT_BYTES,
+  ATTESTED_TASK_ID_PATTERN,
+} from './attested-pi-contract';
+import type { AttestedGitSpawn, GitCommandOptions } from './attested-pi-run';
 import { closeAndFsyncOutputStream, writeFileFsynced, writeJsonAtomic } from './task-durable';
 
 type AttestedPiRuntime = typeof import('./attested-pi-run');
-
-import { resolveAnthropicAttributionExtensionPath } from './anthropic-attribution-path';
-import { BackgroundTaskExtensionServiceClosedError } from './extension-api';
 import {
   assertWindowsCommandLineWithinLimit,
-  type PiLaunchSpec,
   piLaunchArgv,
   resolvePiLaunch,
+  type PiLaunchSpec,
 } from './pi-launch';
+import { BackgroundTaskExtensionServiceClosedError } from './extension-api';
+import { resolveAnthropicAttributionExtensionPath } from './anthropic-attribution-path';
 import {
   createReloadableShellExecutionV1,
   RELOAD_SHELL_OWNER_PROTOCOL,
@@ -391,17 +390,17 @@ function currentToolUsage() {
 }
 
 function renderWindowsArgument(value) {
-  if (value.length > 0 && !/[ \\t"]/.test(value)) return value;
-  let rendered = "\\"";
+  if (value.length > 0 && !/[ \\t\"]/.test(value)) return value;
+  let rendered = "\\\"";
   let backslashes = 0;
   for (const char of value) {
     if (char === "\\\\") {
       backslashes += 1;
       continue;
     }
-    if (char === "\\"") {
+    if (char === "\\\"") {
       rendered += "\\\\".repeat(backslashes * 2 + 1);
-      rendered += "\\"";
+      rendered += "\\\"";
       backslashes = 0;
       continue;
     }
@@ -412,7 +411,7 @@ function renderWindowsArgument(value) {
     rendered += char;
   }
   if (backslashes > 0) rendered += "\\\\".repeat(backslashes * 2);
-  rendered += "\\"";
+  rendered += "\\\"";
   return rendered;
 }
 
@@ -763,7 +762,7 @@ interface TelemetryDelta {
 }
 
 function noopOnChange(): void {
-  // ponytail: returns undefined so the void function satisfies noVoidTypeReturn
+  return undefined;
 }
 
 /**
@@ -1368,7 +1367,7 @@ export class BackgroundTaskRegistry {
     command: string,
     options: StartTaskOptions = {},
   ): Promise<BgTask> {
-    const hasSurvival = Object.hasOwn(options, 'surviveReload');
+    const hasSurvival = Object.prototype.hasOwnProperty.call(options, 'surviveReload');
     if (hasSurvival && typeof options.surviveReload !== 'boolean') {
       throw new ReloadSurvivalError(
         'pi_bg_survive_reload_invalid',

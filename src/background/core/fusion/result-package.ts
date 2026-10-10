@@ -1,14 +1,14 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { canonicalJson, sha256Buffer } from '../canonical-json';
-import { type JsonObject, parseJsonText } from '../common';
+import { parseJsonText, type JsonObject } from '../common';
 import {
-  assertFusionArtifactBasename,
-  buildFusionRunProgress,
   FUSION_FAILURE_SUMMARY_ATTEMPT_CAP,
   FUSION_FAILURE_SUMMARY_EVIDENCE_CAP,
   FUSION_FAILURE_SUMMARY_INLINE_MESSAGE_BYTES,
   FUSION_FAILURE_SUMMARY_MAX_BYTES,
+  assertFusionArtifactBasename,
+  buildFusionRunProgress,
 } from './artifacts';
 import {
   FUSION_COMMITTED_RESULT_SCHEMA_VERSION,
@@ -16,20 +16,20 @@ import {
   FUSION_LEGACY_MANIFEST_SCHEMA_VERSION,
   FUSION_MANIFEST_SCHEMA_VERSION,
   FUSION_RESULT_SCHEMA_VERSION,
-  type FusionArtifactRef,
   FusionError,
+  type FusionArtifactRef,
   type FusionFailureAttemptMetadata,
   type FusionFailureEvidenceArtifact,
   type FusionFailureList,
   type FusionFailureResultView,
   type FusionFailureSummaryV1,
   type FusionResultDetails,
-  type FusionRunProgress,
   type FusionRunResult,
-  type FusionSource,
-  type FusionStage,
   type FusionUsage,
   type FusionWorkflowId,
+  type FusionRunProgress,
+  type FusionSource,
+  type FusionStage,
 } from './types';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;

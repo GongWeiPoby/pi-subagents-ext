@@ -4,10 +4,10 @@ import { createWriteStream } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { formatSize } from '@earendil-works/pi-coding-agent';
 import {
-  type BgTask,
   isJsonObject,
   parseJsonText,
-  type ReloadableShellExecutionV1,
+  snapshot,
+  type BgTask,
   type ReloadShellActivationClaimV1,
   type ReloadShellActivationLeaseV1,
   type ReloadShellHostAdapterV1,
@@ -16,10 +16,10 @@ import {
   type ReloadShellOwnerHubV1,
   type ReloadShellProcessV1,
   type ReloadShellStopKind,
-  ReloadSurvivalError,
-  type ReloadSurvivalErrorCode,
   type ReloadSurvivalSnapshotV1,
-  snapshot,
+  type ReloadableShellExecutionV1,
+  type ReloadSurvivalErrorCode,
+  ReloadSurvivalError,
   type TaskContextUsage,
   type TaskStatus,
   type TaskTokenUsage,
@@ -600,8 +600,7 @@ export function createReloadShellOwnerHubForTests(
     ): void {
       const slot = currentSlotForLease(lease);
       if (slot.executions.get(execution.launchNonce) !== execution) {
-        failStale('cannot commit an execution not registered to this activation');
-        return;
+        return failStale('cannot commit an execution not registered to this activation');
       }
       execution.markAdmissionCommitted(slot.generation, slot.handoffCount);
     },
@@ -613,8 +612,7 @@ export function createReloadShellOwnerHubForTests(
       if ('claimNonce' in leaseOrClaim) slot = slotForClaim(leaseOrClaim);
       else slot = currentSlotForLease(leaseOrClaim);
       if (slot.executions.get(execution.launchNonce) !== execution) {
-        failStale('cannot release an execution not owned by this activation');
-        return;
+        return failStale('cannot release an execution not owned by this activation');
       }
       if (execution.phase === 'terminal') {
         removeExecution(slot, execution);

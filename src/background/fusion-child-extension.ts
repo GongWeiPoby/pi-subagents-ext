@@ -9,12 +9,30 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { type Static, Type } from 'typebox';
 import { parseJsonText } from './core/common';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { Type, type Static } from 'typebox';
 import {
-  buildFusionChildResultMetadata,
-  buildFusionChildSettlement,
+  FUSION_TOOL_CALL_LOG_SCHEMA_VERSION,
+  FUSION_WEB_FETCH_TOOL_NAME,
+  type FusionToolCallLogRecord,
+} from './core/fusion/types';
+import {
+  fusionWebFetch,
+  FusionWebFetchError,
+  FUSION_WEB_FETCH_TIMEOUT_MS,
+} from './core/fusion/web-fetch';
+import {
+  canonicalizeFusionPublicUrl,
+  parseFusionSourcePolicy,
+} from './core/fusion/source-policy';
+import {
+  applyFusionClaudePromptCachingScopeHeader,
+  nonAnthropicFusionCacheObservation,
+  normalizeFusionClaudeCachePayload,
+  type FusionClaudeCacheObservation,
+} from './core/fusion/claude-cache';
+import {
   FUSION_CANDIDATE_OUTPUT_RECOVERY_PATH_ENV,
   FUSION_CHILD_MAX_PROVIDER_REQUESTS,
   FUSION_CHILD_MAX_TOOL_CALLS,
@@ -29,41 +47,36 @@ import {
   FUSION_TOOL_CALL_LOG_PATH_ENV,
   FUSION_TOOL_CALL_SEAL_SCHEMA_VERSION,
   FUSION_TOOL_CALL_SEAL_SUFFIX,
+  buildFusionChildResultMetadata,
+  buildFusionChildSettlement,
   type FusionChildResultMetadata,
   type FusionChildSettlementRecord,
   type FusionRuntimeGuardCode,
   type FusionRuntimeGuardRecord,
 } from './core/fusion/child-protocol';
 import {
-  applyFusionClaudePromptCachingScopeHeader,
-  type FusionClaudeCacheObservation,
-  nonAnthropicFusionCacheObservation,
-  normalizeFusionClaudeCachePayload,
-} from './core/fusion/claude-cache';
-import {
   FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
   FUSION_CANDIDATE_OUTPUT_COMPRESSION_PROMPT,
   fusionJsonRenderedTextBytes,
 } from './core/fusion/output-contract';
-import {
-  canonicalizeFusionPublicUrl,
-  parseFusionSourcePolicy,
-} from './core/fusion/source-policy';
-import {
-  FUSION_TOOL_CALL_LOG_SCHEMA_VERSION,
-  FUSION_WEB_FETCH_TOOL_NAME,
-  type FusionToolCallLogRecord,
-} from './core/fusion/types';
-import {
-  FUSION_WEB_FETCH_TIMEOUT_MS,
-  FusionWebFetchError,
-  fusionWebFetch,
-} from './core/fusion/web-fetch';
-
 
 export {
-  buildFusionChildResultMetadata,
-  buildFusionChildSettlement,
+  FUSION_CLAUDE_CACHE_BREAKPOINT_LIMIT,
+  FUSION_CLAUDE_CACHE_DEFAULT_RETENTION,
+  FUSION_CLAUDE_CACHE_OBSERVATION_SCHEMA_VERSION,
+  FUSION_CLAUDE_CACHE_RETENTION_ENV,
+  FUSION_CLAUDE_PROMPT_CACHING_SCOPE_BETA,
+  applyFusionClaudePromptCachingScopeHeader,
+  nonAnthropicFusionCacheObservation,
+  normalizeFusionClaudeCachePayload,
+  resolveFusionClaudeCachePolicy,
+  type FusionClaudeCacheNormalization,
+  type FusionClaudeCacheObservation,
+  type FusionClaudeCachePolicySource,
+  type FusionClaudeCacheRetention,
+} from './core/fusion/claude-cache';
+
+export {
   FUSION_CANDIDATE_OUTPUT_RECOVERY_PATH_ENV,
   FUSION_CHILD_MAX_PROVIDER_REQUESTS,
   FUSION_CHILD_MAX_TOOL_CALLS,
@@ -80,6 +93,8 @@ export {
   FUSION_TOOL_CALL_LOG_PATH_ENV,
   FUSION_TOOL_CALL_SEAL_SCHEMA_VERSION,
   FUSION_TOOL_CALL_SEAL_SUFFIX,
+  buildFusionChildResultMetadata,
+  buildFusionChildSettlement,
   type FusionChildResultMetadata,
   type FusionChildResultUsageMetadata,
   type FusionChildSettlementFailureReason,
@@ -88,21 +103,6 @@ export {
   type FusionRuntimeGuardCode,
   type FusionRuntimeGuardRecord,
 } from './core/fusion/child-protocol';
-export {
-  applyFusionClaudePromptCachingScopeHeader,
-  FUSION_CLAUDE_CACHE_BREAKPOINT_LIMIT,
-  FUSION_CLAUDE_CACHE_DEFAULT_RETENTION,
-  FUSION_CLAUDE_CACHE_OBSERVATION_SCHEMA_VERSION,
-  FUSION_CLAUDE_CACHE_RETENTION_ENV,
-  FUSION_CLAUDE_PROMPT_CACHING_SCOPE_BETA,
-  type FusionClaudeCacheNormalization,
-  type FusionClaudeCacheObservation,
-  type FusionClaudeCachePolicySource,
-  type FusionClaudeCacheRetention,
-  nonAnthropicFusionCacheObservation,
-  normalizeFusionClaudeCachePayload,
-  resolveFusionClaudeCachePolicy,
-} from './core/fusion/claude-cache';
 
 export {
   FUSION_CANDIDATE_MAX_OUTPUT_BYTES,

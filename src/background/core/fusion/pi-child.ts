@@ -4,20 +4,10 @@ import { constants, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path';
-import { isJsonObject, parseJsonText } from '../common';
 import {
-  assertWindowsCommandLineWithinLimit,
-  type PiLaunchDependencies,
-  piLaunchArgv,
-  resolvePiLaunch,
-} from '../pi-launch';
-import {
-  buildFusionChildSettlement,
   FUSION_CANDIDATE_OUTPUT_RECOVERY_PATH_ENV,
   FUSION_CHILD_MAX_PROVIDER_REQUESTS,
   FUSION_CHILD_MAX_TOOL_CALLS,
-  FUSION_CHILD_MAX_TOTAL_TOOL_RESULT_BYTES,
   FUSION_CHILD_RESULT_PREFIX,
   FUSION_CHILD_RESULT_SCHEMA_VERSION,
   FUSION_CHILD_SETTLEMENT_PREFIX,
@@ -30,6 +20,10 @@ import {
   FUSION_TOOL_CALL_LOG_PATH_ENV,
   FUSION_TOOL_CALL_SEAL_SCHEMA_VERSION,
   FUSION_TOOL_CALL_SEAL_SUFFIX,
+  FUSION_CHILD_MAX_TOTAL_TOOL_RESULT_BYTES,
+  buildFusionChildSettlement,
+  isRecoverableFusionChildErrorRecord,
+  serializeFusionChildResultRecords,
   type FusionChildOutputContractMetadata,
   type FusionChildOutputRecoveryRole,
   type FusionChildResultMetadata,
@@ -37,8 +31,6 @@ import {
   type FusionChildSettlementRecord,
   type FusionRuntimeGuardCode,
   type FusionRuntimeGuardRecord,
-  isRecoverableFusionChildErrorRecord,
-  serializeFusionChildResultRecords,
 } from './child-protocol';
 import {
   FUSION_CLAUDE_CACHE_BREAKPOINT_LIMIT,
@@ -48,24 +40,19 @@ import {
   type FusionClaudeCacheRetention,
 } from './claude-cache';
 import {
-  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
-  fusionJsonRenderedTextBytes,
-} from './output-contract';
-import { canonicalizeFusionPublicUrl, readFusionSourcePolicyFile } from './source-policy';
-import {
-  addFusionUsage,
-  cloneFusionUsage,
-  createEmptyFusionUsage,
   FUSION_FORBIDDEN_TOOLS,
-  FUSION_INSPECT_TOOLS,
   FUSION_NO_TOOLS_CAPABILITY,
+  FUSION_INSPECT_TOOLS,
   FUSION_RESEARCH_TOOLS,
   FUSION_TOOL_CALL_LOG_SCHEMA_VERSION,
   FUSION_WEB_FETCH_TOOL_NAME,
-  type FusionCandidateOutputRecovery,
-  type FusionCapability,
-  type FusionChildRunResult,
   FusionError,
+  addFusionUsage,
+  cloneFusionUsage,
+  createEmptyFusionUsage,
+  type FusionCapability,
+  type FusionCandidateOutputRecovery,
+  type FusionChildRunResult,
   type FusionErrorDetails,
   type FusionStage,
   type FusionToolCallLogRecord,
@@ -73,6 +60,19 @@ import {
   type FusionUsage,
   type ResolvedFusionModel,
 } from './types';
+import { isJsonObject, parseJsonText } from '../common';
+import {
+  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
+  fusionJsonRenderedTextBytes,
+} from './output-contract';
+import { canonicalizeFusionPublicUrl, readFusionSourcePolicyFile } from './source-policy';
+import {
+  assertWindowsCommandLineWithinLimit,
+  piLaunchArgv,
+  resolvePiLaunch,
+  type PiLaunchDependencies,
+} from '../pi-launch';
+import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path';
 
 // The response cap now applies to one final full answer, not cumulative Pi JSON events.
 export const FUSION_CHILD_STDOUT_LIMIT_BYTES = 32 * 1024 * 1024;
@@ -291,7 +291,7 @@ export function resolveFusionChildExtensionPath(
 
 /**
  * Provider whose isolated children require the package-owned attribution and
- * exact-match system-prompt sanitization extension.
+ * SPS-derived line-start system-prompt sanitization extension.
  */
 export const FUSION_SANITIZED_PROVIDER = 'anthropic';
 

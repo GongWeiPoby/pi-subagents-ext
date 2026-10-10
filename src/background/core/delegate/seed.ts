@@ -1,28 +1,28 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../canonical-json';
 import {
+  UnsupportedConversationBlockError,
+  projectVisibleConversationV2,
+  type ProjectedConversationV2,
+} from '../context/visible-conversation-v2';
+import {
+  snapshotParentConversation,
   type ParentContextSource,
   type ParentSnapshotOptions,
-  snapshotParentConversation,
 } from '../context/parent-snapshot';
-import {
-  type ProjectedConversationV2,
-  projectVisibleConversationV2,
-  UnsupportedConversationBlockError,
-} from '../context/visible-conversation-v2';
 import {
   DELEGATE_BRANCH_FILTER_ID,
   DELEGATE_CONTEXT_POLICY_ID,
   DELEGATE_LEDGER_SCHEMA_VERSION,
   DELEGATE_SEED_SCHEMA_VERSION,
   DELEGATE_TOOL_NAME,
+  DelegateError,
   type DelegateBranchFilterDescriptor,
   type DelegateCapability,
   type DelegateContextPolicyDescriptor,
   type DelegateConversationProjection,
-  DelegateError,
-  type DelegateExtensionMode,
   type DelegateLedgerV1,
+  type DelegateExtensionMode,
   type DelegateLimits,
   type DelegatePinnedRoute,
   type DelegateSeedV1,
@@ -171,7 +171,7 @@ export function buildDelegateSeed(
     capability: options.capability,
     extension_mode: options.extensionMode,
     route: options.route,
-    parent_system_prompt: ctx.getSystemPrompt(),
+    parent_system_prompt: snapshot.systemPrompt,
     parent_leaf_id: snapshot.leafId,
     directive,
     conversation_projection: sealed.projection,

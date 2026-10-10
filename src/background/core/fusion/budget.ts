@@ -1,48 +1,47 @@
 import { createHash } from 'node:crypto';
 import {
-  allowedInputTokens,
-  estimateInputTokens,
-  isUsableContextWindow,
-  knownTextSegment,
-  maxKnownTextBytesForTokens,
-  resolveTokenBudgetFamily,
   TOKEN_BUDGET_AFFINE_F_TOKENS,
   TOKEN_BUDGET_CALIBRATION_VERSION,
   TOKEN_BUDGET_FAMILY_CALIBRATIONS,
   TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES,
   TOKEN_BUDGET_RATE_SCALE,
+  estimateInputTokens,
+  knownTextSegment,
+  maxKnownTextBytesForTokens,
+  resolveTokenBudgetFamily,
   unknownOutputContractSegment,
+  allowedInputTokens,
+  isUsableContextWindow,
 } from '../context/token-budget';
 import {
-  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
-  FUSION_DIAGNOSTICS_MAX_BYTES,
-  FUSION_EVALUATION_MAX_OUTPUT_BYTES,
-  FUSION_MERGE_MAX_OUTPUT_BYTES,
-} from './output-contract';
-import {
-  type AnonymousFusionCandidate,
   buildBlindEvaluationInput,
   buildCandidatePrompt,
   buildEvaluationPrompt,
   buildEvaluationRepairPrompt,
   buildMergeInput,
   buildMergePrompt,
+  type AnonymousFusionCandidate,
 } from './prompts';
 import { FUSION_REASON_WORKFLOW, type FusionWorkflowProfile } from './workflows';
-
-export {
-  assertChildOutputWithinContract,
+import {
   FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
   FUSION_DIAGNOSTICS_MAX_BYTES,
   FUSION_EVALUATION_MAX_OUTPUT_BYTES,
   FUSION_MERGE_MAX_OUTPUT_BYTES,
+} from './output-contract';
+export {
+  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
+  FUSION_DIAGNOSTICS_MAX_BYTES,
+  FUSION_EVALUATION_MAX_OUTPUT_BYTES,
+  FUSION_MERGE_MAX_OUTPUT_BYTES,
+  assertChildOutputWithinContract,
   fusionOutputContractBytes,
 } from './output-contract';
-
 import {
   FUSION_BUDGET_PLAN_SCHEMA_VERSION,
   FUSION_CALIBRATION_VIOLATION_SCHEMA_VERSION,
   FUSION_EVALUATION_SCHEMA_VERSION,
+  FusionError,
   type FusionBudgetBlocker,
   type FusionBudgetCheckKind,
   type FusionBudgetComponentBreakdown,
@@ -58,12 +57,11 @@ import {
   type FusionCalibrationViolation,
   type FusionCanonicalInputV3,
   type FusionCapability,
-  type FusionChildRunResult,
-  FusionError,
   type FusionEvaluationV1,
   type FusionRouteCapacity,
   type FusionStage,
   type FusionStageBudgetPlanEntry,
+  type FusionChildRunResult,
   type ResolvedFusionModel,
   type ResolvedFusionModels,
 } from './types';

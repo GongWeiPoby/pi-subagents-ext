@@ -13,9 +13,9 @@ import {
   FUSION_NO_TOOLS_CAPABILITY,
   FUSION_RESEARCH_TOOLS,
   FUSION_VALIDATE_CAPABILITY,
+  FusionError,
   type FusionCapability,
   type FusionContextKind,
-  FusionError,
   type FusionPublicWorkflowName,
   type FusionWorkflowId,
 } from './types';

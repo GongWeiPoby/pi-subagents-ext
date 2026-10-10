@@ -1,9 +1,9 @@
-import type { Message } from '@earendil-works/pi-ai';
 import {
   buildSessionContext,
   convertToLlm,
   type SessionEntry,
 } from '@earendil-works/pi-coding-agent';
+import type { Message } from '@earendil-works/pi-ai';
 import { isJsonObject, type JsonObject } from '../common';
 import { UnsupportedConversationBlockError } from './visible-conversation-v2';
 

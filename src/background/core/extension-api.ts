@@ -1,10 +1,10 @@
 import type { EventBus } from '@earendil-works/pi-coding-agent';
 import {
+  DEFAULT_LOG_BYTES,
+  normalizeMaxBytes,
   type BgLogsDetails,
   type BgTaskSnapshot,
-  DEFAULT_LOG_BYTES,
   type JsonObject,
-  normalizeMaxBytes,
   type StartTaskOptions,
 } from './common';
 import type { BackgroundTaskContext, BackgroundTaskRegistry } from './registry';
@@ -153,7 +153,7 @@ function isRecord(value: unknown): value is JsonRecord {
 }
 
 function hasOwn(record: JsonRecord, key: string): boolean {
-  return  Object.hasOwn(record, key);
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function assertClosed(record: JsonRecord, allowedKeys: readonly string[], label: string): void {

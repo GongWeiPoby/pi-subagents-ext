@@ -1,18 +1,19 @@
 import { createHash } from 'node:crypto';
-import type { Message } from '@earendil-works/pi-ai';
 import { canonicalJson } from '../canonical-json';
 import {
-  type ParentContextSource,
-  type ParentSnapshotOptions,
-  type ReadonlyParentSessionManager,
-  snapshotParentConversation,
-} from '../context/parent-snapshot';
-import {
+  projectVisibleConversationV2,
   type OmittedRunCounts,
   type ProjectedConversationV2,
   type ProjectionEntry,
-  projectVisibleConversationV2,
 } from '../context/visible-conversation-v2';
+import {
+  snapshotParentConversation,
+  type ParentContextSource,
+  type ParentSnapshotOptions,
+  type ReadonlyParentSessionManager,
+} from '../context/parent-snapshot';
+import type { Message } from '@earendil-works/pi-ai';
+import { FUSION_REASON_TOOL_NAME } from './workflows';
 import {
   FUSION_BRANCH_FILTER_ID,
   FUSION_COMMAND_CONTEXT_POLICY_ID,
@@ -20,20 +21,19 @@ import {
   FUSION_CONTEXT_TRANSFORM_ID,
   FUSION_INPUT_SCHEMA_VERSION,
   FUSION_TOOL_CONTEXT_POLICY_ID,
+  FusionError,
   type FusionBranchFilterDescriptor,
   type FusionCanonicalRequestV3,
+  type FusionSessionProjectionCanonicalInputV5,
+  type FusionWorkflowId,
   type FusionContextOmissionLedgerV2,
   type FusionContextPolicyDescriptor,
   type FusionConversationProjectionV3,
-  FusionError,
   type FusionProjectionEntry,
   type FusionProjectionOmissionCounts,
   type FusionRequestAuthority,
-  type FusionSessionProjectionCanonicalInputV5,
   type FusionSource,
-  type FusionWorkflowId,
 } from './types';
-import { FUSION_REASON_TOOL_NAME } from './workflows';
 
 /**
  * Re-exported from the workflow registry, which owns every workflow's tool name.
@@ -41,8 +41,8 @@ import { FUSION_REASON_TOOL_NAME } from './workflows';
  */
 export {
   FUSION_BRAINSTORM_TOOL_NAME,
-  FUSION_INVESTIGATE_TOOL_NAME,
   FUSION_REASON_TOOL_NAME,
+  FUSION_INVESTIGATE_TOOL_NAME,
   FUSION_RESEARCH_TOOL_NAME,
   FUSION_VALIDATE_TOOL_NAME,
 } from './workflows';
@@ -243,12 +243,12 @@ export function buildFusionCanonicalInput(
     workflow: 'reason',
     cwd: ctx.cwd,
     request,
-    system_prompt: ctx.getSystemPrompt(),
+    system_prompt: snapshot.systemPrompt,
     conversation_projection: projected.projection,
     context: {
       kind: 'session_projection',
       policy_id: 'fusion-session-projection-v1',
-      system_prompt: ctx.getSystemPrompt(),
+      system_prompt: snapshot.systemPrompt,
       conversation_projection: projected.projection,
     },
   };

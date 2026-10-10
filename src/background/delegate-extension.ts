@@ -8,7 +8,7 @@ import type {
   ToolRenderResultOptions,
 } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
-import { type Static, Type } from 'typebox';
+import { Type, type Static } from 'typebox';
 import type {
   BgTask,
   BgTaskSnapshot,
@@ -16,32 +16,32 @@ import type {
   StartDelegateTaskOptions,
 } from './core/common';
 import { truncateChars } from './core/common';
-import {
-  DELEGATE_DEFAULT_MAX_TOOL_CALLS,
-  DELEGATE_DEFAULT_MAX_TURNS,
-  DELEGATE_DEFAULT_TIMEOUT_SECONDS,
-  DELEGATE_INLINE_ANSWER_BYTES,
-} from './core/delegate/facade-contract';
-import type { DelegateHookContractEvidence } from './core/delegate/hook-contract';
+import type {
+  FusionFailureResultView,
+  FusionUsage,
+  FusionWorkflowId,
+} from './core/fusion/types';
 import {
   DELEGATE_AUTO_DELIVER_MODES,
   DELEGATE_CAPABILITIES,
   DELEGATE_EXTENSION_MODES,
   DELEGATE_RESULT_TOOL_NAME,
   DELEGATE_TOOL_NAME,
+  DelegateError,
   type DelegateAutoDeliverMode,
-  type DelegateBudgetRouteSource,
   type DelegateCapability,
   type DelegateDeliveryMode,
-  DelegateError,
+  type DelegateBudgetRouteSource,
   type DelegateExtensionMode,
   type DelegateRoute,
 } from './core/delegate/types';
-import type {
-  FusionFailureResultView,
-  FusionUsage,
-  FusionWorkflowId,
-} from './core/fusion/types';
+import type { DelegateHookContractEvidence } from './core/delegate/hook-contract';
+import {
+  DELEGATE_DEFAULT_MAX_TOOL_CALLS,
+  DELEGATE_DEFAULT_MAX_TURNS,
+  DELEGATE_DEFAULT_TIMEOUT_SECONDS,
+  DELEGATE_INLINE_ANSWER_BYTES,
+} from './core/delegate/facade-contract';
 import {
   LazyModule,
   SynchronousActivationCloseFence,

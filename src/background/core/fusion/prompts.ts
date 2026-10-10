@@ -2,13 +2,13 @@ import { canonicalJson } from '../canonical-json';
 import { FUSION_CANDIDATE_OUTPUT_CONTRACT_INSTRUCTION } from './output-contract';
 import {
   FUSION_EVALUATION_SCHEMA_VERSION,
-  FUSION_VALIDATE_CANDIDATE_SCHEMA_VERSION,
   FUSION_VALIDATE_CAPABILITY,
+  FUSION_VALIDATE_CANDIDATE_SCHEMA_VERSION,
+  FusionError,
   type FusionCandidateId,
   type FusionCanonicalInputV3,
-  type FusionCapability,
-  FusionError,
   type FusionEvaluationV1,
+  type FusionCapability,
   type FusionValidationFindingRecord,
 } from './types';
 

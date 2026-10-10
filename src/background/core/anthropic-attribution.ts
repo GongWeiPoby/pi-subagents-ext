@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -98,13 +98,19 @@ const COMPACTION_SUMMARY_PREFIX =
   'The conversation history before this point was compacted into the following summary:';
 
 // Sanitization behavior derived from the MIT-licensed ravshansbox/pi-anthropic-sps
-// extension at commit 17409b5615f0ec0625776bc5434f92f2c55e3fd0. Keep exact-match
-// semantics and all known Pi prompt variants; unrelated system text is preserved.
-const ANTHROPIC_SYSTEM_PROMPT_BAD_LINES = new Set([
-  '- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)',
-  '- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)',
+// extension at commit 3a27cb3f8a2ddf62ee6219357c09a24e33e47cfc. Keep its exact
+// line-start prefix semantics: whole lines beginning with a prefix are removed and
+// all other system text is preserved. These rules must remain a superset of every
+// SPS release, because the transport rejects later before_provider_request system
+// changes; the prefixes also cover every exact line of the earlier 17409b5 rules.
+const ANTHROPIC_SYSTEM_PROMPT_BAD_LINE_PREFIXES = [
+  '- When asked about: extensions (docs/extensions.md, examples/extensions/)',
   '- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing',
-]);
+] as const;
+
+function isAnthropicSystemPromptBadLine(line: string): boolean {
+  return ANTHROPIC_SYSTEM_PROMPT_BAD_LINE_PREFIXES.some((prefix) => line.startsWith(prefix));
+}
 
 type JsonObject = Record<string, unknown>;
 export type CacheRetention = 'none' | 'short' | 'long';
@@ -349,6 +355,11 @@ const CLAUDE_CODE_MODEL_POLICIES: Record<string, ClaudeCodeModelPolicy> = Object
     CLAUDE_CODE_ADAPTIVE_200K_BETA,
     'adaptive-effort',
   ),
+  'claude-sonnet-5-5': claudeCode200KSubscriptionPolicy(
+    'claude-sonnet-5-5',
+    CLAUDE_CODE_ADAPTIVE_200K_BETA,
+    'adaptive-effort',
+  ),
 });
 
 export interface PiSessionManagerLike {
@@ -460,7 +471,7 @@ export interface PiSimpleStreamOptions {
   readonly apiKey?: string;
   readonly headers?: Record<string, string>;
   readonly maxTokens?: number;
-  readonly reasoning?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  readonly reasoning?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   readonly thinkingBudgets?: Partial<
     Record<'minimal' | 'low' | 'medium' | 'high' | 'xhigh', number>
   >;
@@ -482,6 +493,18 @@ export interface PiSimpleStreamOptions {
 
 export type HostAnthropicMessagesApiFactory =
   typeof import('@earendil-works/pi-ai/compat').anthropicMessagesApi;
+
+/** Gate optional host exports at activation, not ESM linking (#35). */
+export function resolveHostAnthropicMessagesApi(host: object): HostAnthropicMessagesApiFactory {
+  const factory: unknown = Reflect.get(host, 'anthropicMessagesApi');
+  if (typeof factory !== 'function') {
+    const condition = factory === undefined ? 'missing' : 'invalid';
+    throw new Error(
+      `pi_anthropic_attribution_host_adapter_${condition}: the host must expose compat.anthropicMessagesApi. Upgrade the host; only ambient attribution may be disabled with PI_BG_FEATURES (Anthropic children remain mandatory).`,
+    );
+  }
+  return factory as HostAnthropicMessagesApiFactory;
+}
 
 export interface AnthropicTranscriptHelpers {
   getCurrentSystemPrompt(messages: readonly { readonly role: string }[]): string;
@@ -895,7 +918,7 @@ function cloneBlockWithCacheControl(
 function stripAnthropicSystemPromptBadLines(text: string): string {
   return text
     .split('\n')
-    .filter((line) => !ANTHROPIC_SYSTEM_PROMPT_BAD_LINES.has(line))
+    .filter((line) => !isAnthropicSystemPromptBadLine(line))
     .join('\n');
 }
 
@@ -1166,10 +1189,12 @@ export function registerAnthropicAttributionProvider(
       streamAnthropicViaBetaMessages(
         model,
         context,
-        {
-          ...(options ?? {}),
-          cacheRetention: resolveRegisteredCacheRetention(options, getSessionOverride()),
-        },
+        model.provider === 'anthropic'
+          ? {
+              ...(options ?? {}),
+              cacheRetention: resolveRegisteredCacheRetention(options, getSessionOverride()),
+            }
+          : options,
         dependencies,
       ),
   });
@@ -2055,6 +2080,9 @@ function thinkingBudgetFor(
   maxTokens: number,
   custom?: PiSimpleStreamOptions['thinkingBudgets'],
 ): number {
+  if (level === 'max') {
+    throw new Error('Anthropic attribution reasoning=max requires an adaptive-effort model');
+  }
   const defaults = {
     minimal: 1024,
     low: 4096,
@@ -2069,16 +2097,17 @@ function thinkingBudgetFor(
 
 function adaptiveEffortFor(
   level: Exclude<NonNullable<PiSimpleStreamOptions['reasoning']>, 'off'>,
-): 'low' | 'medium' | 'high' | 'xhigh' {
+): 'low' | 'medium' | 'high' | 'xhigh' | 'max' {
   switch (level) {
     case 'low':
     case 'medium':
     case 'high':
     case 'xhigh':
+    case 'max':
       return level;
     case 'minimal':
       throw new Error(
-        'Anthropic attribution cannot map Pi reasoning=minimal to Claude adaptive effort; use low, medium, high, or xhigh',
+        'Anthropic attribution cannot map Pi reasoning=minimal to Claude adaptive effort; use low, medium, high, xhigh, or max',
       );
   }
 }
@@ -2109,7 +2138,9 @@ export function buildAnthropicRequestParams(
   dependencies: AnthropicTransportDependencies = {},
 ): JsonObject {
   return buildAnthropicRequest(
-    model, resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers), options,
+    model,
+    resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers),
+    options,
   ).params;
 }
 
@@ -2232,6 +2263,27 @@ interface PreparedAnthropicLineage {
   readonly details: Omit<AnthropicLineageDetails, 'response_id' | 'assistant_content_sha256'>;
 }
 
+// Lineage facts authorized before optional payload middleware runs. Middleware may
+// observe the attributed payload but must leave every one of these unchanged.
+const MIDDLEWARE_PROTECTED_LINEAGE_FIELDS = [
+  'previous_message_id',
+  'conversation_static_sha256',
+  'request_message_count',
+  'request_messages_sha256',
+  'cache_profile_sha256',
+  'cache_retention',
+  'compaction_boundary_sha256',
+  'signature_epoch_sha256',
+  'signature_epoch_inherits_prior',
+] as const satisfies ReadonlyArray<keyof PreparedAnthropicLineage['details']>;
+
+function changedMiddlewareProtectedLineageFields(
+  authorized: PreparedAnthropicLineage['details'],
+  final: PreparedAnthropicLineage['details'],
+): string[] {
+  return MIDDLEWARE_PROTECTED_LINEAGE_FIELDS.filter((field) => authorized[field] !== final[field]);
+}
+
 function requestMessagesFromPayload(payload: JsonObject): JsonObject[] {
   const messages = payload['messages'];
   if (!Array.isArray(messages) || messages.some((message) => !isPlainObject(message))) {
@@ -2295,9 +2347,7 @@ type TargetLineageState =
   | { readonly kind: 'trusted'; readonly lineage: AnthropicLineageDetails }
   | { readonly kind: 'untrusted'; readonly assistantSha256: string };
 
-function untrustedAssistantSha256(
-  message: Extract<PiMessage, { role: 'assistant' }>,
-): string {
+function untrustedAssistantSha256(message: Extract<PiMessage, { role: 'assistant' }>): string {
   return sha256Canonical({
     provider: message.provider ?? null,
     api: message.api ?? null,
@@ -2311,10 +2361,7 @@ function untrustedAssistantSha256(
   });
 }
 
-function targetLineageState(
-  context: PiStreamContext,
-  targetModelId: string,
-): TargetLineageState {
+function targetLineageState(context: PiStreamContext, targetModelId: string): TargetLineageState {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const message = context.messages[index];
     if (message?.role !== 'assistant') continue;
@@ -2821,6 +2868,161 @@ function createOutput(model: PiModelLike): AssistantMessageLike {
   };
 }
 
+// Connection retries are deliberately narrower than Pi's outer agent retry policy.
+// In particular, a response (including a signature rejection) or partial SSE stream
+// must never enter this loop. Unknown/TLS/configuration errors also fail immediately.
+const TRANSIENT_CONNECTION_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+]);
+
+function transientConnectionCode(
+  error: unknown,
+  seen = new Set<object>(),
+  depth = 0,
+): string | undefined {
+  if (!(error instanceof Error) || depth > 8 || seen.size >= 32 || seen.has(error))
+    return undefined;
+  seen.add(error);
+  if (error.name === 'AbortError') return undefined;
+  // Happy-Eyeballs connection attempts may reject as an AggregateError. Every
+  // member must be known transient; one certificate/config error forbids replay.
+  if (error instanceof AggregateError) {
+    const errors: unknown = error.errors;
+    if (!Array.isArray(errors) || errors.length === 0 || errors.length > 16) return undefined;
+    const codes: string[] = [];
+    for (const member of errors) {
+      const code = transientConnectionCode(member, seen, depth + 1);
+      if (code === undefined) return undefined;
+      codes.push(code);
+    }
+    return [...new Set(codes)].sort().join(',');
+  }
+  const code: unknown = Reflect.get(error, 'code');
+  if (code !== undefined) {
+    return typeof code === 'string' && TRANSIENT_CONNECTION_CODES.has(code) ? code : undefined;
+  }
+  return transientConnectionCode(error.cause, seen, depth + 1);
+}
+
+function connectionRetryLimit(value: number | undefined): number {
+  if (value === undefined) return 2;
+  if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
+    throw new Error(
+      'Anthropic attribution options.maxRetries must be a non-negative safe integer below Number.MAX_SAFE_INTEGER',
+    );
+  }
+  return value;
+}
+
+function connectionTimeout(value: number | undefined): number | undefined {
+  if (
+    value !== undefined &&
+    (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647)
+  ) {
+    throw new Error(
+      'Anthropic attribution options.timeoutMs must be an integer from 1 through 2147483647',
+    );
+  }
+  return value;
+}
+
+function waitForConnectionRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+async function fetchAnthropicResponse(
+  url: string,
+  requestInit: RequestInit,
+  maxRetries: number,
+  timeoutMs: number | undefined,
+  onRetry: (retry: number, code: string, delayMs: number) => void,
+): Promise<Response> {
+  const callerSignal = requestInit.signal ?? undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    callerSignal?.throwIfAborted();
+    const deadline = timeoutMs === undefined ? undefined : new AbortController();
+    // The caller retains cancellation of the returned response body after our
+    // per-attempt header timer is cleared. No manual abort bridge is detached.
+    const signal =
+      deadline === undefined
+        ? callerSignal
+        : callerSignal === undefined
+          ? deadline.signal
+          : AbortSignal.any([callerSignal, deadline.signal]);
+    const init = signal === undefined ? requestInit : { ...requestInit, signal };
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            deadline?.abort(
+              Object.assign(new Error(`Anthropic connection timed out after ${timeoutMs}ms`), {
+                code: 'ETIMEDOUT',
+              }),
+            );
+          }, timeoutMs);
+    let response: Response | undefined;
+    let retryCode: string | undefined;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      // Wait for fetch to settle after its actual abort before another attempt.
+      // Caller cancellation is terminal; a local header timeout may be retried.
+      callerSignal?.throwIfAborted();
+      const failure: unknown = deadline?.signal.aborted ? deadline.signal.reason : error;
+      retryCode = transientConnectionCode(failure);
+      if (retryCode === undefined) throw failure;
+      if (attempt >= maxRetries) {
+        throw new Error(
+          `Anthropic connection error after ${attempt + 1} attempt(s): ${retryCode}`,
+          { cause: failure },
+        );
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (retryCode !== undefined) {
+      const delayMs = Math.floor(
+        Math.min(500 * 2 ** Math.min(attempt, 4), 8_000) * (1 - Math.random() * 0.25),
+      );
+      onRetry(attempt + 1, retryCode, delayMs);
+      await waitForConnectionRetry(delayMs, callerSignal);
+      continue;
+    }
+    if (response === undefined) throw new Error('Anthropic fetch returned no response');
+    // A late response after cancellation is disposed, never re-entered into retry.
+    if (signal?.aborted) {
+      try {
+        await response.body?.cancel();
+      } finally {
+        signal.throwIfAborted();
+      }
+    }
+    return response;
+  }
+}
+
 type HostForwardingModel = PiModelLike & HostModel<'anthropic-messages'>;
 type HostForwardingContext = PiStreamContext & HostContext;
 type HostForwardingOptions = PiSimpleStreamOptions & HostSimpleStreamOptions;
@@ -2846,7 +3048,13 @@ function forwardToBuiltInAnthropic(
   // The host owns both its legacy Context or normalized TranscriptContext input and
   // the complete stream/event/result shape. These intersections only mark that
   // host-owned boundary; no request, callback, event, or result is reconstructed.
-  const delegated = hostAnthropicMessagesApi().streamSimple(
+  const hostApi = hostAnthropicMessagesApi();
+  if (typeof hostApi?.streamSimple !== 'function') {
+    throw new Error(
+      'pi_anthropic_attribution_host_adapter_invalid: the host adapter must provide streamSimple',
+    );
+  }
+  const delegated = hostApi.streamSimple(
     model as HostForwardingModel,
     context as HostForwardingContext,
     options as HostForwardingOptions | undefined,
@@ -2869,6 +3077,9 @@ export function streamAnthropicViaBetaMessages(
   void (async () => {
     let preparedLineage: PreparedAnthropicLineage | undefined;
     try {
+      options?.signal?.throwIfAborted();
+      const maxRetries = connectionRetryLimit(options?.maxRetries);
+      const timeoutMs = connectionTimeout(options?.timeoutMs);
       const apiKey = options?.apiKey;
       if (typeof apiKey !== 'string' || apiKey.length === 0) {
         throw new Error(
@@ -2881,13 +3092,22 @@ export function streamAnthropicViaBetaMessages(
         );
       }
 
-      const sessionId = requireSessionId(options?.sessionId, 'options.sessionId');
+      // Pi's routing id is optional for extension-owned one-off requests (#33/#34).
+      // Allocate once per request, never from the active parent's cache lane. A
+      // supplied malformed id still fails, and transport retries reuse this id.
+      const sessionId =
+        options?.sessionId === undefined
+          ? randomUUID()
+          : requireSessionId(options.sessionId, 'options.sessionId');
       const account = requireAttributionAccount(
         dependencies.loadAccount?.() ?? loadClaudeAttributionAccount(undefined, options?.env),
       );
       const url = resolveAnthropicBetaMessagesUrl(model);
       const policy = resolveClaudeCodeModelPolicy(model);
-      const requestContext = resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers);
+      const requestContext = resolveAnthropicTranscript(
+        context,
+        dependencies.hostTranscriptHelpers,
+      );
       const request = buildAnthropicRequest(model, requestContext, options);
       let params = request.params;
       const billingSystemText = buildClaudeCodeBillingSystemText(
@@ -2948,25 +3168,13 @@ export function streamAnthropicViaBetaMessages(
         payload: params,
         signatureEpoch: request.signatureEpoch,
       });
-      if (
-        preparedLineage.details.previous_message_id !== provisionalLineage.previous_message_id ||
-        preparedLineage.details.conversation_static_sha256 !==
-          provisionalLineage.conversation_static_sha256 ||
-        preparedLineage.details.request_message_count !==
-          provisionalLineage.request_message_count ||
-        preparedLineage.details.request_messages_sha256 !==
-          provisionalLineage.request_messages_sha256 ||
-        preparedLineage.details.cache_profile_sha256 !== provisionalLineage.cache_profile_sha256 ||
-        preparedLineage.details.cache_retention !== provisionalLineage.cache_retention ||
-        preparedLineage.details.compaction_boundary_sha256 !==
-          provisionalLineage.compaction_boundary_sha256 ||
-        preparedLineage.details.signature_epoch_sha256 !==
-          provisionalLineage.signature_epoch_sha256 ||
-        preparedLineage.details.signature_epoch_inherits_prior !==
-          provisionalLineage.signature_epoch_inherits_prior
-      ) {
+      const middlewareChangedLineageFields = changedMiddlewareProtectedLineageFields(
+        provisionalLineage,
+        preparedLineage.details,
+      );
+      if (middlewareChangedLineageFields.length > 0) {
         throw new Error(
-          'Anthropic request/cache lineage changed during before_provider_request transforms',
+          `Anthropic request/cache lineage changed during before_provider_request transforms (${middlewareChangedLineageFields.join(', ')}); payload middleware must not alter the attributed system prompt, tools, messages, cache retention, or compaction boundary`,
         );
       }
       if (policy.supportsCacheDiagnostics) {
@@ -2989,7 +3197,31 @@ export function streamAnthropicViaBetaMessages(
         redirect: 'error',
       };
       if (options?.signal) requestInit.signal = options.signal;
-      const response = await fetch(url, requestInit);
+      const retryDetails: JsonObject = {};
+      const response = await fetchAnthropicResponse(
+        url,
+        requestInit,
+        maxRetries,
+        timeoutMs,
+        (retry, code, delayMs) => {
+          if (retry === 1) {
+            output.diagnostics ??= [];
+            output.diagnostics.push({
+              type: 'anthropic-connection-retry',
+              timestamp: Date.now(),
+              details: retryDetails,
+            });
+          }
+          // One bounded diagnostic, not an unbounded per-attempt log. No request,
+          // account, credentials, or arbitrary exception text is copied into it.
+          Object.assign(retryDetails, {
+            retries_scheduled: retry,
+            retry_limit: maxRetries,
+            last_connection_code: code,
+            last_delay_ms: delayMs,
+          });
+        },
+      );
       await options?.onResponse?.(
         { status: response.status, headers: headersToRecord(response.headers) },
         model,
@@ -3354,10 +3586,12 @@ export default function spawnAnthropicAttribution(
       streamAnthropicViaBetaMessages(
         model,
         context,
-        {
-          ...(options ?? {}),
-          cacheRetention: resolveRegisteredCacheRetention(options, getSessionOverride()),
-        },
+        model.provider === 'anthropic'
+          ? {
+              ...(options ?? {}),
+              cacheRetention: resolveRegisteredCacheRetention(options, getSessionOverride()),
+            }
+          : options,
         dependencies,
       ),
   });

@@ -9,53 +9,46 @@ import type {
   ToolRenderResultOptions,
 } from '@earendil-works/pi-coding-agent';
 import { formatSize } from '@earendil-works/pi-coding-agent';
-import { type KeyId, Text } from '@earendil-works/pi-tui';
-import { type Static, Type } from 'typebox';
+import { Text, type KeyId } from '@earendil-works/pi-tui';
+import { Type, type Static } from 'typebox';
 import {
+  DEFAULT_LOG_BYTES,
+  MAX_LOG_BYTES,
+  deriveCompletionDeliveryGuidance,
+  deriveTaskNameFromCommand,
+  formatSnapshotList,
+  normalizeMaxBytes,
+  normalizeTaskName,
+  parseBgCommandArgs,
+  taskDisplayName,
+  truncateChars,
   type BgKillDetails,
   type BgLogsDetails,
   type BgRunDetails,
   type BgStatusDetails,
   type BgTask,
   type BgTaskSnapshot,
-  DEFAULT_LOG_BYTES,
-  deriveCompletionDeliveryGuidance,
-  deriveTaskNameFromCommand,
-  formatSnapshotList,
-  formatUpdateSegment,
-  isNewerVersion,
-  MAX_LOG_BYTES,
-  normalizeMaxBytes,
-  normalizeTaskName,
-  parseBgCommandArgs,
   type ReloadShellActivationClaimV1,
   type ReloadShellActivationLeaseV1,
   type ReloadShellIdentityV1,
-  ReloadSurvivalError,
-  rejectSurvivalForTaskKind,
   type StartAttestedPiTaskOptions,
   type StartTaskOptions,
-  taskDisplayName,
-  truncateChars,
+  ReloadSurvivalError,
+  rejectSurvivalForTaskKind,
 } from './core/common';
-import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config';
-import {
-  type BackgroundTaskExtensionService,
-  installBackgroundTaskExtensionApi,
-} from './core/extension-api';
-import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module';
-import { type BackgroundTaskContext, BackgroundTaskRegistry } from './core/registry';
+import { BackgroundTaskRegistry, type BackgroundTaskContext } from './core/registry';
 import {
   getProcessReloadShellOwnerV1,
   makeReloadShellIdentity,
 } from './core/reload-shell-owner';
 import { createShellPolicyGuidanceHandler, initializeShellPolicy } from './core/shell-policy';
 import {
-  type FetchLatestVersionOptions,
-  fetchLatestVersion,
-  readPackageInfo,
-} from './core/update-check';
+  installBackgroundTaskExtensionApi,
+  type BackgroundTaskExtensionService,
+} from './core/extension-api';
 import type { BackgroundTaskForUi, TaskManagerResult } from './ui/background-tasks-manager';
+import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config';
+import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module';
 
 /**
  * Project-local Pi background task manager.
@@ -70,13 +63,6 @@ import type { BackgroundTaskForUi, TaskManagerResult } from './ui/background-tas
 
 const STATUS_INTERVAL_MS = 1000;
 const COMMAND_PREVIEW_CHARS = 90;
-const GIT_INSTALL_TARGET = 'git:github.com/ismailsaleekh/pi-background-tasks';
-
-const packageInfo = readPackageInfo(new URL('../../package.json', import.meta.url), (error) => {
-  console.error(`[background-tasks] failed to read package version: ${error.message}`);
-});
-const PACKAGE_NAME = packageInfo.name ?? 'pi-background-tasks';
-const PACKAGE_VERSION = packageInfo.version;
 const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
 const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
 const ANSI_RESET = '\x1b[0m';
@@ -233,8 +219,6 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
   let pendingActivationClaim: ReloadShellActivationClaimV1 | undefined;
   let dockOpen = false;
   let statusInterval: NodeJS.Timeout | undefined;
-  let latestKnownVersion: string | undefined;
-  let updateCheckStarted = false;
   let disposed = false;
   let shutdownCleanupStarted = false;
   let reloadHandoffFailed = false;
@@ -302,14 +286,6 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
           reloadHandoffFailed = true;
           handoffError = error;
         }
-      } else if (activationLease !== undefined) {
-        // A quit/switch ends the session, so the process-global reload owner
-        // must drop this session synchronously: the next activation can start
-        // before this handler's async cleanup runs.
-        const lease = activationLease;
-        activationLease = undefined;
-        activationIdentity = undefined;
-        registry.releaseReloadActivation(lease);
       }
       registry.setShuttingDown(true);
       eventService.close();
@@ -336,8 +312,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
     taskManagerLoader.close('session shutdown');
   });
   pi.on('session_shutdown', (event) => {
-    // ponytail: tests fire session_shutdown with no event; real Pi always sends a reason
-    shutdownReason = event?.reason ?? 'shutdown';
+    shutdownReason = event.reason;
     activationCloseFence.close();
   });
 
@@ -351,25 +326,22 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       realpathSync(ctx.cwd),
     );
     if (activationLease !== undefined && registry.hasCurrentReloadLease()) {
-      const sameIdentity =
-        activationIdentity?.hostPid === identity.hostPid &&
-        activationIdentity.sessionId === identity.sessionId &&
-        activationIdentity.cwdRealpath === identity.cwdRealpath;
-      if (sameIdentity) {
-        currentCtx = ctx;
-        currentRegistryCtx = nextRegistryCtx;
-        return;
+      if (
+        activationIdentity?.hostPid !== identity.hostPid ||
+        activationIdentity.sessionId !== identity.sessionId ||
+        activationIdentity.cwdRealpath !== identity.cwdRealpath
+      ) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_activation_conflict',
+          'a repeated session_start changed the bound reload owner identity without shutdown',
+        );
       }
-      // pi reuses this factory for /new, /resume and /fork: a new session id
-      // arrives without a shutdown. Drop the old lease and activate the new one.
-      // ponytail: a live surviveReload task is not carried across the switch
-      const staleLease = activationLease;
-      activationLease = undefined;
-      activationIdentity = undefined;
-      registry.releaseReloadActivation(staleLease);
+      currentCtx = ctx;
+      currentRegistryCtx = nextRegistryCtx;
+      return;
     }
     const activationNonce = randomBytes(16).toString('hex');
-    const claim = reloadShellOwner.beginActivation(identity, event?.reason ?? 'startup', activationNonce);
+    const claim = reloadShellOwner.beginActivation(identity, event.reason, activationNonce);
     pendingActivationClaim = claim;
     try {
       const adapter = await registry.stageReloadActivation(claim);
@@ -496,13 +468,9 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
         (task) => task.status === 'completed' && !seenTaskIds.has(task.id),
       );
       const unseenFinishedCount = unseenFailed.length + unseenStopped.length + unseenDone.length;
-      const updateSegment = formatUpdateSegment(latestKnownVersion, PACKAGE_VERSION ?? '');
       ctx.ui.setWidget('background-tasks', undefined);
       if (running.length === 0 && unseenFinishedCount === 0) {
-        ctx.ui.setStatus(
-          'background-tasks',
-          updateSegment ? lightBlue(` bg ${updateSegment} `) : undefined,
-        );
+        ctx.ui.setStatus('background-tasks', undefined);
         return;
       }
 
@@ -514,9 +482,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       const entryHint = dockOpen
         ? 'focused'
         : `${dockEntryHint}${unseenFinishedCount > 0 ? ' · /bg-clear' : ''}`;
-      const segments = [...parts, entryHint];
-      if (updateSegment) segments.push(updateSegment);
-      const label = ` bg ${segments.join(' · ')} `;
+      const label = ` bg ${[...parts, entryHint].join(' · ')} `;
       ctx.ui.setStatus('background-tasks', lightBlue(label));
     } catch (error) {
       console.error(
@@ -661,29 +627,6 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
     },
   );
 
-  async function scheduleUpdateCheck(ctx: ExtensionContext): Promise<void> {
-    if (disposed || updateCheckStarted) return;
-    updateCheckStarted = true;
-    const env = process.env;
-    if (env['PI_BG_DISABLE_UPDATE_CHECK'] === '1') return;
-    if (env['PI_OFFLINE'] === '1') return;
-    if (!PACKAGE_VERSION) return;
-    const options: FetchLatestVersionOptions = {
-      packageName: PACKAGE_NAME,
-      onError: (error) => {
-        console.error(`[background-tasks] update check skipped: ${error.message}`);
-      },
-    };
-    const registryUrl = env['PI_BG_REGISTRY_URL'];
-    if (registryUrl) options.registryUrl = registryUrl;
-    const latest = await fetchLatestVersion(options);
-    if (disposed) return;
-    if (latest && isNewerVersion(latest, PACKAGE_VERSION)) {
-      latestKnownVersion = latest;
-      updateUi(ctx);
-    }
-  }
-
   pi.on('session_start', async (_event, ctx) => {
     // Pi replacement binds a fresh extension instance. Never revive this old
     // activation if a late lifecycle dispatch reaches it after shutdown.
@@ -706,13 +649,10 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       return;
     }
     statusInterval = nextStatusInterval;
-    // One-shot, non-blocking: never awaited on the session-start path or the status tick.
-    if (!disposed) void scheduleUpdateCheck(ctx);
   });
 
   pi.on('session_shutdown', async (event, ctx) => {
-    const reason = event?.reason ?? 'shutdown';
-    beginSessionShutdown(reason);
+    beginSessionShutdown(event.reason);
     if (shutdownCleanupStarted) return;
     shutdownCleanupStarted = true;
     try {
@@ -730,7 +670,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
             await registry.stopTask(
               task,
               'shutdown',
-              `Killed during Pi session shutdown (${reason})`,
+              `Killed during Pi session shutdown (${event.reason})`,
             );
           } catch (error) {
             const message = `${task.id}: ${error instanceof Error ? error.message : String(error)}`;
@@ -744,7 +684,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       }
     } finally {
       eventService.close();
-      if ((reason !== 'reload' || reloadHandoffFailed) && activationLease !== undefined) {
+      if ((event.reason !== 'reload' || reloadHandoffFailed) && activationLease !== undefined) {
         try {
           await registry.waitForReloadHostSettlement();
         } catch (error) {
@@ -799,29 +739,6 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
     description: 'Clear finished background task footer notices',
     handler: (_args, ctx) => {
       notifyClearFinishedNotices(ctx);
-      return Promise.resolve();
-    },
-  });
-
-  pi.registerCommand('bg-update', {
-    description: 'Show how to update pi-background-tasks to the latest published version',
-    handler: (_args, ctx) => {
-      const current = PACKAGE_VERSION ?? 'unknown';
-      const latest = latestKnownVersion;
-      const pinnedNpm = latest ? `${PACKAGE_NAME}@${latest}` : `${PACKAGE_NAME}@<version>`;
-      const lines = [
-        latest
-          ? `pi-background-tasks ${current} is installed; ${latest} is the latest published version.`
-          : `pi-background-tasks ${current} is installed.`,
-        'Update from npm:',
-        `  pi install npm:${PACKAGE_NAME}@latest`,
-        `  pi install npm:${pinnedNpm}`,
-        'Git releases are independent of npm versions; use main only when you want current repository state:',
-        `  pi install ${GIT_INSTALL_TARGET}@main`,
-        `For a pinned git release, first verify the tag exists, then use ${GIT_INSTALL_TARGET}@<existing-tag>.`,
-        'This command only prints update instructions; it does not install or self-update.',
-      ];
-      ctx.ui.notify(lines.join('\n'), 'info');
       return Promise.resolve();
     },
   });
@@ -956,7 +873,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
         );
       }
       if (
-        Object.hasOwn(input, 'surviveReload') &&
+        Object.prototype.hasOwnProperty.call(input, 'surviveReload') &&
         typeof input.surviveReload !== 'boolean'
       ) {
         throw new ReloadSurvivalError(

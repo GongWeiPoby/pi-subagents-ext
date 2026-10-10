@@ -6,28 +6,28 @@ import { fileURLToPath } from 'node:url';
 import type { ParentContextSource } from '../context/parent-snapshot';
 import {
   assertDelegateAdmission,
-  type DelegateAdmissionPlanV1,
-  type DelegateLimitOverrides,
   planDelegateAdmission,
   resolveDelegateLimits,
+  type DelegateAdmissionPlanV1,
+  type DelegateLimitOverrides,
 } from './budget';
-import {
-  DELEGATE_REQUIRED_HOOK_GUARANTEES,
-  type DelegateHookContractEvidence,
-  evaluateDelegateHookContract,
-  parseDelegateHookContractEvidence,
-} from './hook-contract';
-import { type BuiltDelegateSeed, buildDelegateSeed } from './seed';
+import { buildDelegateSeed, type BuiltDelegateSeed } from './seed';
 import {
   DELEGATE_CAPABILITIES,
   DELEGATE_TOOL_NAME,
-  type DelegateCapability,
   DelegateError,
+  type DelegateCapability,
   type DelegateExtensionMode,
   type DelegateLimits,
   type DelegatePinnedRoute,
   type DelegateRoute,
 } from './types';
+import {
+  DELEGATE_REQUIRED_HOOK_GUARANTEES,
+  evaluateDelegateHookContract,
+  parseDelegateHookContractEvidence,
+  type DelegateHookContractEvidence,
+} from './hook-contract';
 
 /**
  * Delegate launch preflight and argv construction.

@@ -1,28 +1,28 @@
 import { existsSync } from 'node:fs';
 import { readFile, rmdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path';
 import { canonicalJson } from '../canonical-json';
-import type { DelegateTaskFacts, DelegateTaskOutcome } from '../common';
 import { replaceFileDurable } from '../durable-fs';
+import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path';
+import { dirname, join } from 'node:path';
 import { DelegateArtifactStore, discardDelegateArtifactRoot } from './artifacts';
-import { DELEGATE_INLINE_ANSWER_BYTES } from './budget';
 import {
   buildDelegateChildArgv,
-  type DelegatePreflightInput,
-  type DelegatePreflightResult,
   delegateChildEnv,
   ensureDelegateChildSessionDir,
   preflightDelegateLaunch,
   resolveDelegateChildExtensionPath,
+  type DelegatePreflightInput,
+  type DelegatePreflightResult,
 } from './launch';
-import { type VerifiedDelegateResult, verifyDelegateResultPackage } from './result-package';
+import { DELEGATE_INLINE_ANSWER_BYTES } from './budget';
+import { verifyDelegateResultPackage, type VerifiedDelegateResult } from './result-package';
 import {
-  type DelegateAutoDeliverMode,
   DelegateError,
+  type DelegateAutoDeliverMode,
   type DelegateExtensionMode,
   type DelegateResultPackageV1,
 } from './types';
+import type { DelegateTaskFacts, DelegateTaskOutcome } from '../common';
 
 /**
  * Delegate launch preparation and terminal evaluation.

@@ -7,7 +7,20 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Container, Markdown, Text } from '@earendil-works/pi-tui';
-import { type TSchema, Type } from 'typebox';
+import { Type, type TSchema } from 'typebox';
+import type {
+  BuildFusionCanonicalInputOptions,
+  BuiltFusionCanonicalInput,
+} from './core/fusion/context';
+import {
+  FUSION_INVESTIGATE,
+  FUSION_REASON,
+  FUSION_RESEARCH,
+  FUSION_VALIDATE,
+  type FusionWorkflowProfile,
+} from './core/fusion/workflows';
+import type { BuiltFusionCleanTaskCanonicalInput } from './core/fusion/clean-context';
+import { canonicalizeFusionPublicUrl } from './core/fusion/source-policy';
 import { canonicalJson } from './core/canonical-json';
 import type {
   BgTask,
@@ -16,34 +29,21 @@ import type {
   JsonObject,
   StartManagedTaskOptions,
 } from './core/common';
-import type { BuiltFusionCleanTaskCanonicalInput } from './core/fusion/clean-context';
-import type {
-  BuildFusionCanonicalInputOptions,
-  BuiltFusionCanonicalInput,
-} from './core/fusion/context';
-import { CURRENT_MODEL_SELECTION } from './core/fusion/facade-contract';
 import type { FusionOrchestrator } from './core/fusion/orchestrator';
-import { canonicalizeFusionPublicUrl } from './core/fusion/source-policy';
 import {
-  cloneFusionUsage,
   FUSION_LEGACY_RESULT_SCHEMA_VERSION,
   FUSION_RESULT_SCHEMA_VERSION,
   FusionError,
+  cloneFusionUsage,
   type FusionModelConfigV1,
   type FusionModelSelection,
   type FusionProgressEvent,
   type FusionResultDetails,
   type FusionRunResult,
 } from './core/fusion/types';
-import {
-  FUSION_INVESTIGATE,
-  FUSION_REASON,
-  FUSION_RESEARCH,
-  FUSION_VALIDATE,
-  type FusionWorkflowProfile,
-} from './core/fusion/workflows';
-import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module';
 import type { FusionModelChoice, FusionModelSelectorResult } from './ui/fusion-model-selector';
+import { CURRENT_MODEL_SELECTION } from './core/fusion/facade-contract';
+import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module';
 
 const FUSION_RESULT_MESSAGE_TYPE = 'fusion-result';
 const FUSION_PROGRESS_SCHEMA_VERSION = 'pi-background-tasks.fusion-progress.v1';
@@ -507,7 +507,7 @@ function assertKeys(
   if (unknown.length > 0) {
     throw new Error(`${label} contains unsupported key(s): ${unknown.join(', ')}`);
   }
-  const missing = required.filter((key) => !Object.hasOwn(record, key));
+  const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(record, key));
   if (missing.length > 0)
     throw new Error(`${label} missing required key(s): ${missing.join(', ')}`);
 }
@@ -536,7 +536,7 @@ function normalizeStringArray(
 }
 
 function normalizeOptionalStringArray(record: JsonObject, key: string, label: string): string[] {
-  if (!Object.hasOwn(record, key) || record[key] === undefined) return [];
+  if (!Object.prototype.hasOwnProperty.call(record, key) || record[key] === undefined) return [];
   return normalizeStringArray(record[key], label);
 }
 
@@ -635,11 +635,11 @@ function normalizeVerification(value: unknown): FusionVerificationRequest {
   if (status !== 'provided' && status !== 'not_run') {
     throw new Error("fusion_validate.verification.status must be 'provided' or 'not_run'");
   }
-  const evidence = Object.hasOwn(value, 'evidence')
+  const evidence = Object.prototype.hasOwnProperty.call(value, 'evidence')
     ? normalizeEvidenceArray(value['evidence'])
     : [];
   const hasReason =
-    Object.hasOwn(value, 'reason') && value['reason'] !== undefined;
+    Object.prototype.hasOwnProperty.call(value, 'reason') && value['reason'] !== undefined;
   const reason = hasReason
     ? normalizeNonBlankString(value['reason'], 'fusion_validate.verification.reason')
     : undefined;
@@ -692,7 +692,7 @@ function normalizeEvidenceArray(value: unknown): FusionValidationEvidenceRequest
 
 export function prepareFusionValidateArguments(args: unknown): FusionValidateRequest {
   const record = requireArgsObject(args, FUSION_VALIDATE_TOOL_NAME);
-  if (Object.hasOwn(record, 'prompt')) {
+  if (Object.prototype.hasOwnProperty.call(record, 'prompt')) {
     throw new Error(
       'fusion_validate no longer accepts {prompt}. Migrate to fusion_validate({objective, background, changeSummary, scope, acceptanceCriteria, verification, knownLimitations?, exclusions?}).',
     );

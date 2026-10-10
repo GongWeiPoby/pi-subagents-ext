@@ -1,5 +1,5 @@
 import type { Theme } from '@earendil-works/pi-coding-agent';
-import { type Component, Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { Key, matchesKey, truncateToWidth, type Component } from '@earendil-works/pi-tui';
 import { CURRENT_MODEL_SELECTION, defaultFusionModelConfig } from '../core/fusion/config';
 import type { FusionModelConfigV1, FusionModelSelection } from '../core/fusion/types';
 

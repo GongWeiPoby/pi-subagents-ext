@@ -1,5 +1,5 @@
-import type { Stats } from 'node:fs';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { createRequire } from 'node:module';
 import {
   basename,

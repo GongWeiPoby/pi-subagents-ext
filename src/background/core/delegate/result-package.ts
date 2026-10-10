@@ -3,8 +3,8 @@ import { canonicalJson } from '../canonical-json';
 import {
   DELEGATE_RECEIPT_SCHEMA_VERSION,
   DELEGATE_RESULT_PACKAGE_SCHEMA_VERSION,
-  type DelegateAnswerBlock,
   DelegateError,
+  type DelegateAnswerBlock,
   type DelegateResultPackageV1,
   type DelegateRouteAttestation,
   type DelegateSpillReceipt,

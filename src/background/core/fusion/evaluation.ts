@@ -1,13 +1,13 @@
-import { type JsonObject, parseJsonText } from '../common';
+import { parseJsonText, type JsonObject } from '../common';
 import {
-  type CandidateAssessment,
   FUSION_CANDIDATE_IDS,
   FUSION_EVALUATION_SCHEMA_VERSION,
   FUSION_VALIDATE_CANDIDATE_SCHEMA_VERSION,
+  FusionError,
+  type CandidateAssessment,
   type FusionCandidateId,
   type FusionConflict,
   type FusionConflictPosition,
-  FusionError,
   type FusionEvaluationV1,
   type FusionSynthesisContribution,
   type FusionSynthesisPlan,
@@ -45,7 +45,7 @@ function closed(
     if (!expected.has(key)) errors.push(`${label} contains unknown key ${key}`);
   }
   for (const key of keys) {
-    if (!Object.hasOwn(record, key))
+    if (!Object.prototype.hasOwnProperty.call(record, key))
       errors.push(`${label} is missing key ${key}`);
   }
 }
@@ -389,7 +389,7 @@ function parseValidationAccounting(value: unknown, label: string, errors: string
         if (!allowedDecisionKeys.has(key)) errors.push(`${itemLabel} contains unknown key ${key}`);
       }
       for (const key of ['source_id', 'disposition', 'rationale'] as const) {
-        if (!Object.hasOwn(item, key)) errors.push(`${itemLabel} is missing key ${key}`);
+        if (!Object.prototype.hasOwnProperty.call(item, key)) errors.push(`${itemLabel} is missing key ${key}`);
       }
       const sourceId = nonBlankString(item['source_id'], `${itemLabel}.source_id`, errors);
       const disposition = nonBlankString(item['disposition'], `${itemLabel}.disposition`, errors);
@@ -416,7 +416,7 @@ export function validateFusionEvaluation(value: unknown): FusionEvaluationValida
     if (!evaluationAllowed.has(key)) errors.push(`evaluation contains unknown key ${key}`);
   }
   for (const key of ['schema_version', 'candidate_assessments', 'agreements', 'conflicts', 'synthesis_plan'] as const) {
-    if (!Object.hasOwn(value, key)) errors.push(`evaluation is missing key ${key}`);
+    if (!Object.prototype.hasOwnProperty.call(value, key)) errors.push(`evaluation is missing key ${key}`);
   }
   if (value['schema_version'] !== FUSION_EVALUATION_SCHEMA_VERSION) {
     errors.push('evaluation.schema_version mismatch');
@@ -429,7 +429,7 @@ export function validateFusionEvaluation(value: unknown): FusionEvaluationValida
   const agreements = stringList(value['agreements'], 'evaluation.agreements', errors);
   const conflicts = parseConflictList(value['conflicts'], 'evaluation.conflicts', errors);
   const plan = parseSynthesisPlan(value['synthesis_plan'], 'evaluation.synthesis_plan', errors);
-  const validationAccounting = Object.hasOwn(value, 'validation_accounting')
+  const validationAccounting = Object.prototype.hasOwnProperty.call(value, 'validation_accounting')
     ? parseValidationAccounting(value['validation_accounting'], 'evaluation.validation_accounting', errors)
     : undefined;
   if (

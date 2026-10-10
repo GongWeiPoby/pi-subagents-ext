@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../canonical-json';
-import { type DeclaredFusionSourceInput, normalizeFusionDeclaredSources } from './source-policy';
+import { normalizeFusionDeclaredSources, type DeclaredFusionSourceInput } from './source-policy';
 import {
   FUSION_INPUT_SCHEMA_VERSION,
+  FusionError,
   type FusionCanonicalRequestV3,
   type FusionCleanTaskCanonicalInputV5,
   type FusionDeclaredSourceV1,
-  FusionError,
   type FusionSource,
   type FusionWorkflowId,
 } from './types';

@@ -1,29 +1,30 @@
 import { createHash } from 'node:crypto';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { mkdirSync, openSync, closeSync, fsyncSync, renameSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import type { Usage } from '@earendil-works/pi-ai';
+import { Type, type Static } from 'typebox';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { type Static, Type } from 'typebox';
-import { utf8ByteClassBreakdown } from './core/context/token-budget';
+import type { Usage } from '@earendil-works/pi-ai';
 import {
-  DELEGATE_FINALIZATION_INPUT_RESERVE_TOKENS,
-  DELEGATE_FINALIZATION_TRIGGER_TOKENS,
-  evaluateDelegateRuntimeBudget,
-} from './core/delegate/budget';
-import {
-  assertWellFormedUtf8,
-  buildDelegateResultPackage,
-  serializeDelegateResultPackage,
-} from './core/delegate/result-package';
-import { verifyDelegateSeedBytes } from './core/delegate/seed';
-import {
-  DELEGATE_CAPABILITIES,
   DELEGATE_RECEIPT_SCHEMA_VERSION,
+  DELEGATE_CAPABILITIES,
   type DelegateRouteAttestation,
   type DelegateSeedV1,
   type DelegateSpillReceipt,
   type DelegateUsageReport,
 } from './core/delegate/types';
+import { verifyDelegateSeedBytes } from './core/delegate/seed';
+import {
+  DELEGATE_FINALIZATION_INPUT_RESERVE_TOKENS,
+  DELEGATE_FINALIZATION_TRIGGER_TOKENS,
+  evaluateDelegateRuntimeBudget,
+} from './core/delegate/budget';
+import { utf8ByteClassBreakdown } from './core/context/token-budget';
+import {
+  assertWellFormedUtf8,
+  buildDelegateResultPackage,
+  serializeDelegateResultPackage,
+} from './core/delegate/result-package';
 
 /**
  * Package-owned delegate child extension.

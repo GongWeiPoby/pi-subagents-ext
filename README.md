@@ -763,7 +763,6 @@ Send a message to a running agent. Pi agents receive mid-run steering after the 
 | `/bg` | Start a tracked background shell command: `/bg [--survive-reload] [--agent] [--name "Task name"] <command>` |
 | `/bg-tasks` | Open the background task manager dock. Takes the place of pi-background-tasks' `/tasks`, which would collide with the structured-task command above |
 | `/bg-clear` | Clear finished background task footer notices |
-| `/bg-update` | Print update instructions for the bundled background-tasks code |
 | `/jobs` | List running and recent background tasks |
 | `/logs` | Show bounded output from a background task: `/logs <id> [maxBytes]` |
 | `/kill` | Stop a running background task: `/kill <id>` |

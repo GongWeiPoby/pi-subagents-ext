@@ -5,35 +5,31 @@ import { canonicalJson, sha256Buffer } from '../canonical-json';
 import { sanitizePathSegment } from '../common';
 import { replaceFileDurable } from '../durable-fs';
 import {
-  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
-  fusionJsonRenderedTextBytes,
-} from './output-contract';
-import {
-  cloneFusionUsage,
   EMPTY_FUSION_USAGE,
   FUSION_COMMITTED_RESULT_SCHEMA_VERSION,
   FUSION_FAILURE_SUMMARY_SCHEMA_VERSION,
   FUSION_MANIFEST_SCHEMA_VERSION,
   FUSION_VALIDATE_CANDIDATE_CONTRACT_EVENT_SCHEMA_VERSION,
+  FusionError,
+  cloneFusionUsage,
   type FusionArtifactManifest,
   type FusionArtifactRef,
+  type FusionFailureArtifactClassification,
+  type FusionFailureAttemptMetadata,
+  type FusionFailureEvidenceArtifact,
+  type FusionFailureSummaryV1,
+  type FusionRunProgress,
   type FusionAttemptArtifactRecord,
   type FusionBudgetPlanV1,
   type FusionCalibrationViolation,
   type FusionCandidateId,
   type FusionCandidateOutputRecovery,
   type FusionCapability,
+  type FusionContextOmissionLedgerV2,
   type FusionChildRunResult,
   type FusionCommittedResultV1,
-  type FusionContextOmissionLedgerV2,
-  FusionError,
-  type FusionFailureArtifactClassification,
-  type FusionFailureAttemptMetadata,
-  type FusionFailureEvidenceArtifact,
-  type FusionFailureSummaryV1,
-  type FusionModelConfigV1,
   type FusionResultDetails,
-  type FusionRunProgress,
+  type FusionModelConfigV1,
   type FusionSource,
   type FusionStage,
   type FusionState,
@@ -42,7 +38,11 @@ import {
   type FusionWorkflowId,
   type ResolvedFusionModels,
 } from './types';
-import { type FusionWorkflowProfile, fusionWorkflowProfile } from './workflows';
+import { fusionWorkflowProfile, type FusionWorkflowProfile } from './workflows';
+import {
+  FUSION_CANDIDATE_MAX_OUTPUT_BYTES,
+  fusionJsonRenderedTextBytes,
+} from './output-contract';
 
 /**
  * Run ids are prefixed by workflow so an artifact directory is self-describing.

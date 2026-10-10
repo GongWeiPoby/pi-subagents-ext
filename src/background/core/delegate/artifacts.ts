@@ -5,12 +5,6 @@ import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { canonicalJson } from '../canonical-json';
 import { sanitizePathSegment } from '../common';
 import { replaceFileDurable, writeFileDurable } from '../durable-fs';
-import type { DelegateAdmissionPlanV1 } from './budget';
-import {
-  DELEGATE_RESULT_PACKAGE_FILENAME,
-  serializeDelegateResultPackage,
-} from './result-package';
-import type { DelegateResultPackageV1 } from './types';
 import {
   DELEGATE_MANIFEST_SCHEMA_VERSION,
   DELEGATE_RECEIPT_SCHEMA_VERSION,
@@ -20,6 +14,12 @@ import {
   type DelegatePinnedRoute,
   type DelegateSpillReceipt,
 } from './types';
+import {
+  DELEGATE_RESULT_PACKAGE_FILENAME,
+  serializeDelegateResultPackage,
+} from './result-package';
+import type { DelegateResultPackageV1 } from './types';
+import type { DelegateAdmissionPlanV1 } from './budget';
 
 /**
  * Durable delegate artifacts.
